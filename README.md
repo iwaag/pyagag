@@ -14,3 +14,6 @@ uv run pytest
 Consumers in the sibling workspace use editable uv path dependencies. Those
 lockfiles intentionally assume the sibling checkout keeps the same relative
 layout.
+
+See [docs/agent-config-v1.md](docs/agent-config-v1.md) for the language-neutral
+configuration, resolution, harness-result, and run-record contracts.

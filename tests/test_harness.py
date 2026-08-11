@@ -78,6 +78,22 @@ def test_fake_argv_and_environment_injection(tmp_path):
     assert result.output == "yes http://127.0.0.1:11434"
 
 
+def test_run_harness_replaces_stale_pwd_with_cwd(tmp_path, monkeypatch):
+    command = stub(tmp_path / "fake", '''
+        import os, sys
+        sys.stdin.read()
+        print(os.getcwd())
+        print(os.environ["PWD"])
+    ''')
+    target = tmp_path / "target"
+    target.mkdir()
+    monkeypatch.setenv("PWD", str(tmp_path / "stale-parent"))
+
+    result = run_harness(agent(command, "fake"), "prompt", cwd=target, timeout=5)
+
+    assert result.output.splitlines() == [str(target), str(target)]
+
+
 @pytest.mark.parametrize("kind", ["launch", "timeout", "empty", "is_error"])
 def test_failure_paths_are_normalized(tmp_path, kind):
     if kind == "launch":

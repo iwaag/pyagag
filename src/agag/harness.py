@@ -147,6 +147,11 @@ def run_harness(
     except ValueError as error:
         return HarnessResult(str(error), -1, {**meta, "outcome": "failed", "failure": str(error)})
     env = {**os.environ, **agent.environment, "NO_COLOR": "1"}
+    # Working-directory defense 1/2: subprocess(cwd=...) changes the real cwd
+    # but does not update an inherited PWD. Some harness CLIs trust PWD, so
+    # keep both views consistent. Consumers may also pass a CLI-native
+    # directory flag as a second, harness-specific defense.
+    env["PWD"] = str(cwd.resolve())
     if agent.provider_base_url:
         env[f"AGENT_PROVIDER_{agent.provider.upper()}_BASE_URL"] = agent.provider_base_url
     if opencode_config:

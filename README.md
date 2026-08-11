@@ -4,6 +4,11 @@
 `ag.agent-config.v1` configuration contract and the `ag.agent-run.v1` harness
 record convention. The import package is `agag`.
 
+`run_harness()` keeps the subprocess's real working directory and inherited
+`PWD` environment value aligned. This is the shared first defense against
+harnesses that trust `PWD`; consumers may deliberately add a CLI-native
+directory option as a second, tool-specific defense.
+
 ## Development
 
 ```sh

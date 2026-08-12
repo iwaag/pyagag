@@ -36,6 +36,9 @@ POLL_TIMEOUT_SECONDS = 90
 # How long the listener waits after a failed Zulip call before trying again.
 RETRY_SECONDS = 5
 
+# Zulip's resolved-topic marker: the topic is renamed to "✔ <topic>".
+RESOLVED_TOPIC_PREFIX = "✔ "
+
 
 class ZulipError(Exception):
     """A Zulip API call failed for a reason the caller cannot ignore."""
@@ -103,7 +106,7 @@ class ZulipClient:
         )
         url = f"{self.base_url}/api/v1/{path.lstrip('/')}"
         data = None
-        if method in ("POST", "DELETE"):
+        if method in ("POST", "PATCH", "DELETE"):
             data = query.encode("utf-8")
         elif query:
             url = f"{url}?{query}"
@@ -180,6 +183,69 @@ class ZulipClient:
         )
         return int(result["id"])
 
+    # --- channel/topic mechanics (zulip_channel_topic episode) --------------
+
+    def create_channel(
+        self,
+        name: str,
+        description: str,
+        principals: list[int],
+        announce: bool = False,
+    ) -> dict:
+        """Create (or join) a public channel and subscribe `principals` to it.
+
+        Zulip's subscribe call creates the channel when the name is new; a
+        default-role bot may do this on this realm (proven in Step 1). The
+        response says who was newly subscribed vs already subscribed.
+        """
+        return self.call(
+            "POST", "users/me/subscriptions",
+            {
+                "subscriptions": [{"name": name, "description": description}],
+                "principals": principals,
+                "announce": announce,
+            },
+        )
+
+    def send_to_channel(self, channel: str, topic: str, content: str) -> int:
+        result = self.call(
+            "POST", "messages",
+            {"type": "stream", "to": channel, "topic": topic, "content": content},
+        )
+        return int(result["id"])
+
+    def topic_history(self, channel: str, topic: str, num_before: int = 50) -> list[dict]:
+        """The topic's conversation, newest last, raw text — `dm_history`'s
+        channel analog."""
+        result = self.call(
+            "GET", "messages",
+            {
+                "anchor": "newest",
+                "num_before": str(num_before),
+                "num_after": "0",
+                "apply_markdown": "false",
+                "narrow": [
+                    {"operator": "channel", "operand": channel},
+                    {"operator": "topic", "operand": topic},
+                ],
+            },
+        )
+        return result.get("messages", [])
+
+    def resolve_topic(self, message_id: int, topic: str) -> None:
+        """Mark a topic resolved (Zulip's ✔ rename), moving every message in
+        it — other senders' included, which this realm permits for bots."""
+        if topic.startswith(RESOLVED_TOPIC_PREFIX):
+            return
+        self.call(
+            "PATCH", f"messages/{message_id}",
+            {
+                "topic": f"{RESOLVED_TOPIC_PREFIX}{topic}",
+                "propagate_mode": "change_all",
+                "send_notification_to_new_thread": False,
+            },
+        )
+
 
 def dm_partners(message: dict, self_id: int) -> list[int]:
     """Everyone in the DM except the bot, in Zulip's own order."""
@@ -194,19 +260,32 @@ def is_dm_for_us(message: dict, self_id: int) -> bool:
     return message.get("type") == "private" and message.get("sender_id") != self_id
 
 
+def is_channel_message_for_us(message: dict, self_id: int) -> bool:
+    """A channel (stream) message from somebody else, in any channel the bot
+    is subscribed to. Which channels *matter* is the caller's rule."""
+    return message.get("type") == "stream" and message.get("sender_id") != self_id
+
+
+def channel_name(message: dict) -> str:
+    """The channel a stream message was sent to ('' for DMs)."""
+    recipient = message.get("display_recipient")
+    return recipient if isinstance(recipient, str) else ""
+
+
 def log(message: str) -> None:
     """Default listener log line: UTC-stamped, unbuffered, on stderr."""
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     print(f"{stamp} {message}", file=sys.stderr, flush=True)
 
 
-def serve(client: ZulipClient, handler, log=log) -> None:
-    """Long-poll for DMs addressed to this bot and pass each to `handler`.
+def serve(client: ZulipClient, handler, log=log, accept=is_dm_for_us) -> None:
+    """Long-poll for messages addressed to this bot and pass each to `handler`.
 
-    `handler(client, message, self_id)` is called for every direct message
-    from somebody else; anything it raises is logged and the loop continues.
-    Deliberately dumb: no queue persistence, no delivery guarantees. A DM that
-    arrives while this is down is lost and the sender can resend.
+    `handler(client, message, self_id)` is called for every message `accept`
+    lets through (DMs only by default; pass a wider predicate to also see
+    channel messages); anything it raises is logged and the loop continues.
+    Deliberately dumb: no queue persistence, no delivery guarantees. A message
+    that arrives while this is down is lost and the sender can resend.
     """
     self_id: int | None = None
     queue_id: str | None = None
@@ -238,7 +317,7 @@ def serve(client: ZulipClient, handler, log=log) -> None:
             if event.get("type") != "message":
                 continue
             message = event.get("message") or {}
-            if not is_dm_for_us(message, self_id):
+            if not accept(message, self_id):
                 continue
             try:
                 handler(client, message, self_id)

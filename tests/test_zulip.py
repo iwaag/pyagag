@@ -7,11 +7,14 @@ per test and stops the loop by raising `_Stop`.
 import pytest
 
 from agag.zulip import (
+    RESOLVED_TOPIC_PREFIX,
     QueueExpired,
     ZulipClient,
     ZulipError,
     ZulipTimeout,
+    channel_name,
     dm_partners,
+    is_channel_message_for_us,
     is_dm_for_us,
     read_env,
     serve,
@@ -112,6 +115,70 @@ def test_is_dm_for_us_rejects_our_own_echo():
     assert is_dm_for_us({"type": "private", "sender_id": 99}, self_id=7)
     assert not is_dm_for_us({"type": "private", "sender_id": 7}, self_id=7)
     assert not is_dm_for_us({"type": "stream", "sender_id": 99}, self_id=7)
+
+
+def channel_event(event_id, sender_id, channel="create-x", topic="request", message_id=1):
+    return {
+        "id": event_id,
+        "type": "message",
+        "message": {
+            "id": message_id,
+            "type": "stream",
+            "sender_id": sender_id,
+            "content": "hello",
+            "display_recipient": channel,
+            "subject": topic,
+        },
+    }
+
+
+def test_is_channel_message_for_us_rejects_dms_and_our_own_echo():
+    stream = channel_event(1, sender_id=99)["message"]
+    assert is_channel_message_for_us(stream, self_id=7)
+    assert not is_channel_message_for_us(stream, self_id=99)
+    assert not is_channel_message_for_us({"type": "private", "sender_id": 99}, self_id=7)
+
+
+def test_channel_name_is_empty_for_dms():
+    assert channel_name(channel_event(1, sender_id=99)["message"]) == "create-x"
+    assert channel_name({"display_recipient": [{"id": 7}]}) == ""
+
+
+def test_serve_default_accept_still_ignores_channel_messages():
+    client = FakeClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[[channel_event(1, sender_id=99)], _Stop()],
+    )
+    assert run(client) == []
+
+
+def test_serve_with_wider_accept_sees_channel_messages():
+    client = FakeClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[
+            [channel_event(1, sender_id=99), message_event(2, sender_id=99)],
+            _Stop(),
+        ],
+    )
+    seen = []
+    with pytest.raises(_Stop):
+        serve(
+            client,
+            lambda c, m, s: seen.append(m["type"]),
+            log=lambda _: None,
+            accept=lambda m, s: m.get("sender_id") != s,
+        )
+    assert seen == ["stream", "private"]
+
+
+def test_resolve_topic_skips_an_already_resolved_topic():
+    calls = []
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+    client.call = lambda *a, **k: calls.append(a)
+    client.resolve_topic(1, f"{RESOLVED_TOPIC_PREFIX}request")
+    assert calls == []
+    client.resolve_topic(1, "request")
+    assert len(calls) == 1 and calls[0][0] == "PATCH"
 
 
 def test_serve_handles_a_dm_and_skips_its_own():

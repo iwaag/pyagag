@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import shlex
 import ssl
 import sys
@@ -38,6 +39,10 @@ RETRY_SECONDS = 5
 
 # Zulip's resolved-topic marker: the topic is renamed to "✔ <topic>".
 RESOLVED_TOPIC_PREFIX = "✔ "
+
+# Environment names used by the small outbound convenience function below.
+ZULIP_ENV_PATH = "ZULIP_ENV"
+ZULIP_CHANNEL = "ZULIP_CHANNEL"
 
 
 class ZulipError(Exception):
@@ -245,6 +250,71 @@ class ZulipClient:
                 "send_notification_to_new_thread": False,
             },
         )
+
+
+def _safe_topic_component(value: str, label: str) -> str:
+    """Keep a Zulip display name as one local path component."""
+    if not value or value in {".", ".."} or "/" in value or "\\" in value:
+        raise ValueError(f"{label} must be a non-empty path component")
+    return value
+
+
+def topic_dump(
+    channel: str,
+    topic: str,
+    chatlog: str,
+    *,
+    cwd: Path | None = None,
+) -> str:
+    """Write a numbered, local-only snapshot of one topic conversation.
+
+    This is deliberately non-idempotent: every trigger preserves a new
+    conversation version instead of replacing evidence from an earlier run.
+    """
+    channel = _safe_topic_component(channel, "channel")
+    topic = _safe_topic_component(topic, "topic")
+    root = (cwd or Path.cwd()) / ".local" / "topics" / channel / topic
+    root.mkdir(parents=True, exist_ok=True)
+    number = 1
+    while True:
+        version = root / str(number)
+        try:
+            version.mkdir()
+        except FileExistsError:
+            number += 1
+            continue
+        break
+    relative = Path(".local") / "topics" / channel / topic / str(number) / "chatlog.txt"
+    (version / "chatlog.txt").write_text(chatlog, encoding="utf-8")
+    return f"{relative.as_posix()} is the log of a chat you are participating in."
+
+
+def topic_write(
+    topic: str,
+    text: str,
+    *,
+    channel: str | None = None,
+    env_path: Path | None = None,
+    client: ZulipClient | None = None,
+) -> str:
+    """Write text to a topic and return the stable success marker.
+
+    `topic` and `text` are the user-facing arguments. The transport context is
+    supplied by an existing listener client, or by `ZULIP_CHANNEL` and
+    `ZULIP_ENV` when used as a standalone helper.
+    """
+    destination = channel or os.environ.get(ZULIP_CHANNEL)
+    if not destination:
+        raise ZulipError(f"channel is required (argument or {ZULIP_CHANNEL})")
+    if client is None:
+        credentials = env_path or (
+            Path(os.environ[ZULIP_ENV_PATH]) if os.environ.get(ZULIP_ENV_PATH) else None
+        )
+        if credentials is None:
+            raise ZulipError(f"credentials path is required (argument or {ZULIP_ENV_PATH})")
+        client = ZulipClient.from_env(credentials)
+    client.send_to_channel(destination, topic, text)
+    return "success"
 
 
 def dm_partners(message: dict, self_id: int) -> list[int]:

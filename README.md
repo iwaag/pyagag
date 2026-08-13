@@ -16,6 +16,11 @@ receive-side mechanics that are easy to get wrong — identity lookup inside the
 retry loop, unwrapped `RemoteDisconnected`, numeric user ids rather than email
 addresses — so a consumer only writes its handler.
 
+`topic_dump(channel, topic, chatlog)` preserves numbered topic snapshots under
+the caller's ignored `.local/topics/` tree. `topic_write(topic, text)` is the
+matching outbound convenience function; a listener can inject its client and
+channel, while standalone callers use `ZULIP_ENV` and `ZULIP_CHANNEL`.
+
 ## Development
 
 ```sh

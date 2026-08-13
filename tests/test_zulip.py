@@ -18,6 +18,8 @@ from agag.zulip import (
     is_dm_for_us,
     read_env,
     serve,
+    topic_dump,
+    topic_write,
 )
 
 
@@ -247,3 +249,50 @@ def test_serve_sleeps_and_reregisters_after_a_failed_poll(monkeypatch):
     )
     run(client)
     assert slept and client.registrations == 2
+
+
+def test_topic_dump_preserves_numbered_versions(tmp_path):
+    first = topic_dump("pj-demo", "mission-one", "first\n", cwd=tmp_path)
+    second = topic_dump("pj-demo", "mission-one", "second\n", cwd=tmp_path)
+
+    assert first == (
+        ".local/topics/pj-demo/mission-one/1/chatlog.txt is the log of a chat "
+        "you are participating in."
+    )
+    assert second.startswith(".local/topics/pj-demo/mission-one/2/chatlog.txt ")
+    assert (tmp_path / ".local/topics/pj-demo/mission-one/1/chatlog.txt").read_text() == "first\n"
+    assert (tmp_path / ".local/topics/pj-demo/mission-one/2/chatlog.txt").read_text() == "second\n"
+
+
+@pytest.mark.parametrize("channel,topic", [("../outside", "mission"), ("pj-demo", "a/b")])
+def test_topic_dump_rejects_path_traversal(tmp_path, channel, topic):
+    with pytest.raises(ValueError):
+        topic_dump(channel, topic, "content", cwd=tmp_path)
+
+
+def test_topic_write_uses_an_existing_client():
+    calls = []
+
+    class Client:
+        def send_to_channel(self, channel, topic, text):
+            calls.append((channel, topic, text))
+            return 42
+
+    assert topic_write("mission-one", "done", channel="pj-demo", client=Client()) == "success"
+    assert calls == [("pj-demo", "mission-one", "done")]
+
+
+def test_topic_write_builds_client_from_shared_environment(monkeypatch, tmp_path):
+    calls = []
+
+    class Client:
+        def send_to_channel(self, channel, topic, text):
+            calls.append((channel, topic, text))
+
+    credentials = tmp_path / "zulip.env"
+    monkeypatch.setenv("ZULIP_CHANNEL", "pj-demo")
+    monkeypatch.setenv("ZULIP_ENV", str(credentials))
+    monkeypatch.setattr(ZulipClient, "from_env", lambda path: Client())
+
+    assert topic_write("mission-one", "done") == "success"
+    assert calls == [("pj-demo", "mission-one", "done")]

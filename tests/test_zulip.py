@@ -183,6 +183,32 @@ def test_resolve_topic_skips_an_already_resolved_topic():
     assert len(calls) == 1 and calls[0][0] == "PATCH"
 
 
+def test_channel_discovery_and_subscription_wrappers():
+    calls = []
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+
+    def call(method, path, params=None, **kwargs):
+        calls.append((method, path, params))
+        if path == "streams":
+            return {"streams": [{"name": "pj-one"}]}
+        if path == "users/me/subscriptions" and method == "GET":
+            return {"subscriptions": [{"name": "general"}]}
+        return {"subscribed": {"pj-one": [7]}}
+
+    client.call = call
+    assert client.channels() == [{"name": "pj-one"}]
+    assert client.subscriptions() == [{"name": "general"}]
+    client.subscribe_channels(["pj-one"])
+    assert calls[-1] == (
+        "POST",
+        "users/me/subscriptions",
+        {"subscriptions": [{"name": "pj-one"}]},
+    )
+    before = len(calls)
+    client.subscribe_channels([])
+    assert len(calls) == before
+
+
 def test_serve_handles_a_dm_and_skips_its_own():
     client = FakeClient(
         whoami_results=[{"user_id": 7}],

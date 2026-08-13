@@ -212,6 +212,24 @@ class ZulipClient:
             },
         )
 
+    def channels(self) -> list[dict]:
+        """Public channels visible to this bot."""
+        return self.call("GET", "streams").get("streams", [])
+
+    def subscriptions(self) -> list[dict]:
+        """Channels to which this bot is currently subscribed."""
+        return self.call("GET", "users/me/subscriptions").get("subscriptions", [])
+
+    def subscribe_channels(self, names: list[str]) -> dict:
+        """Subscribe this bot to existing channels by name."""
+        if not names:
+            return {"subscribed": [], "already_subscribed": []}
+        return self.call(
+            "POST",
+            "users/me/subscriptions",
+            {"subscriptions": [{"name": name} for name in names]},
+        )
+
     def send_to_channel(self, channel: str, topic: str, content: str) -> int:
         result = self.call(
             "POST", "messages",

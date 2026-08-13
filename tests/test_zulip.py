@@ -209,6 +209,29 @@ def test_channel_discovery_and_subscription_wrappers():
     assert len(calls) == before
 
 
+def test_membership_wrappers_read_users_and_subscribe_principals():
+    calls = []
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+
+    def call(method, path, params=None, **kwargs):
+        calls.append((method, path, params))
+        if path == "users":
+            return {"members": [{"user_id": 7, "is_active": True}]}
+        if path == "streams/3/members":
+            return {"subscribers": [7]}
+        return {"subscribed": {"pj-one": [8, 9]}}
+
+    client.call = call
+    assert client.users() == [{"user_id": 7, "is_active": True}]
+    assert client.channel_subscribers(3) == [7]
+    client.subscribe_channels(["pj-one"], principals=[8, 9])
+    assert calls[-1] == (
+        "POST",
+        "users/me/subscriptions",
+        {"subscriptions": [{"name": "pj-one"}], "principals": [8, 9]},
+    )
+
+
 def test_serve_handles_a_dm_and_skips_its_own():
     client = FakeClient(
         whoami_results=[{"user_id": 7}],

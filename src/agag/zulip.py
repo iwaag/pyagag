@@ -220,15 +220,26 @@ class ZulipClient:
         """Channels to which this bot is currently subscribed."""
         return self.call("GET", "users/me/subscriptions").get("subscriptions", [])
 
-    def subscribe_channels(self, names: list[str]) -> dict:
-        """Subscribe this bot to existing channels by name."""
+    def users(self) -> list[dict]:
+        """Realm members, bots included, active and deactivated alike."""
+        return self.call("GET", "users").get("members", [])
+
+    def channel_subscribers(self, stream_id: int) -> list[int]:
+        """User ids currently subscribed to one channel."""
+        return self.call("GET", f"streams/{stream_id}/members").get("subscribers", [])
+
+    def subscribe_channels(self, names: list[str], principals: list[int] | None = None) -> dict:
+        """Subscribe this bot, or `principals`, to existing channels by name.
+
+        Subscribing other users needs no special role on this realm; a
+        default-role bot may do it for a public channel.
+        """
         if not names:
             return {"subscribed": [], "already_subscribed": []}
-        return self.call(
-            "POST",
-            "users/me/subscriptions",
-            {"subscriptions": [{"name": name} for name in names]},
-        )
+        params: dict = {"subscriptions": [{"name": name} for name in names]}
+        if principals is not None:
+            params["principals"] = principals
+        return self.call("POST", "users/me/subscriptions", params)
 
     def send_to_channel(self, channel: str, topic: str, content: str) -> int:
         result = self.call(

@@ -266,6 +266,15 @@ class ZulipClient:
         )
         return result.get("messages", [])
 
+    def stream_id(self, name: str) -> int:
+        """Resolve a channel name to Zulip's numeric stream id."""
+        return int(self.call("GET", "get_stream_id", {"stream": name})["stream_id"])
+
+    def channel_topics(self, stream_id: int) -> list[str]:
+        """Topic names in one channel, newest first, resolved ones included."""
+        result = self.call("GET", f"users/me/{stream_id}/topics")
+        return [str(row["name"]) for row in result.get("topics", [])]
+
     def resolve_topic(self, message_id: int, topic: str) -> None:
         """Mark a topic resolved (Zulip's ✔ rename), moving every message in
         it — other senders' included, which this realm permits for bots."""
@@ -422,3 +431,83 @@ def serve(client: ZulipClient, handler, log=log, accept=is_dm_for_us) -> None:
                 handler(client, message, self_id)
             except Exception as error:  # one bad message must not end the loop
                 log(f"handler failed on message #{message.get('id')}: {error!r}")
+
+
+def sweep_topics(client: ZulipClient, self_id: int, topic_filter: str) -> list[tuple[str, str]]:
+    """Every `(channel, topic)` currently awaiting this bot's reply.
+
+    A topic qualifies when it is in a channel this bot is subscribed to, its
+    name passes `topic_filter` (prefix match), it is not resolved, and its
+    last poster is somebody else. The last-poster rule is what makes the pull
+    loop self-stabilizing: the bot's own ack or reply silences a topic until
+    a human speaks again.
+    """
+    matches: list[tuple[str, str]] = []
+    for subscription in client.subscriptions():
+        channel = str(subscription.get("name", ""))
+        stream = subscription.get("stream_id")
+        if not channel or stream is None:
+            continue
+        for topic in client.channel_topics(int(stream)):
+            if not topic.startswith(topic_filter):
+                continue
+            if topic.startswith(RESOLVED_TOPIC_PREFIX):
+                continue
+            history = client.topic_history(channel, topic, num_before=1)
+            if history and history[-1].get("sender_id") == self_id:
+                continue
+            matches.append((channel, topic))
+    return matches
+
+
+def sweep_serve(client: ZulipClient, handler, *, topic_filter: str, log=log) -> None:
+    """Pull-based listener: poll for message events, but treat each only as a
+    "something changed" signal and re-scan the subscribed channels for topics
+    that await a reply (see `sweep_topics`). `handler(channel, topic)` is
+    called once per match; anything it raises is logged and the sweep goes on.
+
+    A sweep also runs on every queue (re-)registration — startup and
+    `QueueExpired` recovery — which is what makes downtime lossless: a post
+    that arrived while this was down is found by the startup sweep, with no
+    queue persistence involved. The loop is single-threaded and serial, so a
+    long handler simply delays the next sweep; events keep queueing meanwhile.
+    """
+    self_id: int | None = None
+    queue_id: str | None = None
+    last_event_id = -1
+    dirty = False
+    while True:
+        try:
+            if self_id is None:
+                self_id = int(client.whoami()["user_id"])
+                log(f"sweeping as user_id={self_id} ({client.email})")
+            if queue_id is None:
+                queue_id, last_event_id = client.register()
+                log(f"registered event queue {queue_id} (last_event_id={last_event_id})")
+                dirty = True  # anything may have happened while unregistered
+            if dirty:
+                dirty = False
+                for channel, topic in sweep_topics(client, self_id, topic_filter):
+                    log(f"sweep matched {channel!r}/{topic!r}")
+                    try:
+                        handler(channel, topic)
+                    except Exception as error:  # one bad topic must not end the loop
+                        log(f"handler failed on {channel!r}/{topic!r}: {error!r}")
+            events = client.poll(queue_id, last_event_id)
+        except ZulipTimeout:
+            continue  # nothing happened within the poll window
+        except QueueExpired as error:
+            log(f"event queue expired ({error}); re-registering")
+            queue_id = None
+            continue
+        except ZulipError as error:
+            log(f"zulip call failed: {error}; retrying in {RETRY_SECONDS}s")
+            queue_id = None
+            time.sleep(RETRY_SECONDS)
+            continue
+        for event in events:
+            last_event_id = max(last_event_id, int(event.get("id", last_event_id)))
+            if event.get("type") == "message":
+                # The payload is deliberately not processed; the sweep reads
+                # the topic's actual state instead of trusting the event.
+                dirty = True

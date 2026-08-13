@@ -18,6 +18,8 @@ from agag.zulip import (
     is_dm_for_us,
     read_env,
     serve,
+    sweep_serve,
+    sweep_topics,
     topic_dump,
     topic_write,
 )
@@ -298,6 +300,151 @@ def test_serve_sleeps_and_reregisters_after_a_failed_poll(monkeypatch):
     )
     run(client)
     assert slept and client.registrations == 2
+
+
+class SweepClient(FakeClient):
+    """FakeClient plus the channel-state surface `sweep_topics` reads."""
+
+    def __init__(self, whoami_results, poll_results, topics_by_channel, last_sender):
+        super().__init__(whoami_results, poll_results)
+        # {channel: [topic, ...]} and {(channel, topic): sender_id of last post}
+        self.topics_by_channel = dict(topics_by_channel)
+        self.last_sender = dict(last_sender)
+        self.history_calls = []
+
+    def subscriptions(self):
+        return [
+            {"name": name, "stream_id": index}
+            for index, name in enumerate(sorted(self.topics_by_channel), start=1)
+        ]
+
+    def channel_topics(self, stream_id):
+        name = sorted(self.topics_by_channel)[stream_id - 1]
+        return list(self.topics_by_channel[name])
+
+    def topic_history(self, channel, topic, num_before=50):
+        self.history_calls.append((channel, topic, num_before))
+        sender = self.last_sender.get((channel, topic))
+        return [] if sender is None else [{"sender_id": sender}]
+
+
+def sweep_run(client, topic_filter="mission-"):
+    """Drive `sweep_serve` until a fake call raises `_Stop`; collect matches."""
+    handled = []
+    with pytest.raises(_Stop):
+        sweep_serve(
+            client,
+            lambda channel, topic: handled.append((channel, topic)),
+            topic_filter=topic_filter,
+            log=lambda _: None,
+        )
+    return handled
+
+
+def test_stream_id_and_channel_topics_wrappers():
+    calls = []
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+
+    def call(method, path, params=None, **kwargs):
+        calls.append((method, path, params))
+        if path == "get_stream_id":
+            return {"stream_id": 31}
+        return {"topics": [{"name": "mission-two", "max_id": 9}, {"name": "mission-one", "max_id": 3}]}
+
+    client.call = call
+    assert client.stream_id("pj-demo") == 31
+    assert client.channel_topics(31) == ["mission-two", "mission-one"]
+    assert calls == [
+        ("GET", "get_stream_id", {"stream": "pj-demo"}),
+        ("GET", "users/me/31/topics", None),
+    ]
+
+
+def test_sweep_topics_applies_prefix_resolved_and_last_poster_rules():
+    client = SweepClient(
+        whoami_results=[],
+        poll_results=[],
+        topics_by_channel={
+            "pj-demo": [
+                "mission-open",                              # match
+                "mission-answered",                          # bot posted last
+                f"{RESOLVED_TOPIC_PREFIX}mission-done",      # resolved
+                "create-other",                              # wrong prefix
+                "mission-empty",                             # no history at all
+            ],
+        },
+        last_sender={
+            ("pj-demo", "mission-open"): 99,
+            ("pj-demo", "mission-answered"): 7,
+        },
+    )
+    matches = sweep_topics(client, self_id=7, topic_filter="mission-")
+    assert matches == [("pj-demo", "mission-open"), ("pj-demo", "mission-empty")]
+    # The last-poster check reads exactly one message per candidate topic.
+    assert all(call[2] == 1 for call in client.history_calls)
+
+
+def test_sweep_serve_sweeps_on_startup_before_any_event():
+    client = SweepClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[_Stop()],
+        topics_by_channel={"pj-demo": ["mission-waiting"]},
+        last_sender={("pj-demo", "mission-waiting"): 99},
+    )
+    assert sweep_run(client) == [("pj-demo", "mission-waiting")]
+
+
+def test_sweep_serve_resweeps_when_a_message_event_arrives():
+    client = SweepClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[[channel_event(1, sender_id=99)], _Stop()],
+        topics_by_channel={"pj-demo": ["mission-waiting"]},
+        last_sender={("pj-demo", "mission-waiting"): 99},
+    )
+    # Once at startup, once after the event set the dirty flag.
+    assert sweep_run(client) == [("pj-demo", "mission-waiting")] * 2
+
+
+def test_sweep_serve_ignores_non_message_events():
+    client = SweepClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[[{"id": 1, "type": "heartbeat"}], _Stop()],
+        topics_by_channel={"pj-demo": ["mission-waiting"]},
+        last_sender={("pj-demo", "mission-waiting"): 99},
+    )
+    assert sweep_run(client) == [("pj-demo", "mission-waiting")]  # startup only
+
+
+def test_sweep_serve_sweeps_again_after_queue_expiry():
+    client = SweepClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[QueueExpired("bad event queue id"), _Stop()],
+        topics_by_channel={"pj-demo": ["mission-waiting"]},
+        last_sender={("pj-demo", "mission-waiting"): 99},
+    )
+    assert sweep_run(client) == [("pj-demo", "mission-waiting")] * 2
+    assert client.registrations == 2
+
+
+def test_sweep_serve_keeps_going_when_the_handler_raises():
+    client = SweepClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[_Stop()],
+        topics_by_channel={"pj-demo": ["mission-a", "mission-b"]},
+        last_sender={("pj-demo", "mission-a"): 99, ("pj-demo", "mission-b"): 99},
+    )
+    logged = []
+    handled = []
+
+    def handler(channel, topic):
+        if topic == "mission-a":
+            raise RuntimeError("handler exploded")
+        handled.append(topic)
+
+    with pytest.raises(_Stop):
+        sweep_serve(client, handler, topic_filter="mission-", log=logged.append)
+    assert handled == ["mission-b"]
+    assert any("handler exploded" in line for line in logged)
 
 
 def test_topic_dump_preserves_numbered_versions(tmp_path):

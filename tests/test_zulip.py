@@ -384,6 +384,23 @@ def test_sweep_topics_applies_prefix_resolved_and_last_poster_rules():
     assert all(call[2] == 1 for call in client.history_calls)
 
 
+def test_sweep_topics_accepts_several_prefixes():
+    client = SweepClient(
+        whoami_results=[],
+        poll_results=[],
+        topics_by_channel={
+            "general": ["run-1", "mission-stray", "create-other"],
+        },
+        last_sender={
+            ("general", "run-1"): 99,
+            ("general", "mission-stray"): 99,
+            ("general", "create-other"): 99,
+        },
+    )
+    matches = sweep_topics(client, self_id=7, topic_filter=("mission-", "run-"))
+    assert matches == [("general", "run-1"), ("general", "mission-stray")]
+
+
 def test_sweep_serve_sweeps_on_startup_before_any_event():
     client = SweepClient(
         whoami_results=[{"user_id": 7}],

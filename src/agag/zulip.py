@@ -433,11 +433,14 @@ def serve(client: ZulipClient, handler, log=log, accept=is_dm_for_us) -> None:
                 log(f"handler failed on message #{message.get('id')}: {error!r}")
 
 
-def sweep_topics(client: ZulipClient, self_id: int, topic_filter: str) -> list[tuple[str, str]]:
+def sweep_topics(
+    client: ZulipClient, self_id: int, topic_filter: str | tuple[str, ...]
+) -> list[tuple[str, str]]:
     """Every `(channel, topic)` currently awaiting this bot's reply.
 
     A topic qualifies when it is in a channel this bot is subscribed to, its
-    name passes `topic_filter` (prefix match), it is not resolved, and its
+    name passes `topic_filter` (prefix match — a tuple matches any of its
+    prefixes, like `str.startswith`), it is not resolved, and its
     last poster is somebody else. The last-poster rule is what makes the pull
     loop self-stabilizing: the bot's own ack or reply silences a topic until
     a human speaks again.
@@ -460,7 +463,9 @@ def sweep_topics(client: ZulipClient, self_id: int, topic_filter: str) -> list[t
     return matches
 
 
-def sweep_serve(client: ZulipClient, handler, *, topic_filter: str, log=log) -> None:
+def sweep_serve(
+    client: ZulipClient, handler, *, topic_filter: str | tuple[str, ...], log=log
+) -> None:
     """Pull-based listener: poll for message events, but treat each only as a
     "something changed" signal and re-scan the subscribed channels for topics
     that await a reply (see `sweep_topics`). `handler(channel, topic)` is

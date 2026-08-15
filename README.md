@@ -4,10 +4,30 @@
 `ag.agent-config.v1` configuration contract and the `ag.agent-run.v1` harness
 record convention. The import package is `agag`.
 
-`run_harness()` keeps the subprocess's real working directory and inherited
-`PWD` environment value aligned. This is the shared first defense against
-harnesses that trust `PWD`; consumers may deliberately add a CLI-native
-directory option as a second, tool-specific defense.
+`run_harness()` drives one harness process per run — `opencode`, `claude_code`,
+`agcode`, or the test-only `fake` — and normalizes its result. It keeps the
+subprocess's real working directory and inherited `PWD` environment value
+aligned. This is the shared first defense against harnesses that trust `PWD`;
+consumers may deliberately add a CLI-native directory option as a second,
+tool-specific defense.
+
+`agag.agcode` is the only harness that ships inside this package: a single
+stdlib-only file running an agentic loop over the Anthropic Messages API
+(local ollama serves one, so it needs no account and no key). It exists because
+harnesses that show the model two candidate base directories, and ask it to
+absolutize paths itself, make weak models resolve relative paths against the
+wrong base a sizable fraction of the time. agcode names exactly one working
+directory, resolves every path tool-side, reads nothing from the invoking
+user's home, and can write a verbatim wire transcript of every request and
+response. Use it in a profile as `harness = "agcode"`, or directly:
+
+```sh
+echo "your task" | python -m agag.agcode --model qwen3.6:35b-a3b-coding-nvfp4
+```
+
+Note that `harness = "agcode"` is rejected as `E_UNKNOWN_HARNESS` by any
+pyagag older than the commit that added it; adopting a profile means upgrading
+the pin first.
 
 `agag.zulip` is the shared chat entrance: a stdlib-only Zulip bot client
 (`ZulipClient.from_env(path)` over a `KEY=value` credentials file) and a

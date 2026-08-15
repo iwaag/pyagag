@@ -55,6 +55,14 @@ def build_argv(
         if skip_permissions:
             argv.append("--dangerously-skip-permissions")
         return argv
+    if agent.harness == "agcode":
+        # agcode is a module of this package: the resolved command is the
+        # interpreter. The prompt arrives on stdin and the working directory
+        # comes from cwd/PWD, so no directory flag is needed.
+        argv = [agent.command, "-m", "agag.agcode", "--model", agent.native_model]
+        if agent.provider_base_url:
+            argv += ["--base-url", agent.provider_base_url]
+        return argv + extra_args
     if agent.harness == "opencode":
         return [agent.command, "run", "--format", "json", "-m", agent.model, *extra_args]
     if agent.harness == "fake":
@@ -113,6 +121,28 @@ def _extract_claude(raw: str) -> tuple[str, dict]:
     if isinstance(doc.get("usage"), dict):
         meta["usage"] = doc["usage"]
     return doc.get("result") if isinstance(doc.get("result"), str) else "", meta
+
+
+def _extract_agcode(raw: str) -> tuple[str, dict]:
+    """Read agcode's single stdout JSON document.
+
+    agcode already speaks the ag.agent-run.v1 field spellings, so extraction is
+    one parse plus a fixed key copy; keys outside the record contract (run_id,
+    truncated, malformed_tool_calls, failure_kind) stay out of the meta.
+    Non-JSON stdout passes through as the output, as with _extract_claude.
+    """
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw, {}
+    if not isinstance(doc, dict):
+        return raw, {}
+    meta = {
+        key: doc[key]
+        for key in ("duration_ms", "num_turns", "usage", "outcome", "failure", "transcript")
+        if key in doc
+    }
+    return doc.get("output") if isinstance(doc.get("output"), str) else "", meta
 
 
 def run_harness(
@@ -206,13 +236,22 @@ def run_harness(
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         transcript_path.write_text(raw, encoding="utf-8")
         meta["transcript"] = str(transcript_path)
-    output, reported = _extract_claude(raw) if agent.harness == "claude_code" else extract_event_text(raw)
+    if agent.harness == "claude_code":
+        output, reported = _extract_claude(raw)
+    elif agent.harness == "agcode":
+        output, reported = _extract_agcode(raw)
+    else:
+        output, reported = extract_event_text(raw)
     meta.update(reported)
     meta.setdefault("duration_ms", int((time.monotonic() - started) * 1000))
     stderr_tail = ANSI_RE.sub("", proc.stderr or "").strip()[-output_tail_chars:]
     failure = None
+    reported_failure = reported.get("failure") if isinstance(reported.get("failure"), str) else None
     if proc.returncode != 0:
-        tail = output.strip()[-output_tail_chars:] or "no output"
+        # A harness that reports its own failure string keeps it when it had no
+        # output to quote — agcode's is kind-prefixed and worth more than "no
+        # output".
+        tail = output.strip()[-output_tail_chars:] or reported_failure or "no output"
         failure = f"{agent.harness} exited {proc.returncode}: {tail}"
         if stderr_tail:
             failure += f"; stderr tail: {stderr_tail}"
@@ -222,6 +261,12 @@ def run_harness(
     elif not output.strip():
         failure = f"{agent.harness} produced no output" + (f": {stderr_tail}" if stderr_tail else "")
     meta["outcome"] = "failed" if failure else "done"
+    # A harness that ended itself on a budget or deadline reports "aborted";
+    # that stays, because run_harness spells its own timeout the same way. Only
+    # the aborted/failed distinction is preserved — the failure text above is
+    # still recomposed by this function, per the harness-result contract.
+    if failure and reported.get("outcome") == "aborted":
+        meta["outcome"] = "aborted"
     if failure:
         meta["failure"] = failure
     exit_code = proc.returncode if failure is None else (proc.returncode or -1)

@@ -1,6 +1,7 @@
 """Ported agent-config contract and resolution tests."""
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -157,3 +158,46 @@ profile = "sonnet"
     assert resolve_role(config, overlay, "generator").environment == {
         "ANTHROPIC_API_KEY": "environment-secret"
     }
+
+
+AGCODE = BASE + '''[profiles.agcode]
+harness = "agcode"
+model = "ollama/local-model"
+'''
+
+
+def test_agcode_profile_resolves_to_this_interpreter_without_an_endpoint(tmp_path):
+    """agcode ships inside the package: its command is the interpreter, and no
+    local.provider.ollama.base_url is required (unlike OpenCode) because the
+    module has a working default endpoint."""
+    main, local = files(tmp_path, AGCODE, overlay='''schema = "ag.agent-config.v1"
+[roles.generator]
+profile = "agcode"
+''')
+    config, overlay = load_config(main, local)
+    resolved = resolve_role(config, overlay, "generator")
+
+    assert resolved.harness == "agcode"
+    assert resolved.command == sys.executable
+    assert resolved.provider_base_url is None
+    # The canonical ID is what records carry; the CLI gets the native name.
+    assert resolved.model == "ollama/local-model"
+    assert resolved.native_model == "local-model"
+    # Intrinsic capabilities cover a role that asks for them.
+    main.write_text(AGCODE.replace("requires = []", 'requires = ["agentic_tools", "workspace_fs"]'), encoding="utf-8")
+    config, overlay = load_config(main, local)
+    assert resolve_role(config, overlay, "generator").harness == "agcode"
+
+
+def test_agcode_command_overlay_points_at_a_foreign_interpreter(tmp_path):
+    interpreter = tmp_path / "python3-elsewhere"
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+    main, local = files(tmp_path, AGCODE, overlay=f'''schema = "ag.agent-config.v1"
+[local.harness.agcode]
+command = "{interpreter}"
+[roles.generator]
+profile = "agcode"
+''')
+    config, overlay = load_config(main, local)
+    assert resolve_role(config, overlay, "generator").command == str(interpreter)

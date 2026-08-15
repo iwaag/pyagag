@@ -6,18 +6,23 @@ import glob
 import os
 import re
 import shutil
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 SCHEMA = "ag.agent-config.v1"
-CANONICAL_HARNESSES = {"opencode", "claude_code", "fake"}
+CANONICAL_HARNESSES = {"opencode", "claude_code", "agcode", "fake"}
 INTRINSIC_CAPABILITIES = {
     "opencode": {"agentic_tools", "workspace_fs"},
     "claude_code": {"agentic_tools", "workspace_fs"},
+    "agcode": {"agentic_tools", "workspace_fs"},
     "fake": set(),
 }
+# Harnesses whose CLI takes the provider-native model name rather than the
+# canonical provider/name ID. The canonical spelling still travels in records.
+NATIVE_MODEL_HARNESSES = frozenset({"claude_code", "agcode"})
 MODEL_ID_RE = re.compile(r"^[a-z0-9_-]+/[^/\s]+$")
 
 
@@ -43,7 +48,11 @@ class ResolvedAgent:
 
     @property
     def native_model(self) -> str:
-        return self.model.split("/", 1)[1] if self.harness == "claude_code" else self.model
+        return (
+            self.model.split("/", 1)[1]
+            if self.harness in NATIVE_MODEL_HARNESSES
+            else self.model
+        )
 
 
 def _read_toml(path: Path, *, required: bool) -> dict[str, Any]:
@@ -155,7 +164,11 @@ def _resolve_command(harness: str, overlay: dict[str, Any], *, check_available: 
         matches = glob.glob(os.path.expanduser(facts["command_glob"]))
         if matches:
             command = max(matches, key=lambda item: Path(item).stat().st_mtime)
-    defaults = {"opencode": "opencode", "claude_code": "claude"}
+    # agcode ships inside this package, so its "executable" is the interpreter
+    # that runs ``python -m agag.agcode``. sys.executable is absolute, which
+    # skips the PATH lookup below and satisfies the file/exec checks; an
+    # overlay command may still point at a foreign interpreter.
+    defaults = {"opencode": "opencode", "claude_code": "claude", "agcode": sys.executable}
     command = os.path.expanduser(command or defaults.get(harness, ""))
     resolved = shutil.which(command) if command and not Path(command).is_absolute() else command
     if check_available and (not resolved or not Path(resolved).is_file() or not os.access(resolved, os.X_OK)):

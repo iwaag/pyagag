@@ -29,6 +29,42 @@ Note that `harness = "agcode"` is rejected as `E_UNKNOWN_HARNESS` by any
 pyagag older than the commit that added it; adopting a profile means upgrading
 the pin first.
 
+### Calling agcode in-process
+
+`agcode.run()` is importable, and three keyword arguments let a consumer host
+an agent without a config file, a permission engine, or an MCP server. The CLI
+uses none of them, so `python -m agag.agcode` behaves exactly as documented
+above.
+
+```python
+from agag import agcode
+
+def nctl(base, subcommand):                      # base arrives first, always
+    return agcode.tool_run(base, f"uv run nctl {subcommand}")
+
+result = agcode.run(
+    task,
+    working_dir,
+    model="qwen3.6:35b-a3b-coding-nvfp4",
+    tools=[*agcode.READONLY_TOOLS, agcode.Tool(NCTL_SPEC, nctl)],
+    system_suffix=Path("AGENTS.md").read_text(),
+    stop=cancelled.is_set,
+)
+```
+
+- `tools=` is the offered tool set: each `Tool` pairs a JSON spec with the
+  callable that serves it, invoked as `func(base, **arguments)` and returning
+  the tool_result string. It defaults to `agcode.DEFAULT_TOOLS`, the four
+  built-ins. **The tool set is the permission surface** — `READONLY_TOOLS`
+  (`read` + `list`) offers a door no way to write, rather than denying calls it
+  offered anyway. There is nothing forbidden for a weak model to attempt.
+- `system_suffix=` appends per-role instructions to the pinned system prompt.
+  Read it from disk per run and editing the file takes effect on the next
+  request. The working-directory sentence stays first and unconditional.
+- `stop=` is a zero-argument predicate checked between turns; returning true
+  ends the run as `aborted` with failure kind `cancelled`, keeping the usage
+  and turn count accumulated so far. An in-flight turn always finishes.
+
 `agag.zulip` is the shared chat entrance: a stdlib-only Zulip bot client
 (`ZulipClient.from_env(path)` over a `KEY=value` credentials file) and a
 `serve(client, handler)` long-poll loop for direct messages. It carries the

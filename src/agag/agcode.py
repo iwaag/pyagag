@@ -26,6 +26,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,7 @@ FAILURE_KINDS = frozenset(
     {
         "deadline_exceeded",  # aborted: wall-clock deadline hit
         "turn_budget_exhausted",  # aborted: max_turns hit
+        "cancelled",  # aborted: the caller's stop callable asked to end the run
         "connect_error",  # failed: connection refused / HTTP error / timeout
         "malformed_response",  # failed: non-JSON body, missing content, tool_use stop without tool_use blocks
         "empty_output",  # failed: clean stop but no final text
@@ -173,6 +175,55 @@ TOOLS_V0: list[dict[str, Any]] = [
         },
     },
 ]
+
+
+@dataclass(frozen=True)
+class Tool:
+    """One offered tool: its JSON spec and the callable that serves it.
+
+    ``func`` is called as ``func(base, **arguments)`` — the working directory
+    first, then the model's arguments by keyword. A tool that has nothing to
+    do with the filesystem still receives ``base`` and simply ignores it; one
+    signature keeps ``dispatch_tool`` free of special cases. The return value
+    is the tool_result content and must be a string.
+    """
+
+    spec: dict[str, Any]
+    func: Callable[..., str]
+
+    @property
+    def name(self) -> str:
+        return self.spec["name"]
+
+
+_SPECS_V0 = {spec["name"]: spec for spec in TOOLS_V0}
+
+# The four built-ins, as the default tool set. Presets are plain sequences:
+# a caller composes its own by concatenating, filtering, or writing new Tools.
+DEFAULT_TOOLS: tuple[Tool, ...] = (
+    Tool(_SPECS_V0["read"], tool_read),
+    Tool(_SPECS_V0["write"], tool_write),
+    Tool(_SPECS_V0["list"], tool_list),
+    Tool(_SPECS_V0["run"], tool_run),
+)
+
+# Read-only preset: the tool set *is* the permission. A door that must not
+# write is handed this instead of a permission engine — there is no denied
+# call to attempt, and nothing to explain to a weak model.
+READONLY_TOOLS: tuple[Tool, ...] = (
+    Tool(_SPECS_V0["read"], tool_read),
+    Tool(_SPECS_V0["list"], tool_list),
+)
+
+
+def tool_table(tools: Sequence[Tool]) -> dict[str, Tool]:
+    """Name → Tool, rejecting duplicates rather than silently shadowing."""
+    table: dict[str, Tool] = {}
+    for tool in tools:
+        if tool.name in table:
+            raise ValueError(f"duplicate tool name: {tool.name!r}")
+        table[tool.name] = tool
+    return table
 
 
 def response_text(response: dict[str, Any]) -> str:
@@ -323,15 +374,23 @@ are relative to the working directory; the tools resolve them — never convert
 a path yourself. When the task is complete, reply with the final answer as
 plain text."""
 
-_TOOL_FUNCS = {
-    "read": tool_read,
-    "write": tool_write,
-    "list": tool_list,
-    "run": tool_run,
-}
+
+def compose_system(working_dir: Path | str, system_suffix: str | None = None) -> str:
+    """The system prompt actually sent: the pinned template first, then the
+    caller's per-role instructions.
+
+    The working-directory sentence is unconditional and comes first, so no
+    suffix can displace the one thing the base rule depends on.
+    """
+    system = SYSTEM_PROMPT.format(working_dir=working_dir)
+    if system_suffix and system_suffix.strip():
+        system = f"{system}\n\n{system_suffix.strip()}"
+    return system
 
 
-def dispatch_tool(base: Path, name: str, args: Any) -> tuple[str, bool, bool]:
+def dispatch_tool(
+    base: Path, name: str, args: Any, tools: dict[str, Tool]
+) -> tuple[str, bool, bool]:
     """Execute one tool call; return ``(content, is_error, is_malformed)``.
 
     All errors come back as an error tool_result so the loop continues.
@@ -339,13 +398,13 @@ def dispatch_tool(base: Path, name: str, args: Any) -> tuple[str, bool, bool]:
     arguments) as opposed to legitimate calls that fail at runtime (missing
     file, command timeout); the loop counts malformed calls in ``meta``.
     """
-    func = _TOOL_FUNCS.get(name)
-    if func is None:
-        return f"unknown tool: {name!r} (available: {', '.join(_TOOL_FUNCS)})", True, True
+    tool = tools.get(name)
+    if tool is None:
+        return f"unknown tool: {name!r} (available: {', '.join(tools)})", True, True
     if not isinstance(args, dict):
         return f"tool arguments must be an object, got: {args!r}", True, True
     try:
-        return func(base, **args), False, False
+        return tool.func(base, **args), False, False
     except TypeError as e:
         return f"bad arguments for {name}: {e}", True, True
     except subprocess.TimeoutExpired as e:
@@ -397,6 +456,9 @@ def run(
     max_tokens: int = 4096,
     temperature: float | None = None,
     task_input: str | None = None,
+    tools: Sequence[Tool] = DEFAULT_TOOLS,
+    system_suffix: str | None = None,
+    stop: Callable[[], bool] | None = None,
     transcript_path: str | None = None,
     transcript_meta: dict[str, Any] | None = None,
 ) -> AgcodeResult:
@@ -416,6 +478,19 @@ def run(
     (path) has to be transcribed by the model, and the transcript shows the
     exact block on the wire like everything else.
 
+    ``tools`` is the offered tool set, spec and callable together. It is the
+    whole permission surface: a door that must not write is handed
+    ``READONLY_TOOLS`` (or its own list), not a deny rule. Passing an empty
+    sequence offers no tools at all.
+
+    ``system_suffix`` is appended to the pinned system prompt — this is where
+    per-role instructions (an ``AGENTS.md``-style file) arrive. It cannot
+    displace the working-directory sentence, which stays first.
+
+    ``stop`` is checked between turns; when it returns true the run ends as
+    ``aborted`` with failure kind ``cancelled``, carrying whatever usage and
+    turn count it had accumulated.
+
     ``transcript_meta`` merges extra caller-known fields (e.g. fixture
     markers) into the transcript's meta header record.
     """
@@ -425,10 +500,12 @@ def run(
         raise ValueError("model is required (argument or AGCODE_MODEL)")
 
     base = Path(working_dir).resolve()
+    tool_specs = [tool.spec for tool in tools]
+    table = tool_table(tools)
     client = MessagesClient(
         base_url, model, max_tokens=max_tokens, temperature=temperature
     )
-    system = SYSTEM_PROMPT.format(working_dir=base)
+    system = compose_system(base, system_suffix)
     first: str | list[dict[str, Any]] = task
     if task_input is not None:
         first = [
@@ -461,6 +538,10 @@ def run(
 
     try:
         while True:
+            if stop is not None and stop():
+                failure_kind = "cancelled"
+                failure = "cancelled by the caller"
+                break
             if turns >= max_turns:
                 failure_kind = "turn_budget_exhausted"
                 failure = f"max_turns ({max_turns}) exhausted"
@@ -471,7 +552,7 @@ def run(
                 failure = f"deadline ({deadline_s}s) exceeded"
                 break
 
-            payload = client.build_payload(system, messages, TOOLS_V0)
+            payload = client.build_payload(system, messages, tool_specs)
             transcript.append("request", payload)
             try:
                 # The per-request timeout is the remaining deadline (capped by
@@ -520,7 +601,7 @@ def run(
                 results = []
                 for block in tool_uses:
                     content, is_error, is_malformed = dispatch_tool(
-                        base, block.get("name"), block.get("input")
+                        base, block.get("name"), block.get("input"), table
                     )
                     malformed_tool_calls += is_malformed
                     result: dict[str, Any] = {

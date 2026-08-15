@@ -576,7 +576,7 @@ def test_write_non_string_content_is_an_error_tool_result(backend, tmp_path):
 def test_dispatch_tool_maps_decode_error_without_raising(tmp_path):
     (tmp_path / "blob.bin").write_bytes(b"\xff\xfe")
     content, is_error, is_malformed = agcode.dispatch_tool(
-        tmp_path, "read", {"path": "blob.bin"}
+        tmp_path, "read", {"path": "blob.bin"}, agcode.tool_table(agcode.DEFAULT_TOOLS)
     )
     assert (is_error, is_malformed) == (True, False)
     assert "UnicodeDecodeError" in content
@@ -695,6 +695,141 @@ def test_no_ambient_reads_in_module():
     assert len(re.findall(r"os\.environ", source)) == 3  # 2 gets + tool_run passthrough
     for forbidden in ("expanduser", "Path.home", "os.getenv", "~"):
         assert forbidden not in source, forbidden
+
+
+def test_base_prompt_names_exactly_one_directory():
+    """Prompt audit: the base system prompt names one directory and nothing
+    about the operator — no host, user, project or path outside the single
+    ``{working_dir}`` placeholder."""
+    rendered = agcode.compose_system("/base/one")
+    assert rendered.count("/base/one") == 1
+    # Every path-looking token in the rendered prompt is that one directory.
+    assert re.findall(r"(?<![\w.])/[\w./-]+", rendered) == ["/base/one"]
+    for operator_ish in ("agstudio", "eiji", "localhost", "http", "Users", "home"):
+        assert operator_ish not in agcode.SYSTEM_PROMPT, operator_ish
+
+
+# --- Tool seam ---------------------------------------------------------------
+
+
+def test_default_tools_are_the_v0_four_in_order():
+    assert [t.name for t in agcode.DEFAULT_TOOLS] == [s["name"] for s in agcode.TOOLS_V0]
+    assert [t.spec for t in agcode.DEFAULT_TOOLS] == agcode.TOOLS_V0
+
+
+def test_readonly_preset_offers_no_writing_tool(backend, tmp_path):
+    """Permission is the tool set: the write and run tools are not offered at
+    all, so there is no denied call for a weak model to attempt."""
+    assert [t.name for t in agcode.READONLY_TOOLS] == ["read", "list"]
+    backend.responses.append(text_response("ok"))
+    run(backend, tmp_path, tools=agcode.READONLY_TOOLS)
+    [req] = backend.requests
+    assert [t["name"] for t in req["tools"]] == ["read", "list"]
+
+
+def test_readonly_preset_reports_write_as_unknown(tmp_path):
+    content, is_error, is_malformed = agcode.dispatch_tool(
+        tmp_path, "write", {"path": "x", "content": "y"},
+        agcode.tool_table(agcode.READONLY_TOOLS),
+    )
+    assert (is_error, is_malformed) == (True, True)
+    assert "unknown tool" in content and "read, list" in content
+    assert not (tmp_path / "x").exists()
+
+
+def test_custom_tool_is_offered_and_dispatched(backend, tmp_path):
+    """A caller registers its own tool in-process: spec on the wire, callable
+    in the loop. ``base`` arrives first even for a tool that ignores it."""
+    calls = []
+
+    def fetch(base, url):
+        calls.append((base, url))
+        return "fetched " + url
+
+    spec = {
+        "name": "fetch",
+        "description": "Fetch a URL.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"],
+        },
+    }
+    backend.responses.append(tool_use_response("fetch", {"url": "http://x/"}))
+    backend.responses.append(text_response("done"))
+    r = run(backend, tmp_path, tools=[agcode.Tool(spec, fetch)])
+
+    assert r.meta["outcome"] == "done"
+    assert calls == [(tmp_path.resolve(), "http://x/")]
+    assert backend.requests[0]["tools"] == [spec]
+    [tool_result] = backend.requests[1]["messages"][-1]["content"]
+    assert tool_result["content"] == "fetched http://x/"
+
+
+def test_empty_tool_set_offers_nothing(backend, tmp_path):
+    backend.responses.append(text_response("ok"))
+    r = run(backend, tmp_path, tools=[])
+    assert r.meta["outcome"] == "done"
+    assert backend.requests[0]["tools"] == []
+
+
+def test_duplicate_tool_names_are_rejected():
+    with pytest.raises(ValueError, match="duplicate tool name"):
+        agcode.tool_table([*agcode.DEFAULT_TOOLS, agcode.DEFAULT_TOOLS[0]])
+
+
+# --- system_suffix -----------------------------------------------------------
+
+
+def test_system_suffix_follows_the_pinned_template(backend, tmp_path):
+    backend.responses.append(text_response("ok"))
+    run(backend, tmp_path, system_suffix="You are the window door.\nBe brief.")
+    [req] = backend.requests
+    base = PINNED_TEMPLATE.replace("{working_dir}", str(tmp_path.resolve()))
+    assert req["system"] == base + "\n\nYou are the window door.\nBe brief."
+
+
+def test_blank_system_suffix_changes_nothing(backend, tmp_path):
+    backend.responses.append(text_response("ok"))
+    run(backend, tmp_path, system_suffix="   \n")
+    [req] = backend.requests
+    assert req["system"] == PINNED_TEMPLATE.replace("{working_dir}", str(tmp_path.resolve()))
+
+
+def test_working_directory_sentence_stays_first(tmp_path):
+    """A suffix cannot displace the one sentence the whole base rule rests on."""
+    system = agcode.compose_system("/base/one", "Working directory: /somewhere/else")
+    assert system.index("/base/one") < system.index("/somewhere/else")
+    assert system.startswith("You are agcode, a coding agent.")
+
+
+# --- Cancellation ------------------------------------------------------------
+
+
+def test_stop_before_first_turn_aborts_without_calling_the_backend(backend, tmp_path):
+    r = run(backend, tmp_path, stop=lambda: True)
+    assert_failure(r, "aborted", "cancelled")
+    assert (r.meta["num_turns"], backend.requests) == (0, [])
+
+
+def test_stop_between_turns_ends_the_run(backend, tmp_path):
+    """The check is between turns, so an in-flight turn always completes and
+    its usage is kept."""
+    backend.responses.append(tool_use_response("list", {}))
+    backend.responses.append(text_response("never reached"))
+    turns = []
+    r = run(backend, tmp_path, stop=lambda: bool(turns) or turns.append(1))
+
+    assert_failure(r, "aborted", "cancelled")
+    assert r.meta["num_turns"] == 1
+    assert r.meta["usage"] == {"input_tokens": 20, "output_tokens": 15}
+    assert r.output == ""
+
+
+def test_stop_that_stays_false_is_inert(backend, tmp_path):
+    backend.responses.append(text_response("all done"))
+    r = run(backend, tmp_path, stop=lambda: False)
+    assert (r.meta["outcome"], r.output) == ("done", "all done")
 
 
 # --- Record conformance (ag.agent-run.v1 §9) ---------------------------------
@@ -816,6 +951,17 @@ def test_cli_done_run(backend, tmp_path):
     assert output == "all done"
     assert (meta["outcome"], meta["num_turns"]) == ("done", 1)
     assert proc.stdout.count("\n") == 1  # exactly one JSON document
+
+
+def test_cli_defaults_are_the_four_tools_and_no_suffix(backend, tmp_path):
+    """The tool seam is library-side only: the CLI's wire payload is exactly
+    what it was before the seam existed."""
+    backend.responses.append(text_response("all done"))
+    proc = run_cli(backend, "--working-dir", str(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    [req] = backend.requests
+    assert req["tools"] == agcode.TOOLS_V0
+    assert req["system"] == PINNED_TEMPLATE.replace("{working_dir}", str(tmp_path.resolve()))
 
 
 def test_cli_failed_run_exit_1(backend, tmp_path):

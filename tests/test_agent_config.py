@@ -12,7 +12,7 @@ BASE = '''schema = "ag.agent-config.v1"
 [models."ollama/local-model"]
 [models."anthropic/claude-sonnet-5"]
 [profiles.local]
-harness = "opencode"
+harness = "agcode"
 model = "ollama/local-model"
 [profiles.sonnet]
 harness = "claude_code"
@@ -37,9 +37,9 @@ def files(tmp_path: Path, body: str = BASE, overlay: str | None = None) -> tuple
 @pytest.mark.parametrize(
     ("body", "code"),
     [
-        (BASE.replace('harness = "opencode"', 'harness = "ollama"'), "E_UNKNOWN_HARNESS"),
+        (BASE.replace('harness = "agcode"', 'harness = "ollama"'), "E_UNKNOWN_HARNESS"),
         (BASE.replace('model = "ollama/local-model"', 'model = "ollama/absent"'), "E_UNKNOWN_MODEL"),
-        (BASE.replace('harness = "opencode"', 'harness = "claude_code"', 1), "E_INCOMPATIBLE"),
+        (BASE.replace('harness = "agcode"', 'harness = "claude_code"', 1), "E_INCOMPATIBLE"),
         (BASE.replace('profile = "local"', 'profile = "absent"'), "E_UNKNOWN_PROFILE"),
         (BASE.replace("requires = []", 'requires = ["ui_actions"]'), "E_CAPABILITY_UNMET"),
     ],
@@ -58,7 +58,7 @@ def test_invalid_contract_classes(tmp_path, body, code):
         (
             '''schema = "ag.agent-config.v1"
 [profiles.sneaky]
-harness = "opencode"
+harness = "agcode"
 model = "ollama/local-model"
 ''',
             "E_OVERLAY_SCOPE",
@@ -101,29 +101,27 @@ profile = "sonnet"
     assert resolved.command == str(newer)
 
 
-def test_opencode_keeps_model_endpoint_and_project_name(tmp_path):
-    command = tmp_path / "opencode"
-    command.write_text("#!/bin/sh\n", encoding="utf-8")
-    command.chmod(0o755)
-    overlay_body = f'''schema = "ag.agent-config.v1"
-[local.harness.opencode]
-command = "{command}"
+def test_a_declared_provider_endpoint_reaches_the_resolved_agent(tmp_path):
+    """The endpoint is machine-local, so it lives in the overlay and travels
+    on the resolved agent — the canonical model ID never carries it."""
+    main, local = files(tmp_path, overlay='''schema = "ag.agent-config.v1"
 [local.provider.ollama]
-base_url = "http://ollama.example:11434/v1"
-'''
-    main, local = files(tmp_path, overlay=overlay_body)
+base_url = "http://ollama.example:11434"
+''')
     config, overlay = load_config(main, local)
-    resolved = resolve_role(config, overlay, "generator", project_name="testapp")
+    resolved = resolve_role(config, overlay, "generator")
     assert resolved.model == "ollama/local-model"
-    assert resolved.provider_base_url == "http://ollama.example:11434/v1"
+    assert resolved.provider_base_url == "http://ollama.example:11434"
 
-    local.write_text(f'''schema = "ag.agent-config.v1"
-[local.harness.opencode]
-command = "{command}"
-''', encoding="utf-8")
+
+def test_an_absent_provider_endpoint_is_not_an_error(tmp_path):
+    """Resolution used to refuse an ollama profile with no declared endpoint,
+    because the harness of the day could not be pointed at one without it.
+    agcode carries its own local default, so absence is now legal and the
+    caller simply omits --base-url."""
+    main, local = files(tmp_path, overlay='''schema = "ag.agent-config.v1"\n''')
     config, overlay = load_config(main, local)
-    with pytest.raises(AgentConfigError, match="required by testapp OpenCode"):
-        resolve_role(config, overlay, "generator", project_name="testapp")
+    assert resolve_role(config, overlay, "generator").provider_base_url is None
 
 
 def test_anthropic_secret_references_become_process_environment(tmp_path, monkeypatch):
@@ -168,8 +166,8 @@ model = "ollama/local-model"
 
 def test_agcode_profile_resolves_to_this_interpreter_without_an_endpoint(tmp_path):
     """agcode ships inside the package: its command is the interpreter, and no
-    local.provider.ollama.base_url is required (unlike OpenCode) because the
-    module has a working default endpoint."""
+    local.provider.ollama.base_url is required, because the module has a
+    working default endpoint."""
     main, local = files(tmp_path, AGCODE, overlay='''schema = "ag.agent-config.v1"
 [roles.generator]
 profile = "agcode"

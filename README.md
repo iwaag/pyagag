@@ -4,8 +4,8 @@
 `ag.agent-config.v1` configuration contract and the `ag.agent-run.v1` harness
 record convention. The import package is `agag`.
 
-`run_harness()` drives one harness process per run — `opencode`, `claude_code`,
-`agcode`, or the test-only `fake` — and normalizes its result. It keeps the
+`run_harness()` drives one harness process per run — `claude_code`, `agcode`,
+or the test-only `fake` — and normalizes its result. It keeps the
 subprocess's real working directory and inherited `PWD` environment value
 aligned. This is the shared first defense against harnesses that trust `PWD`;
 consumers may deliberately add a CLI-native directory option as a second,
@@ -26,8 +26,10 @@ echo "your task" | python -m agag.agcode --model qwen3.6:35b-a3b-coding-nvfp4
 ```
 
 Note that `harness = "agcode"` is rejected as `E_UNKNOWN_HARNESS` by any
-pyagag older than the commit that added it; adopting a profile means upgrading
-the pin first.
+pyagag older than the commit that added it, and `harness = "opencode"` — which
+this package used to drive — is rejected by any pyagag newer than the commit
+that removed it. Either way the fix is to move the pin and the profiles
+together; there is no compatibility shim.
 
 ### Calling agcode in-process
 
@@ -87,9 +89,10 @@ uv sync
 uv run pytest
 ```
 
-Consumers in the sibling workspace use editable uv path dependencies. Those
-lockfiles intentionally assume the sibling checkout keeps the same relative
-layout.
+Consumers in the sibling workspace resolve pyagag from GitHub
+(`[tool.uv.sources] pyagag = { git = ..., branch = "main" }`), so a change here
+reaches them only after it is pushed and they run
+`uv lock --upgrade-package pyagag`.
 
 See [docs/agent-config-v1.md](docs/agent-config-v1.md) for the language-neutral
 configuration, resolution, harness-result, and run-record contracts.

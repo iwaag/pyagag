@@ -63,49 +63,9 @@ def build_argv(
         if agent.provider_base_url:
             argv += ["--base-url", agent.provider_base_url]
         return argv + extra_args
-    if agent.harness == "opencode":
-        return [agent.command, "run", "--format", "json", "-m", agent.model, *extra_args]
     if agent.harness == "fake":
         return [agent.command, *extra_args]
     raise ValueError(f"unsupported harness: {agent.harness}")
-
-
-def extract_event_text(raw: str) -> tuple[str, dict]:
-    texts: list[str] = []
-    turns = 0
-    cost = 0.0
-    usage = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
-    saw_event = False
-    for line in raw.splitlines():
-        stripped = line.strip()
-        try:
-            event = json.loads(stripped) if stripped.startswith("{") else None
-        except json.JSONDecodeError:
-            event = None
-        if not isinstance(event, dict) or "type" not in event:
-            texts.append(line)
-            continue
-        saw_event = True
-        part = event.get("part") if isinstance(event.get("part"), dict) else {}
-        if event["type"] == "text" and isinstance(part.get("text"), str):
-            texts.append(part["text"])
-        elif event["type"] == "error":
-            error = event.get("error")
-            texts.append(json.dumps(error, ensure_ascii=False) if error is not None else line)
-        elif event["type"] == "step_finish":
-            turns += 1
-            if isinstance(part.get("cost"), (int, float)):
-                cost += part["cost"]
-            tokens = part.get("tokens") if isinstance(part.get("tokens"), dict) else {}
-            cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
-            for source in ("input", "output", "reasoning"):
-                if isinstance(tokens.get(source), int):
-                    usage[source] += tokens[source]
-            for source, target in (("read", "cache_read"), ("write", "cache_write")):
-                if isinstance(cache.get(source), int):
-                    usage[target] += cache[source]
-    stats = {"num_turns": turns, "cost_usd": round(cost, 6), "usage": usage} if saw_event else {}
-    return "\n".join(texts), stats
 
 
 def _extract_claude(raw: str) -> tuple[str, dict]:
@@ -155,7 +115,6 @@ def run_harness(
     add_dirs: list[str] | None = None,
     extra_args: list[str] | None = None,
     skip_permissions: bool = False,
-    opencode_config: Path | None = None,
     transcript_path: Path | None = None,
     output_tail_chars: int = DEFAULT_OUTPUT_TAIL_CHARS,
 ) -> HarnessResult:
@@ -184,8 +143,6 @@ def run_harness(
     env["PWD"] = str(cwd.resolve())
     if agent.provider_base_url:
         env[f"AGENT_PROVIDER_{agent.provider.upper()}_BASE_URL"] = agent.provider_base_url
-    if opencode_config:
-        env["OPENCODE_CONFIG"] = str(opencode_config)
     started = time.monotonic()
     try:
         proc = subprocess.run(
@@ -241,7 +198,10 @@ def run_harness(
     elif agent.harness == "agcode":
         output, reported = _extract_agcode(raw)
     else:
-        output, reported = extract_event_text(raw)
+        # `fake`: whatever the stub printed is the output, minus the trailing
+        # newline `print` adds, and no statistics of its own. The extractor
+        # this replaced parsed an event stream; a stub has none to parse.
+        output, reported = raw.rstrip("\n"), {}
     meta.update(reported)
     meta.setdefault("duration_ms", int((time.monotonic() - started) * 1000))
     stderr_tail = ANSI_RE.sub("", proc.stderr or "").strip()[-output_tail_chars:]

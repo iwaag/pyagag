@@ -94,24 +94,6 @@ def test_claude_json_extraction_and_identity(tmp_path):
     }
 
 
-def test_opencode_jsonl_extraction_and_aggregation(tmp_path):
-    command = stub(tmp_path / "opencode", '''
-        import json, sys
-        sys.stdin.read()
-        print(json.dumps({"type": "text", "part": {"text": "worked"}}))
-        print(json.dumps({"type": "step_finish", "part": {"cost": 0.02,
-              "tokens": {"input": 3, "output": 4, "reasoning": 1,
-                         "cache": {"read": 2, "write": 1}}}}))
-    ''')
-    result = run_harness(agent(command, "opencode"), "prompt", cwd=tmp_path, timeout=5)
-    assert result.output == "worked"
-    assert result.meta["cost_usd"] == 0.02
-    assert result.meta["num_turns"] == 1
-    assert result.meta["usage"] == {
-        "input": 3, "output": 4, "reasoning": 1, "cache_read": 2, "cache_write": 1,
-    }
-
-
 def test_fake_argv_and_environment_injection(tmp_path):
     command = stub(tmp_path / "fake", '''
         import os, sys
@@ -166,18 +148,23 @@ def test_failure_paths_are_normalized(tmp_path, kind):
 def test_model_argv_mapping_and_smuggling_rejected(tmp_path):
     command = tmp_path / "agent"
     claude = build_argv(agent(command, "claude_code"))
-    opencode = build_argv(agent(command, "opencode"))
     assert claude[claude.index("--model") + 1] == "claude-sonnet-5"
-    assert opencode[opencode.index("-m") + 1].startswith("ollama/")
     with pytest.raises(ValueError, match="resolved profile"):
-        build_argv(agent(command, "opencode"), extra_args=["--model", "wrong"])
+        build_argv(agent(command, "claude_code"), extra_args=["--model", "wrong"])
+
+
+def test_an_unsupported_harness_is_rejected(tmp_path):
+    """The harness set is closed: build_argv names the four it drives and
+    refuses anything else, rather than guessing an argv shape."""
+    with pytest.raises(ValueError, match="unsupported harness"):
+        build_argv(agent(tmp_path / "agent", "opencode"))
 
 
 def test_raw_output_tail_and_run_record(tmp_path):
-    command = stub(tmp_path / "opencode", "print('0123456789'); raise SystemExit(2)\n")
+    command = stub(tmp_path / "fake", "print('0123456789'); raise SystemExit(2)\n")
     transcript = tmp_path / "raw.jsonl"
     result = run_harness(
-        agent(command, "opencode"), "p", cwd=tmp_path, timeout=5,
+        agent(command, "fake"), "p", cwd=tmp_path, timeout=5,
         transcript_path=transcript, output_tail_chars=4,
     )
     assert result.meta["outcome"] == "failed"
@@ -190,7 +177,7 @@ def test_raw_output_tail_and_run_record(tmp_path):
     assert record["schema"] == "ag.agent-run.v1"
     assert record["request_id"] == "request-1"
     assert record["outcome"] == "failed"
-    assert record["harness"] == "opencode"
+    assert record["harness"] == "fake"
 
 
 def test_agcode_argv_shape_and_model_smuggling_rejected(tmp_path):

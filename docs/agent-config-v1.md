@@ -37,7 +37,7 @@ project = "example"
 effort = "low" # opaque model options are allowed
 
 [profiles.local]
-harness = "opencode"
+harness = "agcode"
 model = "ollama/example-model"
 
 [profiles.hosted]
@@ -56,23 +56,18 @@ requires = ["workspace_fs"]
 provides = []
 ```
 
-The optional `project` value is descriptive. Applications pass their own
-project name to resolution when they want application-specific diagnostic
-wording.
+The optional `project` value is descriptive.
 
 ### Local overlay shape
 
 ```toml
 schema = "ag.agent-config.v1"
 
-[local.harness.opencode]
-command = "~/.local/bin/opencode"
-
 [local.harness.claude_code]
 command_glob = "~/.local/lib/claude-*/claude"
 
 [local.provider.ollama]
-base_url = "http://example.invalid:11434/v1"
+base_url = "http://example.invalid:11434"
 
 [local.secrets]
 anthropic_api_key_file = "~/.secrets/anthropic"
@@ -117,7 +112,6 @@ The v1 harness vocabulary is closed:
 
 | harness | command convention | provider compatibility | intrinsic capabilities |
 |---|---|---|---|
-| `opencode` | `opencode run --format json -m <model>` | any configured provider | `agentic_tools`, `workspace_fs` |
 | `claude_code` | `claude -p --output-format json --model <native-name>` | `anthropic` only | `agentic_tools`, `workspace_fs` |
 | `agcode` | `python -m agag.agcode --model <native-name> [--base-url <endpoint>]` | any provider serving a Messages API endpoint | `agentic_tools`, `workspace_fs` |
 | `fake` | configured test executable | any | none |
@@ -131,21 +125,23 @@ model request is still not a harness.
 `agcode` is this package's own module, so its resolved "executable" is a Python
 interpreter: the command defaults to the interpreter running the resolver
 (`sys.executable`), and `local.harness.agcode.command` overrides it with a
-foreign one. Unlike OpenCode, `agcode` does not require
-`local.provider.ollama.base_url` — it defaults to `http://localhost:11434` — but
-the endpoint is passed as `--base-url` whenever one is resolved.
+foreign one. It does not require `local.provider.ollama.base_url` — it defaults
+to `http://localhost:11434` — but the endpoint is passed as `--base-url`
+whenever one is resolved. Note the spelling: agcode posts to
+`{base_url}/v1/messages`, so the declared endpoint is the bare base URL, with
+no OpenAI-compatible `/v1` suffix.
 
-`agcode` was added to the closed v1 vocabulary after `opencode`, `claude_code`,
-and `fake`. Any pyagag older than the commit that added it rejects a profile
-with `harness = "agcode"` as `E_UNKNOWN_HARNESS`; consumers upgrade their pin
-before adopting such a profile. There is no compatibility shim, by design —
-silent fallback is what this contract forbids.
+The vocabulary has changed twice, and neither change carries a compatibility
+shim — silent fallback is what this contract forbids. `agcode` was **added**
+after `claude_code` and `fake`; a pyagag older than that commit rejects
+`harness = "agcode"` as `E_UNKNOWN_HARNESS`. `opencode` was later **removed**;
+a pyagag newer than that commit rejects `harness = "opencode"` the same way.
+A consumer moves its pin and its profiles together.
 
 A canonical model ID is `<provider>/<native-name>`. The provider matches
 `[a-z0-9_-]+`; the native name is non-empty and contains no slash or
-whitespace. OpenCode receives the full canonical ID. Claude Code and agcode
-receive the native name after the first slash; records keep the canonical ID
-either way.
+whitespace. Claude Code and agcode receive the native name after the first
+slash; records keep the canonical ID either way.
 
 ## Stable errors
 
@@ -209,7 +205,7 @@ shape:
   "request_id": "application-owned-id",
   "role": "generator",
   "profile": "local",
-  "harness": "opencode",
+  "harness": "agcode",
   "provider": "ollama",
   "model": "ollama/example-model",
   "duration_ms": 1234,

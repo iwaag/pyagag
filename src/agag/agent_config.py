@@ -13,9 +13,8 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "ag.agent-config.v1"
-CANONICAL_HARNESSES = {"opencode", "claude_code", "agcode", "fake"}
+CANONICAL_HARNESSES = {"claude_code", "agcode", "fake"}
 INTRINSIC_CAPABILITIES = {
-    "opencode": {"agentic_tools", "workspace_fs"},
     "claude_code": {"agentic_tools", "workspace_fs"},
     "agcode": {"agentic_tools", "workspace_fs"},
     "fake": set(),
@@ -168,7 +167,7 @@ def _resolve_command(harness: str, overlay: dict[str, Any], *, check_available: 
     # that runs ``python -m agag.agcode``. sys.executable is absolute, which
     # skips the PATH lookup below and satisfies the file/exec checks; an
     # overlay command may still point at a foreign interpreter.
-    defaults = {"opencode": "opencode", "claude_code": "claude", "agcode": sys.executable}
+    defaults = {"claude_code": "claude", "agcode": sys.executable}
     command = os.path.expanduser(command or defaults.get(harness, ""))
     resolved = shutil.which(command) if command and not Path(command).is_absolute() else command
     if check_available and (not resolved or not Path(resolved).is_file() or not os.access(resolved, os.X_OK)):
@@ -208,7 +207,6 @@ def resolve_role(
     *,
     profile_override: str | None = None,
     check_available: bool = True,
-    project_name: str = "application",
 ) -> ResolvedAgent:
     roles = _table(config, "roles")
     if role not in roles:
@@ -230,11 +228,6 @@ def resolve_role(
         raise AgentConfigError("E_CAPABILITY_UNMET", f"role {role!r} lacks {sorted(missing)}")
     provider = model.split("/", 1)[0]
     provider_base_url = _table(_table(_table(overlay, "local"), "provider"), provider).get("base_url")
-    if check_available and harness == "opencode" and provider == "ollama" and not provider_base_url:
-        raise AgentConfigError(
-            "E_UNAVAILABLE",
-            f"local.provider.ollama.base_url is required by {project_name} OpenCode",
-        )
     return ResolvedAgent(
         role,
         profile_name,

@@ -964,6 +964,20 @@ def test_cli_defaults_are_the_four_tools_and_no_suffix(backend, tmp_path):
     assert req["system"] == PINNED_TEMPLATE.replace("{working_dir}", str(tmp_path.resolve()))
 
 
+def test_cli_read_only_preset(backend, tmp_path):
+    backend.responses.append(text_response("all done"))
+    proc = run_cli(backend, "--working-dir", str(tmp_path), "--tools", "read-only")
+    assert proc.returncode == 0, proc.stderr
+    [req] = backend.requests
+    assert [t["name"] for t in req["tools"]] == ["read", "list"]
+
+
+def test_cli_rejects_unknown_tool_preset(backend, tmp_path):
+    proc = run_cli(backend, "--working-dir", str(tmp_path), "--tools", "everything")
+    assert proc.returncode == 2
+    assert backend.requests == []
+
+
 def test_cli_failed_run_exit_1(backend, tmp_path):
     backend.responses.append(text_response(""))
     proc = run_cli(backend, "--working-dir", str(tmp_path))

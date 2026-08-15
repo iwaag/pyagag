@@ -216,6 +216,15 @@ READONLY_TOOLS: tuple[Tool, ...] = (
 )
 
 
+# Presets reachable from the CLI, so a subprocess caller (run_harness) can pick
+# a door's tool set without an in-process import. "default" is what the CLI
+# uses when the flag is absent.
+TOOL_PRESETS: dict[str, tuple[Tool, ...]] = {
+    "default": DEFAULT_TOOLS,
+    "read-only": READONLY_TOOLS,
+}
+
+
 def tool_table(tools: Sequence[Tool]) -> dict[str, Tool]:
     """Name → Tool, rejecting duplicates rather than silently shadowing."""
     table: dict[str, Tool] = {}
@@ -686,6 +695,16 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Messages API base URL (default: AGCODE_BASE_URL or local ollama)",
     )
+    parser.add_argument(
+        "--tools",
+        choices=sorted(TOOL_PRESETS),
+        default="default",
+        help=(
+            "the offered tool set: 'default' is read/write/list/run, "
+            "'read-only' is read/list. The set is the permission; there is no "
+            "deny rule (default: default)"
+        ),
+    )
     parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS)
     parser.add_argument("--deadline-s", type=float, default=DEFAULT_DEADLINE_S)
     parser.add_argument("--max-tokens", type=int, default=4096)
@@ -728,6 +747,7 @@ def main(argv: list[str] | None = None) -> int:
             max_tokens=args.max_tokens,
             temperature=args.temperature,
             task_input=task_input,
+            tools=TOOL_PRESETS[args.tools],
             transcript_path=args.transcript,
         )
     except ValueError as e:  # argument-validation errors, e.g. missing model

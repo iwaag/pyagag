@@ -58,6 +58,9 @@ result = agcode.run(
   built-ins. **The tool set is the permission surface** — `READONLY_TOOLS`
   (`read` + `list`) offers a door no way to write, rather than denying calls it
   offered anyway. There is nothing forbidden for a weak model to attempt.
+  The two presets are also reachable across the subprocess boundary as
+  `--tools default` (the CLI default) and `--tools read-only`, so a
+  `run_harness()` caller can pick a door's tool set through `extra_args`.
 - `system_suffix=` appends per-role instructions to the pinned system prompt.
   Read it from disk per run and editing the file takes effect on the next
   request. The working-directory sentence stays first and unconditional.

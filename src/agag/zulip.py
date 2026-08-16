@@ -30,6 +30,8 @@ from base64 import b64encode
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agag.status import StatusWriter, default_status_path
+
 # Long-poll socket timeout. Zulip holds the connection open until an event or
 # its own heartbeat; this is only the client-side ceiling.
 POLL_TIMEOUT_SECONDS = 90
@@ -386,7 +388,7 @@ def log(message: str) -> None:
     print(f"{stamp} {message}", file=sys.stderr, flush=True)
 
 
-def serve(client: ZulipClient, handler, log=log, accept=is_dm_for_us) -> None:
+def serve(client: ZulipClient, handler, log=log, accept=is_dm_for_us, status=None) -> None:
     """Long-poll for messages addressed to this bot and pass each to `handler`.
 
     `handler(client, message, self_id)` is called for every message `accept`
@@ -394,7 +396,13 @@ def serve(client: ZulipClient, handler, log=log, accept=is_dm_for_us) -> None:
     channel messages); anything it raises is logged and the loop continues.
     Deliberately dumb: no queue persistence, no delivery guarantees. A message
     that arrives while this is down is lost and the sender can resend.
+
+    `status` is a `StatusWriter`; by default one at `agag.status`'s default
+    path, so a listener started in its workspace is observable without being
+    configured. Its file is rewritten only after a poll that actually
+    returned — see `agag/status.py` for why that is the whole honesty rule.
     """
+    status = status if status is not None else StatusWriter(default_status_path(), log=log)
     self_id: int | None = None
     queue_id: str | None = None
     last_event_id = -1
@@ -409,17 +417,21 @@ def serve(client: ZulipClient, handler, log=log, accept=is_dm_for_us) -> None:
                 queue_id, last_event_id = client.register()
                 log(f"registered event queue {queue_id} (last_event_id={last_event_id})")
             events = client.poll(queue_id, last_event_id)
-        except ZulipTimeout:
+        except ZulipTimeout as error:
+            status.record_error(str(error))
             continue  # nothing happened within the poll window
         except QueueExpired as error:
+            status.record_error(str(error))
             log(f"event queue expired ({error}); re-registering")
             queue_id = None
             continue
         except ZulipError as error:
+            status.record_error(str(error))
             log(f"zulip call failed: {error}; retrying in {RETRY_SECONDS}s")
             queue_id = None
             time.sleep(RETRY_SECONDS)
             continue
+        status.record_poll_ok(queue_id)
         for event in events:
             last_event_id = max(last_event_id, int(event.get("id", last_event_id)))
             if event.get("type") != "message":
@@ -464,7 +476,7 @@ def sweep_topics(
 
 
 def sweep_serve(
-    client: ZulipClient, handler, *, topic_filter: str | tuple[str, ...], log=log
+    client: ZulipClient, handler, *, topic_filter: str | tuple[str, ...], log=log, status=None
 ) -> None:
     """Pull-based listener: poll for message events, but treat each only as a
     "something changed" signal and re-scan the subscribed channels for topics
@@ -476,7 +488,10 @@ def sweep_serve(
     that arrived while this was down is found by the startup sweep, with no
     queue persistence involved. The loop is single-threaded and serial, so a
     long handler simply delays the next sweep; events keep queueing meanwhile.
+
+    `status` behaves exactly as in `serve`.
     """
+    status = status if status is not None else StatusWriter(default_status_path(), log=log)
     self_id: int | None = None
     queue_id: str | None = None
     last_event_id = -1
@@ -499,17 +514,21 @@ def sweep_serve(
                     except Exception as error:  # one bad topic must not end the loop
                         log(f"handler failed on {channel!r}/{topic!r}: {error!r}")
             events = client.poll(queue_id, last_event_id)
-        except ZulipTimeout:
+        except ZulipTimeout as error:
+            status.record_error(str(error))
             continue  # nothing happened within the poll window
         except QueueExpired as error:
+            status.record_error(str(error))
             log(f"event queue expired ({error}); re-registering")
             queue_id = None
             continue
         except ZulipError as error:
+            status.record_error(str(error))
             log(f"zulip call failed: {error}; retrying in {RETRY_SECONDS}s")
             queue_id = None
             time.sleep(RETRY_SECONDS)
             continue
+        status.record_poll_ok(queue_id)
         for event in events:
             last_event_id = max(last_event_id, int(event.get("id", last_event_id)))
             if event.get("type") == "message":

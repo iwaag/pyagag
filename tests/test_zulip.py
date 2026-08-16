@@ -6,6 +6,7 @@ per test and stops the loop by raising `_Stop`.
 
 import pytest
 
+from agag.status import StatusWriter
 from agag.zulip import (
     RESOLVED_TOPIC_PREFIX,
     QueueExpired,
@@ -23,6 +24,11 @@ from agag.zulip import (
     topic_dump,
     topic_write,
 )
+
+
+def no_status():
+    """A disabled StatusWriter: listener tests must not write into the repo."""
+    return StatusWriter(None)
 
 
 class _Stop(Exception):
@@ -76,7 +82,7 @@ def run(client):
     """Drive `serve` until a fake call raises `_Stop`; collect handled DMs."""
     seen = []
     with pytest.raises(_Stop):
-        serve(client, lambda c, m, s: seen.append(m), log=lambda _: None)
+        serve(client, lambda c, m, s: seen.append(m), log=lambda _: None, status=no_status())
     return seen
 
 
@@ -171,6 +177,7 @@ def test_serve_with_wider_accept_sees_channel_messages():
             lambda c, m, s: seen.append(m["type"]),
             log=lambda _: None,
             accept=lambda m, s: m.get("sender_id") != s,
+            status=no_status(),
         )
     assert seen == ["stream", "private"]
 
@@ -287,7 +294,7 @@ def test_serve_keeps_going_when_a_handler_raises():
         raise RuntimeError("handler exploded")
 
     with pytest.raises(_Stop):
-        serve(client, boom, log=logged.append)
+        serve(client, boom, log=logged.append, status=no_status())
     assert any("handler exploded" in line for line in logged)
 
 
@@ -337,6 +344,7 @@ def sweep_run(client, topic_filter="mission-"):
             lambda channel, topic: handled.append((channel, topic)),
             topic_filter=topic_filter,
             log=lambda _: None,
+            status=no_status(),
         )
     return handled
 
@@ -459,7 +467,7 @@ def test_sweep_serve_keeps_going_when_the_handler_raises():
         handled.append(topic)
 
     with pytest.raises(_Stop):
-        sweep_serve(client, handler, topic_filter="mission-", log=logged.append)
+        sweep_serve(client, handler, topic_filter="mission-", log=logged.append, status=no_status())
     assert handled == ["mission-b"]
     assert any("handler exploded" in line for line in logged)
 
@@ -509,3 +517,50 @@ def test_topic_write_builds_client_from_shared_environment(monkeypatch, tmp_path
 
     assert topic_write("mission-one", "done") == "success"
     assert calls == [("pj-demo", "mission-one", "done")]
+
+
+class RecordingStatus:
+    """Records the StatusWriter calls a listener loop makes, in order."""
+
+    def __init__(self):
+        self.calls = []
+
+    def record_poll_ok(self, queue_id):
+        self.calls.append(("ok", queue_id))
+
+    def record_error(self, error):
+        self.calls.append(("error", str(error)))
+
+
+def test_serve_records_a_poll_only_when_the_poll_returned():
+    client = FakeClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[
+            [],                                   # returned, nothing in it -> still alive
+            ZulipTimeout("events timed out"),     # never returned -> not alive
+            QueueExpired("bad event queue id"),   # failed -> not alive
+            [message_event(1, sender_id=99)],     # returned -> alive
+            _Stop(),
+        ],
+    )
+    status = RecordingStatus()
+    with pytest.raises(_Stop):
+        serve(client, lambda c, m, s: None, log=lambda _: None, status=status)
+    assert [kind for kind, _ in status.calls] == ["ok", "error", "error", "ok"]
+    assert status.calls[0] == ("ok", "queue1")
+
+
+def test_sweep_serve_records_a_poll_only_when_the_poll_returned():
+    client = SweepClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[[], ZulipError("boom"), _Stop()],
+        topics_by_channel={},
+        last_sender={},
+    )
+    status = RecordingStatus()
+    with pytest.raises(_Stop):
+        sweep_serve(
+            client, lambda channel, topic: None, topic_filter="mission-",
+            log=lambda _: None, status=status,
+        )
+    assert [kind for kind, _ in status.calls] == ["ok", "error"]

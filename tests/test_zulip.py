@@ -4,15 +4,24 @@ No network: `serve` is driven by a fake client that scripts one call sequence
 per test and stops the loop by raising `_Stop`.
 """
 
+import email.message
+import io
+import urllib.error
+
 import pytest
 
 from agag.status import StatusWriter
 from agag.zulip import (
+    RATE_LIMIT_MAX_SECONDS,
     RESOLVED_TOPIC_PREFIX,
+    RETRY_SECONDS,
     QueueExpired,
+    RateLimited,
     ZulipClient,
     ZulipError,
     ZulipTimeout,
+    rate_limit_backoff,
+    retry_after_seconds,
     channel_name,
     dm_partners,
     is_channel_message_for_us,
@@ -548,6 +557,155 @@ def test_serve_records_a_poll_only_when_the_poll_returned():
         serve(client, lambda c, m, s: None, log=lambda _: None, status=status)
     assert [kind for kind, _ in status.calls] == ["ok", "error", "error", "ok"]
     assert status.calls[0] == ("ok", "queue1")
+
+
+# --- rate limiting (lighter_agag_listen p1 step 1) -------------------------
+
+
+def http_error(code, body, headers=None):
+    """A urllib HTTPError shaped the way urlopen hands one to `call`."""
+    message = email.message.Message()
+    for name, value in (headers or {}).items():
+        message[name] = value
+    return urllib.error.HTTPError(
+        "https://zulip.example.invalid/api/v1/events", code, "error",
+        message, io.BytesIO(body.encode("utf-8")),
+    )
+
+
+def client_whose_calls_raise(error, monkeypatch):
+    """A real `ZulipClient` whose transport always raises `error`."""
+    def urlopen(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr("agag.zulip.urllib.request.urlopen", urlopen)
+    return ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+
+
+def test_call_raises_rate_limited_with_the_servers_retry_after(monkeypatch):
+    client = client_whose_calls_raise(
+        http_error(
+            429,
+            '{"result":"error","code":"RATE_LIMIT_HIT","msg":"API usage exceeded rate limit"}',
+            {"Retry-After": "34.2", "x-ratelimit-remaining": "0"},
+        ),
+        monkeypatch,
+    )
+    with pytest.raises(RateLimited) as error:
+        client.call("GET", "events")
+    assert error.value.retry_after == pytest.approx(34.2)
+    assert "429" in str(error.value)
+
+
+def test_call_falls_back_to_the_json_body_then_to_the_default(monkeypatch):
+    client = client_whose_calls_raise(
+        http_error(429, '{"msg":"slow down","retry-after":12}'), monkeypatch
+    )
+    with pytest.raises(RateLimited) as error:
+        client.call("GET", "events")
+    assert error.value.retry_after == pytest.approx(12)
+
+    client = client_whose_calls_raise(http_error(429, "not json at all"), monkeypatch)
+    with pytest.raises(RateLimited) as error:
+        client.call("GET", "events")
+    assert error.value.retry_after == pytest.approx(60)
+
+
+def test_call_still_distinguishes_a_dead_queue_from_a_rate_limit(monkeypatch):
+    client = client_whose_calls_raise(
+        http_error(400, '{"code":"BAD_EVENT_QUEUE_ID","msg":"gone"}'), monkeypatch
+    )
+    with pytest.raises(QueueExpired):
+        client.call("GET", "events")
+
+
+def test_retry_after_prefers_the_header_over_the_body():
+    headers = email.message.Message()
+    headers["x-ratelimit-reset"] = "9"
+    assert retry_after_seconds(headers, {"retry-after": 99}) == pytest.approx(9)
+    assert retry_after_seconds(None, None) == pytest.approx(60)
+
+
+def test_rate_limit_backoff_floors_at_retry_seconds_doubles_and_is_capped():
+    plain = lambda low, high: 0.0  # noqa: E731 - jitter off for the arithmetic
+    assert rate_limit_backoff(1, strikes=1, jitter=plain) == RETRY_SECONDS
+    assert rate_limit_backoff(30, strikes=1, jitter=plain) == 30
+    assert rate_limit_backoff(30, strikes=3, jitter=plain) == 120
+    assert rate_limit_backoff(30, strikes=9, jitter=plain) == RATE_LIMIT_MAX_SECONDS
+    assert rate_limit_backoff(30, strikes=1) > 30  # jitter is additive
+
+
+def test_serve_keeps_its_queue_and_honours_retry_after_on_429(monkeypatch):
+    slept = []
+    monkeypatch.setattr("agag.zulip.time.sleep", lambda seconds: slept.append(seconds))
+    client = FakeClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[RateLimited("429", retry_after=42), [], _Stop()],
+    )
+    run(client)
+    assert client.registrations == 1  # the queue was never dropped
+    assert slept[0] >= 42
+
+
+def test_sweep_serve_keeps_its_queue_and_its_pending_sweep_on_429(monkeypatch):
+    slept = []
+    monkeypatch.setattr("agag.zulip.time.sleep", lambda seconds: slept.append(seconds))
+    client = SweepClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[RateLimited("429", retry_after=42), _Stop()],
+        topics_by_channel={"pj-demo": ["mission-waiting"]},
+        last_sender={("pj-demo", "mission-waiting"): 99},
+    )
+    # Startup sweep, then a 429 on the poll: no re-register, no second sweep
+    # (the first one completed), and the wait honours the header.
+    assert sweep_run(client) == [("pj-demo", "mission-waiting")]
+    assert client.registrations == 1
+    assert slept == [pytest.approx(42, abs=4.3)]
+
+
+def test_sweep_serve_resumes_a_sweep_that_a_429_cut_short(monkeypatch):
+    monkeypatch.setattr("agag.zulip.time.sleep", lambda seconds: None)
+
+    class Interrupted(SweepClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.subscription_calls = 0
+
+        def subscriptions(self):
+            self.subscription_calls += 1
+            if self.subscription_calls == 1:
+                raise RateLimited("429 mid-sweep", retry_after=1)
+            return super().subscriptions()
+
+    client = Interrupted(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[_Stop()],
+        topics_by_channel={"pj-demo": ["mission-waiting"]},
+        last_sender={("pj-demo", "mission-waiting"): 99},
+    )
+    # The startup sweep dies on its first call; `dirty` survives the backoff,
+    # so the retry sweeps rather than dropping the work on the floor.
+    assert sweep_run(client) == [("pj-demo", "mission-waiting")]
+    assert client.registrations == 1
+
+
+def test_rate_limit_backoff_grows_while_429s_repeat_and_resets_after_success(monkeypatch):
+    slept = []
+    monkeypatch.setattr("agag.zulip.time.sleep", lambda seconds: slept.append(seconds))
+    monkeypatch.setattr("agag.zulip.random.uniform", lambda low, high: 0.0)
+    client = FakeClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[
+            RateLimited("429", retry_after=10),
+            RateLimited("429", retry_after=10),
+            RateLimited("429", retry_after=10),
+            [],                                    # a poll returns: strike count resets
+            RateLimited("429", retry_after=10),
+            _Stop(),
+        ],
+    )
+    run(client)
+    assert slept == [10, 20, 40, 10]
 
 
 def test_sweep_serve_records_a_poll_only_when_the_poll_returned():

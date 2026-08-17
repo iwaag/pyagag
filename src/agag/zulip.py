@@ -19,6 +19,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import random
 import shlex
 import ssl
 import sys
@@ -39,6 +40,14 @@ POLL_TIMEOUT_SECONDS = 90
 # How long the listener waits after a failed Zulip call before trying again.
 RETRY_SECONDS = 5
 
+# Rate-limit backoff. A 429 is not a broken connection: retrying hard is the
+# disease, not the cure (see the lighter_agag_listen episode). The server tells
+# us how long to wait; these bound the wait when it does not, and when 429s
+# keep coming.
+RATE_LIMIT_DEFAULT_SECONDS = 60
+RATE_LIMIT_MAX_SECONDS = 300
+RATE_LIMIT_JITTER_FRACTION = 0.1
+
 # Zulip's resolved-topic marker: the topic is renamed to "✔ <topic>".
 RESOLVED_TOPIC_PREFIX = "✔ "
 
@@ -57,6 +66,59 @@ class QueueExpired(ZulipError):
 
 class ZulipTimeout(ZulipError):
     """The call hit the client-side timeout. On a long poll this is normal."""
+
+
+class RateLimited(ZulipError):
+    """HTTP 429. Nothing is wrong with the queue — only wait, then continue.
+
+    `retry_after` is what the server asked for, in seconds; callers still
+    apply their own floor and backoff on top of it.
+    """
+
+    def __init__(self, message: str, retry_after: float = RATE_LIMIT_DEFAULT_SECONDS):
+        super().__init__(message)
+        self.retry_after = float(retry_after)
+
+
+def _positive_float(value) -> float | None:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+def retry_after_seconds(headers, body: dict | None = None) -> float:
+    """How long the server wants us to wait, from whatever it told us.
+
+    `Retry-After` first (Zulip sends it on a 429), then `x-ratelimit-reset`,
+    then the `retry-after` field Zulip also puts in the JSON error body, then
+    a conservative default.
+    """
+    get = getattr(headers, "get", None)
+    if get is not None:
+        for name in ("Retry-After", "x-ratelimit-reset"):
+            seconds = _positive_float(get(name))
+            if seconds is not None:
+                return seconds
+    if body:
+        seconds = _positive_float(body.get("retry-after"))
+        if seconds is not None:
+            return seconds
+    return float(RATE_LIMIT_DEFAULT_SECONDS)
+
+
+def rate_limit_backoff(retry_after: float, strikes: int, jitter=None) -> float:
+    """Seconds to sleep after the `strikes`-th consecutive 429.
+
+    Never shorter than what the server asked for and never shorter than the
+    ordinary retry, doubled per consecutive strike up to the ceiling, plus
+    jitter so listeners sharing one quota do not resynchronise.
+    """
+    jitter = jitter if jitter is not None else random.uniform
+    base = max(float(retry_after), float(RETRY_SECONDS))
+    delay = min(base * (2 ** max(strikes - 1, 0)), float(RATE_LIMIT_MAX_SECONDS))
+    return delay + jitter(0.0, delay * RATE_LIMIT_JITTER_FRACTION)
 
 
 def read_env(path: Path) -> dict[str, str]:
@@ -129,6 +191,16 @@ class ZulipClient:
             try:
                 parsed = json.loads(body)
             except json.JSONDecodeError:
+                parsed = None
+            if error.code == 429:
+                # Its own class: the caller must wait, not reconnect.
+                delay = retry_after_seconds(error.headers, parsed)
+                detail = (parsed or {}).get("msg") or body[:200]
+                raise RateLimited(
+                    f"{method} {path} -> HTTP 429: {detail} (retry after {delay:.0f}s)",
+                    retry_after=delay,
+                ) from error
+            if parsed is None:
                 raise ZulipError(f"{method} {path} -> HTTP {error.code}: {body[:200]}") from error
             if parsed.get("code") == "BAD_EVENT_QUEUE_ID":
                 raise QueueExpired(parsed.get("msg", "bad event queue id")) from error
@@ -406,6 +478,7 @@ def serve(client: ZulipClient, handler, log=log, accept=is_dm_for_us, status=Non
     self_id: int | None = None
     queue_id: str | None = None
     last_event_id = -1
+    strikes = 0
     while True:
         try:
             if self_id is None:
@@ -425,12 +498,21 @@ def serve(client: ZulipClient, handler, log=log, accept=is_dm_for_us, status=Non
             log(f"event queue expired ({error}); re-registering")
             queue_id = None
             continue
+        except RateLimited as error:
+            # Before the generic arm on purpose: keep the queue, just wait.
+            strikes += 1
+            delay = rate_limit_backoff(error.retry_after, strikes)
+            status.record_error(str(error))
+            log(f"rate limited: {error}; backing off {delay:.1f}s (strike {strikes}, queue kept)")
+            time.sleep(delay)
+            continue
         except ZulipError as error:
             status.record_error(str(error))
             log(f"zulip call failed: {error}; retrying in {RETRY_SECONDS}s")
             queue_id = None
             time.sleep(RETRY_SECONDS)
             continue
+        strikes = 0
         status.record_poll_ok(queue_id)
         for event in events:
             last_event_id = max(last_event_id, int(event.get("id", last_event_id)))
@@ -496,6 +578,7 @@ def sweep_serve(
     queue_id: str | None = None
     last_event_id = -1
     dirty = False
+    strikes = 0
     while True:
         try:
             if self_id is None:
@@ -506,13 +589,15 @@ def sweep_serve(
                 log(f"registered event queue {queue_id} (last_event_id={last_event_id})")
                 dirty = True  # anything may have happened while unregistered
             if dirty:
-                dirty = False
                 for channel, topic in sweep_topics(client, self_id, topic_filter):
                     log(f"sweep matched {channel!r}/{topic!r}")
                     try:
                         handler(channel, topic)
                     except Exception as error:  # one bad topic must not end the loop
                         log(f"handler failed on {channel!r}/{topic!r}: {error!r}")
+                # Cleared only once the sweep finished: a sweep cut short by a
+                # rate limit is work still owed, not work done.
+                dirty = False
             events = client.poll(queue_id, last_event_id)
         except ZulipTimeout as error:
             status.record_error(str(error))
@@ -522,12 +607,22 @@ def sweep_serve(
             log(f"event queue expired ({error}); re-registering")
             queue_id = None
             continue
+        except RateLimited as error:
+            # Before the generic arm on purpose: the queue is fine and `dirty`
+            # stays as it was, so the pending sweep survives the wait.
+            strikes += 1
+            delay = rate_limit_backoff(error.retry_after, strikes)
+            status.record_error(str(error))
+            log(f"rate limited: {error}; backing off {delay:.1f}s (strike {strikes}, queue kept)")
+            time.sleep(delay)
+            continue
         except ZulipError as error:
             status.record_error(str(error))
             log(f"zulip call failed: {error}; retrying in {RETRY_SECONDS}s")
             queue_id = None
             time.sleep(RETRY_SECONDS)
             continue
+        strikes = 0
         status.record_poll_ok(queue_id)
         for event in events:
             last_event_id = max(last_event_id, int(event.get("id", last_event_id)))

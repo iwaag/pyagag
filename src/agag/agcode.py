@@ -528,7 +528,9 @@ def run(
     "user", "content": [...tool_result...]}}`` after the tool calls it asked
     for. The shapes match claude_code's ``stream-json`` events on purpose, so
     one consumer can watch either harness. Events are telemetry, like usage: a
-    consumer that raises never fails an otherwise good run.
+    consumer that raises never fails an otherwise good run — its first
+    complaint lands in ``meta["event_consumer_error"]`` instead, so a display
+    that silently stopped working leaves a trace.
 
     ``transcript_meta`` merges extra caller-known fields (e.g. fixture
     markers) into the transcript's meta header record.
@@ -567,13 +569,15 @@ def run(
         header.update(transcript_meta)
     transcript = _Transcript(transcript_path, header)
 
+    consumer_errors: list[str] = []
+
     def emit(event: dict[str, Any]) -> None:
         if on_event is None:
             return
         try:
             on_event(event)
-        except Exception:  # noqa: BLE001 - events are telemetry, never fatal
-            pass
+        except Exception as error:  # noqa: BLE001 - events are telemetry, never fatal
+            consumer_errors.append(f"{type(error).__name__}: {error}")
 
     started = time.monotonic()
     turns = 0
@@ -720,6 +724,11 @@ def run(
         "truncated": truncated,
         "empty_final": not output.strip(),
     }
+    if consumer_errors:
+        # Never a failure: the consumer watches the run, it does not do it.
+        meta["event_consumer_error"] = (
+            f"{len(consumer_errors)} event(s) not consumed; first: {consumer_errors[0]}"
+        )
     if failure is not None:
         meta["failure"] = f"{failure_kind}: {failure}"
         meta["failure_kind"] = failure_kind

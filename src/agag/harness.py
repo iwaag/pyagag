@@ -158,12 +158,13 @@ def _run_streaming(
     """Launch one harness process and forward its stdout JSON lines as events.
 
     Mirrors ``subprocess.run(capture_output=True, timeout=...)``: returns
-    ``(returncode, stdout, stderr)``, raises ``subprocess.TimeoutExpired``
+    ``(returncode, stdout, stderr, consumer_errors)``, raises ``subprocess.TimeoutExpired``
     carrying the stdout captured so far, and lets ``OSError`` from the launch
     propagate. Each stdout line that parses as a JSON object reaches
     ``on_event`` the moment it arrives (on the reader thread); a consumer
-    that raises is ignored — progress is telemetry, and a rendering bug must
-    not kill a run mid-flight.
+    that raises does not kill the run — progress is telemetry — but its
+    first complaint is returned rather than swallowed, so a display that
+    silently stopped working leaves a trace.
     """
     proc = subprocess.Popen(
         argv,
@@ -176,6 +177,7 @@ def _run_streaming(
     )
     out_lines: list[str] = []
     err_chunks: list[str] = []
+    consumer_errors: list[str] = []
 
     def pump_stdout() -> None:
         for line in proc.stdout:
@@ -190,8 +192,8 @@ def _run_streaming(
             if isinstance(event, dict):
                 try:
                     on_event(event)
-                except Exception:  # noqa: BLE001 - see docstring
-                    pass
+                except Exception as error:  # noqa: BLE001 - see docstring
+                    consumer_errors.append(f"{type(error).__name__}: {error}")
 
     def drain_stderr() -> None:
         err_chunks.append(proc.stderr.read())
@@ -219,7 +221,7 @@ def _run_streaming(
         raise subprocess.TimeoutExpired(argv, timeout, output="".join(out_lines)) from None
     for thread in threads:
         thread.join(timeout=5)
-    return proc.returncode, "".join(out_lines), "".join(err_chunks)
+    return proc.returncode, "".join(out_lines), "".join(err_chunks), consumer_errors
 
 
 def run_harness(
@@ -271,9 +273,10 @@ def run_harness(
     if agent.provider_base_url:
         env[f"AGENT_PROVIDER_{agent.provider.upper()}_BASE_URL"] = agent.provider_base_url
     started = time.monotonic()
+    consumer_errors: list[str] = []
     try:
         if stream:
-            returncode, stdout, stderr = _run_streaming(
+            returncode, stdout, stderr, consumer_errors = _run_streaming(
                 argv, prompt, cwd=cwd, timeout=timeout, env=env, on_event=on_event
             )
         else:
@@ -357,6 +360,12 @@ def run_harness(
     # report; the caller decides what an empty answer means for its flow.
     if failure is None and not output.strip():
         meta["empty_final"] = True
+    # A progress display that quietly stopped working leaves this behind. It
+    # says nothing about the run itself, which is why it is not a failure.
+    if consumer_errors:
+        meta["event_consumer_error"] = (
+            f"{len(consumer_errors)} event(s) not consumed; first: {consumer_errors[0]}"
+        )
     meta["outcome"] = "failed" if failure else "done"
     # A harness that ended itself on a budget or deadline reports "aborted";
     # that stays, because run_harness spells its own timeout the same way. Only

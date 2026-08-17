@@ -342,6 +342,11 @@ def test_claude_stream_events_and_extraction(tmp_path):
     )
 
     assert [event["type"] for event in events] == ["system", "assistant", "result"]
+    # The consumer's complaints are kept, not swallowed: a progress display
+    # that quietly stopped working would otherwise leave no trace at all.
+    assert result.meta.pop("event_consumer_error") == (
+        "3 event(s) not consumed; first: RuntimeError: a progress rendering bug"
+    )
     assert result.output == "done"
     assert result.exit_code == 0
     assert result.meta == {

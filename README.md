@@ -82,6 +82,37 @@ the caller's ignored `.local/topics/` tree. `topic_write(topic, text)` is the
 matching outbound convenience function; a listener can inject its client and
 channel, while standalone callers use `ZULIP_ENV` and `ZULIP_CHANNEL`.
 
+### Project channels: subscription is the routing decision
+
+A project channel (`#pj-<name>` in the agag realm) is a room, and **who is
+subscribed to it is who is being asked to do the work**. Whoever creates the
+project makes that choice by subscribing the accounts it wants: this agent
+rather than that one, this node's instance rather than another node's. There is
+no second routing layer underneath it — for the topic kinds that carry work,
+being in the room *is* the assignment.
+
+Two rules follow, and they are the whole convention:
+
+- **A listener never widens its own subscriptions.** No reconciliation loop, no
+  subscribing itself to channels it discovers, no subscribing anyone else.
+  Zulip delivers no events for an unsubscribed channel, which makes
+  subscription a boundary a listener cannot accidentally cross — but only for
+  as long as listeners leave it alone. A listener that reconciles subscriptions
+  erases the creator's decision, silently and every time it runs.
+- **Give each instance its own bot account.** An account is what makes an agent
+  addressable and subscribable, so one account per running instance — not one
+  per kind of agent — is what makes the choice expressible at all.
+
+Agents of *different kinds* can share a room safely, because they are separated
+by disjoint topic prefixes: each kind acts only on the prefixes it owns, and a
+mention gate breaks the loop where two kinds would otherwise answer each other
+forever. That separation does not extend to two instances of the *same* kind:
+they own the same prefixes, and the last-poster rule that keeps one listener
+from answering itself does not keep it from answering its twin — each one's
+post re-arms the other. So put two same-kind instances in one project channel
+only when their topics carry an explicit addressee; otherwise the creator picks
+one instance per project channel, which is the point of picking at all.
+
 ## Development
 
 ```sh

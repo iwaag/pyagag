@@ -345,6 +345,20 @@ class ZulipClient:
             params["principals"] = principals
         return self.call("POST", "users/me/subscriptions", params)
 
+    def unsubscribe_channels(self, names: list[str], principals: list[int] | None = None) -> dict:
+        """Unsubscribe this bot, or `principals`, from channels by name.
+
+        The counterpart of `subscribe_channels`, and the only way a listener's
+        sweep cost ever goes down: a finished experiment's channel keeps
+        costing every startup sweep a call until somebody leaves it.
+        """
+        if not names:
+            return {"removed": [], "not_removed": []}
+        params: dict = {"subscriptions": names}
+        if principals is not None:
+            params["principals"] = principals
+        return self.call("DELETE", "users/me/subscriptions", params)
+
     def send_to_channel(self, channel: str, topic: str, content: str) -> int:
         result = self.call(
             "POST", "messages",

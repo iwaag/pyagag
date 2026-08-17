@@ -236,6 +236,21 @@ def test_channel_discovery_and_subscription_wrappers():
     assert len(calls) == before
 
 
+def test_unsubscribe_channels_sends_names_and_skips_an_empty_list():
+    calls = []
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+    client.call = lambda method, path, params=None, **kw: (
+        calls.append((method, path, params)) or {"removed": ["pj-old"]}
+    )
+    assert client.unsubscribe_channels(["pj-old"]) == {"removed": ["pj-old"]}
+    assert calls == [("DELETE", "users/me/subscriptions", {"subscriptions": ["pj-old"]})]
+    client.unsubscribe_channels(["pj-old"], principals=[11])
+    assert calls[-1][2] == {"subscriptions": ["pj-old"], "principals": [11]}
+    before = len(calls)
+    assert client.unsubscribe_channels([]) == {"removed": [], "not_removed": []}
+    assert len(calls) == before  # no request for nothing to do
+
+
 def test_membership_wrappers_read_users_and_subscribe_principals():
     calls = []
     client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")

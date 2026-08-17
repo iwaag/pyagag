@@ -22,6 +22,7 @@ from agag.zulip import (
     ZulipTimeout,
     rate_limit_backoff,
     retry_after_seconds,
+    SWEEP_BUDGET_RESERVE,
     channel_name,
     dm_partners,
     is_channel_message_for_us,
@@ -31,6 +32,7 @@ from agag.zulip import (
     sweep_serve,
     sweep_topics,
     topic_dump,
+    topic_from_event,
     topic_write,
 )
 
@@ -54,6 +56,10 @@ class FakeClient:
         self._poll_results = list(poll_results)
         self.registrations = 0
         self.whoami_calls = 0
+        # The budget surface the real client exposes; `calls` counts every
+        # request the way `ZulipClient.call` does.
+        self.calls = 0
+        self.rate_limit_remaining = None
 
     def _next(self, results):
         outcome = results.pop(0)
@@ -62,14 +68,17 @@ class FakeClient:
         return outcome
 
     def whoami(self):
+        self.calls += 1
         self.whoami_calls += 1
         return self._next(self._whoami_results)
 
     def register(self):
+        self.calls += 1
         self.registrations += 1
         return f"queue{self.registrations}", 0
 
     def poll(self, queue_id, last_event_id):
+        self.calls += 1
         return self._next(self._poll_results)
 
 
@@ -327,18 +336,23 @@ class SweepClient(FakeClient):
         self.topics_by_channel = dict(topics_by_channel)
         self.last_sender = dict(last_sender)
         self.history_calls = []
+        self.subscription_calls = 0
 
     def subscriptions(self):
+        self.calls += 1
+        self.subscription_calls += 1
         return [
             {"name": name, "stream_id": index}
             for index, name in enumerate(sorted(self.topics_by_channel), start=1)
         ]
 
     def channel_topics(self, stream_id):
+        self.calls += 1
         name = sorted(self.topics_by_channel)[stream_id - 1]
         return list(self.topics_by_channel[name])
 
     def topic_history(self, channel, topic, num_before=50):
+        self.calls += 1
         self.history_calls.append((channel, topic, num_before))
         sender = self.last_sender.get((channel, topic))
         return [] if sender is None else [{"sender_id": sender}]
@@ -428,15 +442,78 @@ def test_sweep_serve_sweeps_on_startup_before_any_event():
     assert sweep_run(client) == [("pj-demo", "mission-waiting")]
 
 
-def test_sweep_serve_resweeps_when_a_message_event_arrives():
+def test_sweep_serve_turns_an_event_into_one_targeted_check():
     client = SweepClient(
         whoami_results=[{"user_id": 7}],
-        poll_results=[[channel_event(1, sender_id=99)], _Stop()],
-        topics_by_channel={"pj-demo": ["mission-waiting"]},
-        last_sender={("pj-demo", "mission-waiting"): 99},
+        poll_results=[[channel_event(1, sender_id=99, channel="pj-demo", topic="mission-new")],
+                      _Stop()],
+        topics_by_channel={"pj-demo": []},  # the sweep finds nothing
+        last_sender={("pj-demo", "mission-new"): 99},
     )
-    # Once at startup, once after the event set the dirty flag.
-    assert sweep_run(client) == [("pj-demo", "mission-waiting")] * 2
+    assert sweep_run(client) == [("pj-demo", "mission-new")]
+    # The topic the event named was checked; no channel listing was re-read.
+    assert client.history_calls == [("pj-demo", "mission-new", 1)]
+
+
+def test_sweep_serve_coalesces_a_burst_on_one_topic_into_one_check():
+    burst = [
+        channel_event(i, sender_id=99, channel="pj-demo", topic="mission-new", message_id=i)
+        for i in range(1, 6)
+    ]
+    client = SweepClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[burst, _Stop()],
+        topics_by_channel={"pj-demo": []},
+        last_sender={("pj-demo", "mission-new"): 99},
+    )
+    # Five messages, one entry in the pending set, one verification, one call.
+    assert sweep_run(client) == [("pj-demo", "mission-new")]
+    assert len(client.history_calls) == 1
+
+
+def test_sweep_serve_spends_nothing_on_an_event_that_cannot_match():
+    events = [
+        channel_event(1, sender_id=99, channel="pj-demo", topic="create-other"),   # prefix
+        channel_event(2, sender_id=7, channel="pj-demo", topic="mission-mine"),    # our echo
+        channel_event(3, sender_id=99, channel="pj-demo",
+                      topic=f"{RESOLVED_TOPIC_PREFIX}mission-done"),               # resolved
+        message_event(4, sender_id=99),                                            # a DM
+    ]
+    client = SweepClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[events, _Stop()],
+        topics_by_channel={"pj-demo": []},
+        last_sender={},
+    )
+    assert sweep_run(client) == []
+    assert client.history_calls == []  # not one API call was spent on them
+
+
+def test_sweep_serve_rechecks_before_serving_an_event_it_already_answered():
+    client = SweepClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[[channel_event(1, sender_id=99, channel="pj-demo", topic="mission-new")],
+                      _Stop()],
+        topics_by_channel={"pj-demo": []},
+        last_sender={("pj-demo", "mission-new"): 7},  # the bot posted last after all
+    )
+    # The event is a hint, not the truth: the check overrules it.
+    assert sweep_run(client) == []
+    assert len(client.history_calls) == 1
+
+
+def test_topic_from_event_applies_the_same_rules_as_the_sweep():
+    def message(**overrides):
+        base = channel_event(1, sender_id=99, channel="pj-demo", topic="mission-new")["message"]
+        return {**base, **overrides}
+
+    assert topic_from_event(message(), 7, "mission-") == ("pj-demo", "mission-new")
+    assert topic_from_event(message(), 7, ("run-", "mission-")) == ("pj-demo", "mission-new")
+    assert topic_from_event(message(sender_id=7), 7, "mission-") is None
+    assert topic_from_event(message(subject="create-x"), 7, "mission-") is None
+    assert topic_from_event(message(type="private"), 7, "mission-") is None
+    assert topic_from_event(message(display_recipient=""), 7, "mission-") is None
+    assert topic_from_event(message(subject=""), 7, "") is None
 
 
 def test_sweep_serve_ignores_non_message_events():
@@ -706,6 +783,134 @@ def test_rate_limit_backoff_grows_while_429s_repeat_and_resets_after_success(mon
     )
     run(client)
     assert slept == [10, 20, 40, 10]
+
+
+# --- budget visibility and resumable pending (p1 step 2) -------------------
+
+
+class FakeResponse:
+    """The bits of an `http.client.HTTPResponse` that `call` touches."""
+
+    def __init__(self, body, headers):
+        self._body = body.encode("utf-8")
+        self.headers = email.message.Message()
+        for name, value in headers.items():
+            self.headers[name] = value
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_call_records_the_quota_headers_from_a_successful_response(monkeypatch):
+    monkeypatch.setattr(
+        "agag.zulip.urllib.request.urlopen",
+        lambda *a, **k: FakeResponse(
+            '{"result":"success"}',
+            {"x-ratelimit-remaining": "173", "x-ratelimit-limit": "200"},
+        ),
+    )
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+    assert client.rate_limit_remaining is None
+    client.call("GET", "users/me")
+    assert client.rate_limit_remaining == 173
+    assert client.rate_limit_limit == 200
+    assert client.calls == 1
+
+
+def test_call_records_a_spent_budget_from_the_429_itself(monkeypatch):
+    client = client_whose_calls_raise(
+        http_error(429, '{"msg":"slow"}', {"Retry-After": "7", "x-ratelimit-remaining": "0"}),
+        monkeypatch,
+    )
+    with pytest.raises(RateLimited):
+        client.call("GET", "events")
+    assert client.rate_limit_remaining == 0  # zero is a reading, not a missing one
+
+
+def test_sweep_serve_defers_the_full_sweep_when_the_window_is_nearly_spent():
+    client = SweepClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[[], _Stop()],
+        topics_by_channel={"pj-demo": ["mission-waiting"]},
+        last_sender={("pj-demo", "mission-waiting"): 99},
+    )
+    client.rate_limit_remaining = SWEEP_BUDGET_RESERVE - 1
+    logged = []
+    with pytest.raises(_Stop):
+        sweep_serve(
+            client, lambda channel, topic: None, topic_filter="mission-",
+            log=logged.append, status=no_status(),
+        )
+    # Deferred, not slept through and not errored: the long poll is the wait.
+    assert client.subscription_calls == 0
+    assert any("full sweep deferred" in line for line in logged)
+
+
+def test_sweep_serve_runs_the_deferred_sweep_once_the_window_slides():
+    class Recovering(SweepClient):
+        def poll(self, queue_id, last_event_id):
+            self.rate_limit_remaining = 200  # the window slid while we polled
+            return super().poll(queue_id, last_event_id)
+
+    client = Recovering(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[[], _Stop()],
+        topics_by_channel={"pj-demo": ["mission-waiting"]},
+        last_sender={("pj-demo", "mission-waiting"): 99},
+    )
+    client.rate_limit_remaining = SWEEP_BUDGET_RESERVE - 1
+    assert sweep_run(client) == [("pj-demo", "mission-waiting")]
+    assert client.subscription_calls == 1
+
+
+def test_sweep_serve_logs_one_line_per_full_sweep_with_its_cost():
+    client = SweepClient(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[_Stop()],
+        topics_by_channel={"pj-demo": ["mission-waiting"], "general": []},
+        last_sender={("pj-demo", "mission-waiting"): 99},
+    )
+    client.rate_limit_remaining = 190
+    logged = []
+    with pytest.raises(_Stop):
+        sweep_serve(
+            client, lambda channel, topic: None, topic_filter="mission-",
+            log=logged.append, status=no_status(),
+        )
+    line = [entry for entry in logged if entry.startswith("full sweep:")]
+    # 1 subscriptions + 2 channel_topics + 1 topic_history for the candidate.
+    assert line == ["full sweep: 1 awaiting, 4 calls spent, 190 left in the window"]
+
+
+def test_sweep_serve_serves_the_rest_of_pending_after_a_rate_limit(monkeypatch):
+    monkeypatch.setattr("agag.zulip.time.sleep", lambda seconds: None)
+
+    class Limited(SweepClient):
+        def topic_history(self, channel, topic, num_before=50):
+            if not self.history_calls:
+                self.history_calls.append((channel, topic, num_before))
+                raise RateLimited("429 mid-serve", retry_after=1)
+            return super().topic_history(channel, topic, num_before)
+
+    events = [
+        channel_event(1, sender_id=99, channel="pj-demo", topic="mission-a", message_id=1),
+        channel_event(2, sender_id=99, channel="pj-demo", topic="mission-b", message_id=2),
+    ]
+    client = Limited(
+        whoami_results=[{"user_id": 7}],
+        poll_results=[events, _Stop()],
+        topics_by_channel={"pj-demo": []},
+        last_sender={("pj-demo", "mission-a"): 99, ("pj-demo", "mission-b"): 99},
+    )
+    # The 429 lands on the first pending entry; both are still served.
+    assert sweep_run(client) == [("pj-demo", "mission-a"), ("pj-demo", "mission-b")]
+    assert client.registrations == 1
 
 
 def test_sweep_serve_records_a_poll_only_when_the_poll_returned():

@@ -48,6 +48,11 @@ RATE_LIMIT_DEFAULT_SECONDS = 60
 RATE_LIMIT_MAX_SECONDS = 300
 RATE_LIMIT_JITTER_FRACTION = 0.1
 
+# A full sweep costs `1 + channels + matching topics` calls. When the quota
+# window has less than this left, the sweep waits for the window to slide
+# rather than spending its last requests halfway through.
+SWEEP_BUDGET_RESERVE = 40
+
 # Zulip's resolved-topic marker: the topic is renamed to "✔ <topic>".
 RESOLVED_TOPIC_PREFIX = "✔ "
 
@@ -80,12 +85,17 @@ class RateLimited(ZulipError):
         self.retry_after = float(retry_after)
 
 
-def _positive_float(value) -> float | None:
+def _float_or_none(value) -> float | None:
     try:
-        seconds = float(value)
+        return float(value)
     except (TypeError, ValueError):
         return None
-    return seconds if seconds > 0 else None
+
+
+def _positive_float(value) -> float | None:
+    """Header values that only mean something above zero, like a wait length."""
+    seconds = _float_or_none(value)
+    return seconds if seconds is not None and seconds > 0 else None
 
 
 def retry_after_seconds(headers, body: dict | None = None) -> float:
@@ -143,6 +153,11 @@ class ZulipClient:
         self.base_url = base_url.rstrip("/")
         self.email = email
         self._auth = b64encode(f"{email}:{api_key}".encode("utf-8")).decode("ascii")
+        # Budget visibility: every Zulip response carries the quota headers, so
+        # knowing what is left before spending it is free.
+        self.calls = 0
+        self.rate_limit_remaining: float | None = None
+        self.rate_limit_limit: float | None = None
         if ca_bundle:
             self._ssl = ssl.create_default_context(cafile=ca_bundle)
         else:
@@ -183,10 +198,13 @@ class ZulipClient:
         request.add_header("Authorization", f"Basic {self._auth}")
         if data is not None:
             request.add_header("Content-Type", "application/x-www-form-urlencoded")
+        self.calls += 1
         try:
             with urllib.request.urlopen(request, timeout=timeout, context=self._ssl) as response:
+                self._record_budget(response.headers)
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as error:
+            self._record_budget(error.headers)
             body = error.read().decode("utf-8", "replace")
             try:
                 parsed = json.loads(body)
@@ -215,6 +233,18 @@ class ZulipClient:
             # urlopen does not wrap a connection dropped while the response is
             # being read; a Zulip restart during a long poll lands here.
             raise ZulipError(f"{method} {path} -> {error!r}") from error
+
+    def _record_budget(self, headers) -> None:
+        """Remember the quota headers Zulip puts on every response."""
+        get = getattr(headers, "get", None)
+        if get is None:
+            return
+        remaining = _float_or_none(get("x-ratelimit-remaining"))
+        if remaining is not None:
+            self.rate_limit_remaining = remaining
+        limit = _float_or_none(get("x-ratelimit-limit"))
+        if limit is not None:
+            self.rate_limit_limit = limit
 
     # --- the four mechanics the receive side needs -------------------------
 
@@ -454,6 +484,27 @@ def channel_name(message: dict) -> str:
     return recipient if isinstance(recipient, str) else ""
 
 
+def topic_from_event(
+    message: dict, self_id: int, topic_filter: str | tuple[str, ...]
+) -> tuple[str, str] | None:
+    """The `(channel, topic)` a message event points at, if it can await us.
+
+    A hint, not a verdict: the same rules `sweep_topics` applies to a topic
+    name, read off the event payload instead of off a channel listing. Whether
+    the topic *actually* awaits a reply is decided by reading its last message,
+    which is one call rather than a whole sweep.
+    """
+    if not is_channel_message_for_us(message, self_id):
+        return None
+    topic = str(message.get("subject") or "")
+    if not topic or not topic.startswith(topic_filter):
+        return None
+    if topic.startswith(RESOLVED_TOPIC_PREFIX):
+        return None
+    channel = channel_name(message)
+    return (channel, topic) if channel else None
+
+
 def log(message: str) -> None:
     """Default listener log line: UTC-stamped, unbuffered, on stderr."""
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -560,24 +611,34 @@ def sweep_topics(
 def sweep_serve(
     client: ZulipClient, handler, *, topic_filter: str | tuple[str, ...], log=log, status=None
 ) -> None:
-    """Pull-based listener: poll for message events, but treat each only as a
-    "something changed" signal and re-scan the subscribed channels for topics
-    that await a reply (see `sweep_topics`). `handler(channel, topic)` is
-    called once per match; anything it raises is logged and the sweep goes on.
+    """Pull-based listener: poll for message events and serve the topics that
+    await a reply. `handler(channel, topic)` is called once per topic;
+    anything it raises is logged and the loop goes on.
 
-    A sweep also runs on every queue (re-)registration — startup and
-    `QueueExpired` recovery — which is what makes downtime lossless: a post
-    that arrived while this was down is found by the startup sweep, with no
-    queue persistence involved. The loop is single-threaded and serial, so a
-    long handler simply delays the next sweep; events keep queueing meanwhile.
+    An event is a *hint*: it names a `(channel, topic)`, which joins a pending
+    set, and the topic's real state is then read with one
+    `topic_history(num_before=1)` call before the handler is invoked. So the
+    steady-state cost of an incoming message is about one API call, and a
+    burst on one topic coalesces in the set for free. The "don't trust the
+    event payload" discipline is kept — the payload only says *where* to look.
 
-    `status` behaves exactly as in `serve`.
+    A **full** `sweep_topics` pass runs on every queue (re-)registration —
+    startup and `QueueExpired` recovery — which is what makes downtime
+    lossless: a post that arrived while this was down is found by the startup
+    sweep, with no queue persistence involved. That pass is expensive
+    (`1 + channels + matching topics` calls), so it waits for the quota window
+    to slide when fewer than `SWEEP_BUDGET_RESERVE` requests are left.
+
+    The loop is single-threaded and serial, so a long handler simply delays
+    the next poll; events keep queueing meanwhile. `status` behaves exactly as
+    in `serve`.
     """
     status = status if status is not None else StatusWriter(default_status_path(), log=log)
     self_id: int | None = None
     queue_id: str | None = None
     last_event_id = -1
-    dirty = False
+    pending: set[tuple[str, str]] = set()
+    full_sweep = False
     strikes = 0
     while True:
         try:
@@ -587,17 +648,39 @@ def sweep_serve(
             if queue_id is None:
                 queue_id, last_event_id = client.register()
                 log(f"registered event queue {queue_id} (last_event_id={last_event_id})")
-                dirty = True  # anything may have happened while unregistered
-            if dirty:
-                for channel, topic in sweep_topics(client, self_id, topic_filter):
-                    log(f"sweep matched {channel!r}/{topic!r}")
-                    try:
-                        handler(channel, topic)
-                    except Exception as error:  # one bad topic must not end the loop
-                        log(f"handler failed on {channel!r}/{topic!r}: {error!r}")
-                # Cleared only once the sweep finished: a sweep cut short by a
-                # rate limit is work still owed, not work done.
-                dirty = False
+                full_sweep = True  # anything may have happened while unregistered
+            if full_sweep:
+                remaining = getattr(client, "rate_limit_remaining", None)
+                if remaining is not None and remaining < SWEEP_BUDGET_RESERVE:
+                    # Not an error and not a sleep: fall through to the long
+                    # poll, which both waits and refreshes the quota headers.
+                    log(f"full sweep deferred: {remaining:.0f} requests left in the window")
+                else:
+                    before = getattr(client, "calls", 0)
+                    matched = sweep_topics(client, self_id, topic_filter)
+                    # Cleared only once the pass finished: a sweep a rate limit
+                    # cut short is work still owed, not work done.
+                    full_sweep = False
+                    pending.update(matched)
+                    spent = getattr(client, "calls", 0) - before
+                    left = getattr(client, "rate_limit_remaining", None)
+                    log(
+                        f"full sweep: {len(matched)} awaiting, {spent} calls spent, "
+                        f"{'unknown' if left is None else f'{left:.0f}'} left in the window"
+                    )
+            while pending:
+                # Peeked, not popped: a rate limit inside the check leaves this
+                # entry — and every other one — pending for after the backoff.
+                channel, topic = min(pending)
+                history = client.topic_history(channel, topic, num_before=1)
+                pending.discard((channel, topic))
+                if history and history[-1].get("sender_id") == self_id:
+                    continue  # we already answered; the event was stale
+                log(f"serving {channel!r}/{topic!r}")
+                try:
+                    handler(channel, topic)
+                except Exception as error:  # one bad topic must not end the loop
+                    log(f"handler failed on {channel!r}/{topic!r}: {error!r}")
             events = client.poll(queue_id, last_event_id)
         except ZulipTimeout as error:
             status.record_error(str(error))
@@ -608,8 +691,9 @@ def sweep_serve(
             queue_id = None
             continue
         except RateLimited as error:
-            # Before the generic arm on purpose: the queue is fine and `dirty`
-            # stays as it was, so the pending sweep survives the wait.
+            # Before the generic arm on purpose: the queue is fine and
+            # `pending`/`full_sweep` stay as they are, so the work outstanding
+            # when the limit hit is served after the backoff.
             strikes += 1
             delay = rate_limit_backoff(error.retry_after, strikes)
             status.record_error(str(error))
@@ -626,7 +710,10 @@ def sweep_serve(
         status.record_poll_ok(queue_id)
         for event in events:
             last_event_id = max(last_event_id, int(event.get("id", last_event_id)))
-            if event.get("type") == "message":
-                # The payload is deliberately not processed; the sweep reads
-                # the topic's actual state instead of trusting the event.
-                dirty = True
+            if event.get("type") != "message":
+                continue
+            match = topic_from_event(event.get("message") or {}, self_id, topic_filter)
+            if match is not None:
+                # A hint about where to look, not a decision to act. Repeats
+                # within one burst collapse into a single set entry.
+                pending.add(match)

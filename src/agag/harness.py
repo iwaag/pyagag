@@ -6,7 +6,9 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,12 +43,16 @@ def build_argv(
     add_dirs: list[str] | None = None,
     extra_args: list[str] | None = None,
     skip_permissions: bool = False,
+    stream: bool = False,
 ) -> list[str]:
     extra_args = list(extra_args or [])
     if "--model" in extra_args or "-m" in extra_args:
         raise ValueError("model selection belongs to the resolved profile")
     if agent.harness == "claude_code":
-        argv = [agent.command, "-p", "--output-format", "json", "--model", agent.native_model]
+        # claude_code refuses `-p --output-format stream-json` without
+        # --verbose, so the two flags travel together.
+        output = ["stream-json", "--verbose"] if stream else ["json"]
+        argv = [agent.command, "-p", "--output-format", *output, "--model", agent.native_model]
         for directory in add_dirs or []:
             argv += ["--add-dir", directory]
         if allowed_tools:
@@ -62,17 +68,44 @@ def build_argv(
         argv = [agent.command, "-m", "agag.agcode", "--model", agent.native_model]
         if agent.provider_base_url:
             argv += ["--base-url", agent.provider_base_url]
+        if stream:
+            argv += ["--output-format", "stream-json"]
         return argv + extra_args
     if agent.harness == "fake":
         return [agent.command, *extra_args]
     raise ValueError(f"unsupported harness: {agent.harness}")
 
 
+def _result_line(raw: str) -> dict | None:
+    """The last `"type": "result"` JSON line of a stream-json capture, or None.
+
+    Both harnesses end a streaming run with one such line carrying exactly the
+    fields their single-document mode would have printed, so the extractors
+    below work on either capture without being told which mode ran. A stream
+    that died before its result line (timeout, kill) yields None and falls
+    through to the raw-passthrough branch, and run_harness's normalization
+    names the failure.
+    """
+    for line in reversed(raw.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            return event
+    return None
+
+
 def _extract_claude(raw: str) -> tuple[str, dict]:
     try:
         doc = json.loads(raw)
     except json.JSONDecodeError:
-        return raw, {}
+        doc = _result_line(raw)
+        if doc is None:
+            return raw, {}
     if not isinstance(doc, dict):
         return raw, {}
     meta = {key: doc[key] for key in ("duration_ms", "num_turns", "is_error", "subtype") if key in doc}
@@ -94,7 +127,9 @@ def _extract_agcode(raw: str) -> tuple[str, dict]:
     try:
         doc = json.loads(raw)
     except json.JSONDecodeError:
-        return raw, {}
+        doc = _result_line(raw)
+        if doc is None:
+            return raw, {}
     if not isinstance(doc, dict):
         return raw, {}
     meta = {
@@ -103,6 +138,82 @@ def _extract_agcode(raw: str) -> tuple[str, dict]:
         if key in doc
     }
     return doc.get("output") if isinstance(doc.get("output"), str) else "", meta
+
+
+def _run_streaming(
+    argv: list[str],
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: float,
+    env: dict[str, str],
+    on_event: Callable[[dict], None],
+) -> tuple[int, str, str]:
+    """Launch one harness process and forward its stdout JSON lines as events.
+
+    Mirrors ``subprocess.run(capture_output=True, timeout=...)``: returns
+    ``(returncode, stdout, stderr)``, raises ``subprocess.TimeoutExpired``
+    carrying the stdout captured so far, and lets ``OSError`` from the launch
+    propagate. Each stdout line that parses as a JSON object reaches
+    ``on_event`` the moment it arrives (on the reader thread); a consumer
+    that raises is ignored — progress is telemetry, and a rendering bug must
+    not kill a run mid-flight.
+    """
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+        env=env,
+    )
+    out_lines: list[str] = []
+    err_chunks: list[str] = []
+
+    def pump_stdout() -> None:
+        for line in proc.stdout:
+            out_lines.append(line)
+            stripped = ANSI_RE.sub("", line).strip()
+            if not stripped:
+                continue
+            try:
+                event = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                try:
+                    on_event(event)
+                except Exception:  # noqa: BLE001 - see docstring
+                    pass
+
+    def drain_stderr() -> None:
+        err_chunks.append(proc.stderr.read())
+
+    # Both pipes get their own reader so neither can fill its buffer and
+    # deadlock the child while the parent waits on the other.
+    threads = [
+        threading.Thread(target=pump_stdout, daemon=True),
+        threading.Thread(target=drain_stderr, daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        proc.stdin.write(prompt)
+        proc.stdin.close()
+    except OSError:
+        pass  # the process died before reading its prompt; its exit says why
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        for thread in threads:
+            thread.join(timeout=5)
+        raise subprocess.TimeoutExpired(argv, timeout, output="".join(out_lines)) from None
+    for thread in threads:
+        thread.join(timeout=5)
+    return proc.returncode, "".join(out_lines), "".join(err_chunks)
 
 
 def run_harness(
@@ -115,16 +226,25 @@ def run_harness(
     add_dirs: list[str] | None = None,
     extra_args: list[str] | None = None,
     skip_permissions: bool = False,
+    on_event: Callable[[dict], None] | None = None,
     transcript_path: Path | None = None,
     output_tail_chars: int = DEFAULT_OUTPUT_TAIL_CHARS,
 ) -> HarnessResult:
-    """Launch, extract, and normalize one harness process without fallback."""
+    """Launch, extract, and normalize one harness process without fallback.
+
+    ``on_event`` switches claude_code and agcode to their stream-json modes
+    and receives each event dict as the run produces it — the live-progress
+    seam. The extracted result is identical either way (the stream's final
+    ``"type": "result"`` line carries the single-document fields), and the
+    ``fake`` harness, which has no stream mode, simply runs without events.
+    """
     meta = identity(agent)
     if timeout <= 0:
         return HarnessResult(
             "agent run timed out (no budget left)", -1,
             {**meta, "outcome": "aborted", "failure": "timeout"},
         )
+    stream = on_event is not None and agent.harness in ("claude_code", "agcode")
     try:
         argv = build_argv(
             agent,
@@ -132,6 +252,7 @@ def run_harness(
             add_dirs=add_dirs,
             extra_args=extra_args,
             skip_permissions=skip_permissions,
+            stream=stream,
         )
     except ValueError as error:
         return HarnessResult(str(error), -1, {**meta, "outcome": "failed", "failure": str(error)})
@@ -145,15 +266,21 @@ def run_harness(
         env[f"AGENT_PROVIDER_{agent.provider.upper()}_BASE_URL"] = agent.provider_base_url
     started = time.monotonic()
     try:
-        proc = subprocess.run(
-            argv,
-            input=prompt,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
+        if stream:
+            returncode, stdout, stderr = _run_streaming(
+                argv, prompt, cwd=cwd, timeout=timeout, env=env, on_event=on_event
+            )
+        else:
+            proc = subprocess.run(
+                argv,
+                input=prompt,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+            returncode, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
     except subprocess.TimeoutExpired as error:
         raw = (
             error.stdout if isinstance(error.stdout, str)
@@ -188,7 +315,7 @@ def run_harness(
                 "failure": failure,
             },
         )
-    raw = ANSI_RE.sub("", proc.stdout or "")
+    raw = ANSI_RE.sub("", stdout or "")
     if transcript_path:
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         transcript_path.write_text(raw, encoding="utf-8")
@@ -204,15 +331,15 @@ def run_harness(
         output, reported = raw.rstrip("\n"), {}
     meta.update(reported)
     meta.setdefault("duration_ms", int((time.monotonic() - started) * 1000))
-    stderr_tail = ANSI_RE.sub("", proc.stderr or "").strip()[-output_tail_chars:]
+    stderr_tail = ANSI_RE.sub("", stderr or "").strip()[-output_tail_chars:]
     failure = None
     reported_failure = reported.get("failure") if isinstance(reported.get("failure"), str) else None
-    if proc.returncode != 0:
+    if returncode != 0:
         # A harness that reports its own failure string keeps it when it had no
         # output to quote — agcode's is kind-prefixed and worth more than "no
         # output".
         tail = output.strip()[-output_tail_chars:] or reported_failure or "no output"
-        failure = f"{agent.harness} exited {proc.returncode}: {tail}"
+        failure = f"{agent.harness} exited {returncode}: {tail}"
         if stderr_tail:
             failure += f"; stderr tail: {stderr_tail}"
     elif meta.get("is_error"):
@@ -229,7 +356,7 @@ def run_harness(
         meta["outcome"] = "aborted"
     if failure:
         meta["failure"] = failure
-    exit_code = proc.returncode if failure is None else (proc.returncode or -1)
+    exit_code = returncode if failure is None else (returncode or -1)
     return HarnessResult(output if output.strip() else (failure or ""), exit_code, meta, raw)
 
 

@@ -174,6 +174,28 @@ def test_tool_roundtrip(backend, tmp_path):
     }
 
 
+def test_on_event_stream(backend, tmp_path):
+    """Events mirror the conversation as it happens, in claude_code's
+    stream-json spellings, and a consumer that raises never fails the run."""
+    (tmp_path / "note.txt").write_text("marker-123")
+    backend.responses.append(tool_use_response("read", {"path": "note.txt"}))
+    backend.responses.append(text_response("marker-123"))
+    events = []
+
+    def consume(event):
+        events.append(event)
+        raise RuntimeError("a progress rendering bug")
+
+    r = run(backend, tmp_path, on_event=consume)
+
+    assert r.meta["outcome"] == "done"
+    assert [e["type"] for e in events] == ["assistant", "user", "assistant"]
+    assert events[0]["message"]["content"][1]["type"] == "tool_use"
+    [tool_result] = events[1]["message"]["content"]
+    assert tool_result["content"] == "marker-123"
+    assert events[2]["message"]["content"] == [{"type": "text", "text": "marker-123"}]
+
+
 def test_malformed_tool_calls_continue_and_count(backend, tmp_path):
     """Unknown tool / bad arguments come back as error tool_results (loop
     continues) and count as malformed; a legitimate call failing at runtime

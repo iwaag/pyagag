@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from agag.agent_config import ResolvedAgent
-from agag.harness import _extract_agcode, build_argv, run_harness, write_run_record
+from agag.harness import _extract_agcode, _extract_claude, build_argv, run_harness, write_run_record
 
 
 def stub(path: Path, body: str) -> Path:
@@ -263,3 +263,87 @@ def test_agcode_extractor_tolerates_non_json_stdout():
         "text",
         {"duration_ms": 5, "num_turns": 2, "usage": {"input_tokens": 1}, "outcome": "done"},
     )
+
+
+# --- streaming (the live-progress seam) --------------------------------------
+
+
+def test_stream_argv_shapes(tmp_path):
+    claude = agent(tmp_path / "claude", "claude_code")
+    argv = build_argv(claude, stream=True)
+    where = argv.index("--output-format")
+    assert argv[where + 1 : where + 3] == ["stream-json", "--verbose"]
+    plain = build_argv(claude)
+    assert plain[plain.index("--output-format") + 1] == "json"
+    assert "--verbose" not in plain
+
+    agcode_argv = build_argv(agent(Path(sys.executable), "agcode"), stream=True)
+    assert agcode_argv[-2:] == ["--output-format", "stream-json"]
+    assert "--output-format" not in build_argv(agent(Path(sys.executable), "agcode"))
+
+
+def test_claude_stream_events_and_extraction(tmp_path):
+    """on_event sees each line as it arrives, a consumer that raises does not
+    kill the run, and the final `type: result` line extracts exactly like the
+    single-document mode."""
+    command = stub(tmp_path / "claude", '''
+        import json, sys
+        sys.stdin.read()
+        emit = lambda doc: print(json.dumps(doc), flush=True)
+        emit({"type": "system", "subtype": "init"})
+        emit({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}})
+        emit({"type": "result", "result": "done", "is_error": False, "duration_ms": 12,
+              "num_turns": 3, "total_cost_usd": 0.04, "usage": {"input_tokens": 7}})
+    ''')
+    events = []
+
+    def consume(event):
+        events.append(event)
+        raise RuntimeError("a progress rendering bug")
+
+    result = run_harness(
+        agent(command, "claude_code"), "prompt", cwd=tmp_path, timeout=5, on_event=consume
+    )
+
+    assert [event["type"] for event in events] == ["system", "assistant", "result"]
+    assert result.output == "done"
+    assert result.exit_code == 0
+    assert result.meta == {
+        "role": "coding", "profile": "test-profile", "harness": "claude_code",
+        "provider": "anthropic", "model": "anthropic/claude-sonnet-5",
+        "duration_ms": 12, "num_turns": 3, "is_error": False,
+        "cost_usd": 0.04, "usage": {"input_tokens": 7}, "outcome": "done",
+    }
+
+
+def test_agcode_streams_through_the_process_seam(tmp_path, messages_backend):
+    messages_backend.text = "the answer"
+    resolved = agent(Path(sys.executable), "agcode", base_url=messages_backend.url)
+    events = []
+
+    result = run_harness(resolved, "task", cwd=tmp_path, timeout=30, on_event=events.append)
+
+    assert result.exit_code == 0
+    assert result.output == "the answer"
+    assert result.meta["outcome"] == "done"
+    assert [event["type"] for event in events] == ["assistant", "result"]
+    # The stream's result line carries what the single document would have.
+    assert events[-1]["output"] == "the answer"
+    assert events[-1]["num_turns"] == 1
+
+
+def test_extractors_read_the_stream_result_line():
+    raw = "\n".join([
+        "stray non-JSON noise",
+        json.dumps({"type": "assistant", "message": {}}),
+        json.dumps({"type": "result", "result": "done", "num_turns": 2}),
+    ])
+    assert _extract_claude(raw) == ("done", {"num_turns": 2})
+    # A stream killed before its result line falls through to passthrough,
+    # and run_harness's normalization then names the failure.
+    headless = "\n".join([
+        json.dumps({"type": "system", "subtype": "init"}),
+        json.dumps({"type": "assistant", "message": {}}),
+    ])
+    assert _extract_claude(headless) == (headless, {})

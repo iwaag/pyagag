@@ -468,6 +468,7 @@ def run(
     tools: Sequence[Tool] = DEFAULT_TOOLS,
     system_suffix: str | None = None,
     stop: Callable[[], bool] | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
     transcript_path: str | None = None,
     transcript_meta: dict[str, Any] | None = None,
 ) -> AgcodeResult:
@@ -499,6 +500,14 @@ def run(
     ``stop`` is checked between turns; when it returns true the run ends as
     ``aborted`` with failure kind ``cancelled``, carrying whatever usage and
     turn count it had accumulated.
+
+    ``on_event`` receives one dict per conversation step as the run proceeds:
+    ``{"type": "assistant", "message": {"role": "assistant", "content": [...]}}``
+    after each model response, and ``{"type": "user", "message": {"role":
+    "user", "content": [...tool_result...]}}`` after the tool calls it asked
+    for. The shapes match claude_code's ``stream-json`` events on purpose, so
+    one consumer can watch either harness. Events are telemetry, like usage: a
+    consumer that raises never fails an otherwise good run.
 
     ``transcript_meta`` merges extra caller-known fields (e.g. fixture
     markers) into the transcript's meta header record.
@@ -536,6 +545,14 @@ def run(
     if transcript_meta:
         header.update(transcript_meta)
     transcript = _Transcript(transcript_path, header)
+
+    def emit(event: dict[str, Any]) -> None:
+        if on_event is None:
+            return
+        try:
+            on_event(event)
+        except Exception:  # noqa: BLE001 - events are telemetry, never fatal
+            pass
 
     started = time.monotonic()
     turns = 0
@@ -599,6 +616,7 @@ def run(
                 )
                 break
             messages.append({"role": "assistant", "content": content_blocks})
+            emit({"type": "assistant", "message": {"role": "assistant", "content": content_blocks}})
             tool_uses = [
                 b for b in content_blocks if isinstance(b, dict) and b.get("type") == "tool_use"
             ]
@@ -622,6 +640,7 @@ def run(
                         result["is_error"] = True
                     results.append(result)
                 messages.append({"role": "user", "content": results})
+                emit({"type": "user", "message": {"role": "user", "content": results}})
                 continue
 
             output = response_text(resp)
@@ -727,6 +746,18 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="write the verbatim wire transcript (JSONL) to this path",
     )
+    parser.add_argument(
+        "--output-format",
+        choices=["json", "stream-json"],
+        default="json",
+        help=(
+            "'json' is the P4 contract: exactly one JSON document on stdout. "
+            "'stream-json' emits one JSON line per conversation step as the "
+            "run proceeds (claude_code's event spellings), ending with a "
+            "'type':'result' line carrying the same fields as the single "
+            "document (default: json)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     task = sys.stdin.read()
@@ -735,6 +766,13 @@ def main(argv: list[str] | None = None) -> int:
     task_input = args.task_input
     if args.task_input_file is not None:
         task_input = Path(args.task_input_file).read_text()
+
+    streaming = args.output_format == "stream-json"
+
+    def emit_line(event: dict[str, Any]) -> None:
+        # flush per line: a pipe reader sees the event when it happens, not
+        # when the block buffer fills.
+        print(json.dumps(event, ensure_ascii=False), flush=True)
 
     try:
         result = run(
@@ -748,12 +786,15 @@ def main(argv: list[str] | None = None) -> int:
             temperature=args.temperature,
             task_input=task_input,
             tools=TOOL_PRESETS[args.tools],
+            on_event=emit_line if streaming else None,
             transcript_path=args.transcript,
         )
     except ValueError as e:  # argument-validation errors, e.g. missing model
         parser.error(str(e))
 
     doc = {"output": result.output, "status": result.status, **result.meta}
+    if streaming:
+        doc = {"type": "result", **doc}
     print(json.dumps(doc, ensure_ascii=False))
     return EXIT_CODES[result.meta["outcome"]]
 

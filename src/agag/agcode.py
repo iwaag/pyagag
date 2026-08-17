@@ -361,8 +361,8 @@ class AgcodeResult:
     kind (``"<failure_kind>: <detail>"``; the kind also stays available as
     the separate ``failure_kind`` key for in-process callers). Extra keys
     beyond the contract: ``run_id``, ``malformed_tool_calls``, ``truncated``
-    (the backend stopped the last response at ``max_tokens``; the run can
-    still be ``done``, with partial text as its output), and ``empty_final``
+    (at least one response was cut off at ``max_tokens``; the run continued
+    after each, so this is a quality signal, not an outcome), and ``empty_final``
     (the run stopped cleanly with no closing text; also ``done``, with an
     empty ``output`` — what it achieved is read from what it did).
 
@@ -380,6 +380,19 @@ class AgcodeResult:
     status: str
     meta: dict[str, Any] = field(default_factory=dict)
 
+
+# What a turn cut off at max_tokens is told. Both name the limit and ask for
+# smaller steps, because the model cannot see why its own response stopped.
+CUT_OFF_TOOL_RESULT = (
+    "This call was cut off by the response token limit and was NOT executed. "
+    "Retry it in smaller pieces — for a large file, write one part and append "
+    "the rest in further calls."
+)
+CUT_OFF_NUDGE = (
+    "Your previous response was cut off by the response token limit. Continue "
+    "from where you stopped, in smaller steps, and keep any single tool call "
+    "short enough to complete."
+)
 
 SYSTEM_PROMPT = """\
 You are agcode, a coding agent.
@@ -613,7 +626,8 @@ def run(
                 failure = f"response body is {type(resp).__name__}, expected a JSON object"
                 break
             accumulate_usage(usage, resp.get("usage"))
-            truncated = resp.get("stop_reason") == "max_tokens"
+            cut_off = resp.get("stop_reason") == "max_tokens"
+            truncated = truncated or cut_off
 
             content_blocks = resp.get("content")
             if not isinstance(content_blocks, list):
@@ -651,11 +665,40 @@ def run(
                 emit({"type": "user", "message": {"role": "user", "content": results}})
                 continue
 
+            if cut_off:
+                # The response hit max_tokens: the model was mid-action, not
+                # finished. Ending here reads a cut-off preamble ("Now let me
+                # create the core simulation logic:") as the final answer and
+                # throws the turn away — observed on a 35B local model, whose
+                # long thinking blocks plus one whole-file write overrun a
+                # 4096-token response routinely. So the run continues: any
+                # tool call that was cut off is answered as an error (its
+                # arguments are incomplete and must never be executed), and a
+                # response cut off before any call gets a plain nudge. The
+                # turn budget and the deadline remain the only stopping
+                # conditions, as for any other turn.
+                if tool_uses:
+                    results = [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.get("id"),
+                            "content": CUT_OFF_TOOL_RESULT,
+                            "is_error": True,
+                        }
+                        for block in tool_uses
+                    ]
+                    messages.append({"role": "user", "content": results})
+                    emit({"type": "user", "message": {"role": "user", "content": results}})
+                else:
+                    nudge = [{"type": "text", "text": CUT_OFF_NUDGE}]
+                    messages.append({"role": "user", "content": nudge})
+                    emit({"type": "user", "message": {"role": "user", "content": nudge}})
+                continue
+
             # A clean stop is a done run, whatever the final response carried:
-            # a max_tokens stop with text is a partial but real answer
-            # (meta["truncated"] says so), and a stop with no text at all is a
-            # run that ended without a closing message (meta["empty_final"]).
-            # Neither is the harness's to call a failure.
+            # a stop with no text at all is a run that ended without a closing
+            # message (meta["empty_final"]), which is not the harness's to
+            # call a failure.
             output = response_text(resp)
             outcome = "done"
             break

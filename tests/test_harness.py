@@ -245,10 +245,13 @@ def test_agcode_runs_through_the_process_seam(tmp_path, messages_backend):
     assert result.meta["transcript"] == str(transcript)
     assert isinstance(result.meta["duration_ms"], int)
     # Identity survives the merge, and nothing outside the record contract
-    # (run_id, truncated, malformed_tool_calls, failure_kind) leaks into meta.
+    # (run_id, malformed_tool_calls, failure_kind) leaks into meta — except
+    # `truncated`, kept deliberately: it is the signal that explains a run
+    # whose answer was a preamble cut off at the token limit.
     assert result.meta["harness"] == "agcode"
     assert result.meta["model"] == "ollama/qwen3.6:35b-a3b-coding-nvfp4"
-    assert not {"run_id", "truncated", "malformed_tool_calls", "failure_kind"} & set(result.meta)
+    assert result.meta["truncated"] is False
+    assert not {"run_id", "malformed_tool_calls", "failure_kind"} & set(result.meta)
 
     record_path = tmp_path / "record.json"
     write_run_record(record_path, request_id="request-agcode", meta=result.meta)
@@ -286,11 +289,14 @@ def test_agcode_extractor_tolerates_non_json_stdout():
     doc = {
         "output": "text", "status": "ok", "duration_ms": 5, "num_turns": 2,
         "usage": {"input_tokens": 1}, "outcome": "done", "run_id": "abc",
-        "truncated": False, "malformed_tool_calls": 0,
+        "truncated": True, "malformed_tool_calls": 0,
     }
     assert _extract_agcode(json.dumps(doc)) == (
         "text",
-        {"duration_ms": 5, "num_turns": 2, "usage": {"input_tokens": 1}, "outcome": "done"},
+        {
+            "duration_ms": 5, "num_turns": 2, "usage": {"input_tokens": 1},
+            "outcome": "done", "truncated": True,
+        },
     )
 
 

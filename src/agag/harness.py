@@ -134,7 +134,13 @@ def _extract_agcode(raw: str) -> tuple[str, dict]:
         return raw, {}
     meta = {
         key: doc[key]
-        for key in ("duration_ms", "num_turns", "usage", "outcome", "failure", "transcript")
+        for key in (
+            "duration_ms", "num_turns", "usage", "outcome", "failure", "transcript",
+            # Not a §9 field, but the one signal that explains an otherwise
+            # baffling run: a coding run whose answer was a cut-off preamble
+            # took a live reproduction to diagnose because this was dropped.
+            "truncated",
+        )
         if key in doc
     }
     return doc.get("output") if isinstance(doc.get("output"), str) else "", meta
@@ -380,11 +386,12 @@ def write_run_record(
     ):
         if key in meta:
             record[key] = meta[key]
-    # Not a §9 field, and absent on the runs it does not describe: a done
-    # record with no closing text is the one case where "the run said
-    # nothing" is the thing a reader needs to see.
-    if meta.get("empty_final"):
-        record["empty_final"] = True
+    # Not §9 fields, and absent on the runs they do not describe: a run that
+    # said nothing, or one whose responses were cut off at the token limit,
+    # is exactly what a reader of a puzzling record needs to see.
+    for key in ("empty_final", "truncated"):
+        if meta.get(key):
+            record[key] = True
     record["outcome"] = outcome or meta.get("outcome", "failed")
     failure = failure or meta.get("failure")
     if failure:

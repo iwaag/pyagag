@@ -99,7 +99,9 @@ def backend():
     b.close()
 
 
-def tool_use_response(name: str, args: dict, *, tool_id: str = "tu_1") -> dict:
+def tool_use_response(
+    name: str, args: dict, *, tool_id: str = "tu_1", stop_reason: str = "tool_use"
+) -> dict:
     """A Messages response asking for one tool call (with a thinking block,
     matching the shape observed live from qwen3.6 via ollama)."""
     return {
@@ -111,7 +113,7 @@ def tool_use_response(name: str, args: dict, *, tool_id: str = "tu_1") -> dict:
             {"type": "tool_use", "id": tool_id, "name": name, "input": args},
         ],
         "model": "fake",
-        "stop_reason": "tool_use",
+        "stop_reason": stop_reason,
         "usage": {"input_tokens": 20, "output_tokens": 15},
     }
 
@@ -625,14 +627,42 @@ def test_unknown_exception_hits_the_backstop(backend, tmp_path, monkeypatch):
 # --- Truncation (stop_reason: max_tokens) ------------------------------------
 
 
-def test_max_tokens_stop_is_done_but_flagged_truncated(backend, tmp_path):
-    """Decision (P4ex1 step 1): partial text is real output, so the outcome
-    stays ``done`` — but the caller must be able to tell, so meta carries an
-    additive ``truncated`` flag."""
-    backend.responses.append(text_response("half an ans", stop_reason="max_tokens"))
+def test_a_cut_off_turn_is_nudged_and_the_run_continues(backend, tmp_path):
+    """A max_tokens stop means the model was mid-action, not finished. Ending
+    there reads a cut-off preamble as the final answer and throws the turn
+    away — what a local model's long thinking plus one whole-file write does
+    to a 4096-token response."""
+    backend.responses.append(text_response("Now let me create the core:", stop_reason="max_tokens"))
+    backend.responses.append(text_response("the whole answer"))
+
     r = run(backend, tmp_path)
-    assert (r.meta["outcome"], r.output) == ("done", "half an ans")
+
+    assert (r.meta["outcome"], r.output) == ("done", "the whole answer")
+    assert r.meta["num_turns"] == 2
+    # The flag stays for the whole run, not just its last response.
     assert r.meta["truncated"] is True
+    [nudge] = backend.requests[1]["messages"][-1]["content"]
+    assert nudge["type"] == "text" and "cut off" in nudge["text"]
+
+
+def test_a_cut_off_tool_call_is_answered_as_an_error_never_executed(backend, tmp_path):
+    """A tool call cut off at the limit has incomplete arguments: executing it
+    would write half a file. It is answered as an error so the model can retry
+    smaller, and the loop goes on."""
+    backend.responses.append(
+        tool_use_response("write", {"path": "big.ts", "content": "half a fi"},
+                          stop_reason="max_tokens")
+    )
+    backend.responses.append(text_response("wrote it in pieces instead"))
+
+    r = run(backend, tmp_path)
+
+    assert (r.meta["outcome"], r.output) == ("done", "wrote it in pieces instead")
+    assert not (tmp_path / "big.ts").exists()
+    [result] = backend.requests[1]["messages"][-1]["content"]
+    assert result["tool_use_id"] == "tu_1"
+    assert result["is_error"] is True
+    assert "NOT executed" in result["content"]
 
 
 def test_untruncated_run_says_so(backend, tmp_path):
@@ -641,10 +671,15 @@ def test_untruncated_run_says_so(backend, tmp_path):
     assert r.meta["truncated"] is False
 
 
-def test_max_tokens_stop_without_text_is_done_and_empty(backend, tmp_path):
-    backend.responses.append(text_response("", stop_reason="max_tokens"))
-    r = run(backend, tmp_path)
-    assert r.meta["outcome"] == "done"
+def test_a_run_that_only_ever_gets_cut_off_ends_on_its_turn_budget(backend, tmp_path):
+    """The nudge loop is bounded by the ordinary budgets, not by a special
+    case: a backend that truncates forever exhausts the turns and aborts."""
+    for _ in range(3):
+        backend.responses.append(text_response("", stop_reason="max_tokens"))
+
+    r = run(backend, tmp_path, max_turns=2)
+
+    assert_failure(r, "aborted", "turn_budget_exhausted")
     assert (r.meta["truncated"], r.meta["empty_final"]) == (True, True)
 
 

@@ -251,6 +251,16 @@ def test_unsubscribe_channels_sends_names_and_skips_an_empty_list():
     assert len(calls) == before  # no request for nothing to do
 
 
+def test_archive_channel_deletes_the_stream_by_id():
+    calls = []
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+    client.call = lambda method, path, params=None, **kw: (
+        calls.append((method, path, params)) or {"result": "success"}
+    )
+    assert client.archive_channel(23) == {"result": "success"}
+    assert calls == [("DELETE", "streams/23", None)]
+
+
 def test_membership_wrappers_read_users_and_subscribe_principals():
     calls = []
     client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")

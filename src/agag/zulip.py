@@ -359,6 +359,17 @@ class ZulipClient:
             params["principals"] = principals
         return self.call("DELETE", "users/me/subscriptions", params)
 
+    def archive_channel(self, stream_id: int) -> dict:
+        """Archive one channel; its messages and topics survive the move.
+
+        Zulip calls the operation `DELETE streams/<id>`, but it archives
+        rather than deletes: the channel leaves every channel listing and
+        stops costing a sweep, and an organization administrator can still
+        reach its history and unarchive it. The caller must be able to
+        administer the channel — creating it is one way to qualify.
+        """
+        return self.call("DELETE", f"streams/{stream_id}")
+
     def send_to_channel(self, channel: str, topic: str, content: str) -> int:
         result = self.call(
             "POST", "messages",

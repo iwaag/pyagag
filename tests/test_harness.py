@@ -122,14 +122,12 @@ def test_run_harness_replaces_stale_pwd_with_cwd(tmp_path, monkeypatch):
     assert result.output.splitlines() == [str(target), str(target)]
 
 
-@pytest.mark.parametrize("kind", ["launch", "timeout", "empty", "is_error"])
+@pytest.mark.parametrize("kind", ["launch", "timeout", "is_error"])
 def test_failure_paths_are_normalized(tmp_path, kind):
     if kind == "launch":
         command = tmp_path / "missing"
     elif kind == "timeout":
         command = stub(tmp_path / "claude", "import time; time.sleep(5)\n")
-    elif kind == "empty":
-        command = stub(tmp_path / "claude", "pass\n")
     else:
         command = stub(tmp_path / "claude", '''
             import json
@@ -143,6 +141,37 @@ def test_failure_paths_are_normalized(tmp_path, kind):
     assert result.exit_code != 0
     assert result.meta["outcome"] in {"failed", "aborted"}
     assert result.meta["failure"]
+
+
+def test_a_clean_run_with_no_output_is_done_and_says_so(tmp_path):
+    """This used to be a failure ("produced no output"). It is a report now:
+    a run's achievement is the files and flags it left, which only the caller
+    can weigh, and failing here threw finished work away."""
+    command = stub(tmp_path / "claude", "pass\n")
+
+    result = run_harness(agent(command, "claude_code"), "p", cwd=tmp_path, timeout=5)
+
+    assert (result.exit_code, result.output) == (0, "")
+    assert result.meta["outcome"] == "done"
+    assert result.meta["empty_final"] is True
+    assert "failure" not in result.meta
+
+    record = json.loads(
+        write_run_record(
+            tmp_path / "record.json", request_id="request-empty", meta=result.meta
+        ).read_text(encoding="utf-8")
+    )
+    assert record["empty_final"] is True
+
+
+def test_a_run_with_output_carries_no_empty_final(tmp_path):
+    command = stub(tmp_path / "fake", "print('spoke')\n")
+    result = run_harness(agent(command, "fake"), "p", cwd=tmp_path, timeout=5)
+    assert "empty_final" not in result.meta
+    record_path = write_run_record(
+        tmp_path / "record.json", request_id="request-spoke", meta=result.meta
+    )
+    assert "empty_final" not in json.loads(record_path.read_text(encoding="utf-8"))
 
 
 def test_model_argv_mapping_and_smuggling_rejected(tmp_path):

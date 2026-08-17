@@ -345,8 +345,12 @@ def run_harness(
     elif meta.get("is_error"):
         tail = output.strip()[-output_tail_chars:] or "no output"
         failure = f"{agent.harness} reported an error ({meta.get('subtype')}): {tail}"
-    elif not output.strip():
-        failure = f"{agent.harness} produced no output" + (f": {stderr_tail}" if stderr_tail else "")
+    # A clean exit with no output is reported, not failed: a run's achievement
+    # is its files and flags, which only the caller can weigh, and a harness
+    # that fails such a run throws finished work away. `empty_final` is that
+    # report; the caller decides what an empty answer means for its flow.
+    if failure is None and not output.strip():
+        meta["empty_final"] = True
     meta["outcome"] = "failed" if failure else "done"
     # A harness that ended itself on a budget or deadline reports "aborted";
     # that stays, because run_harness spells its own timeout the same way. Only
@@ -376,6 +380,11 @@ def write_run_record(
     ):
         if key in meta:
             record[key] = meta[key]
+    # Not a §9 field, and absent on the runs it does not describe: a done
+    # record with no closing text is the one case where "the run said
+    # nothing" is the thing a reader needs to see.
+    if meta.get("empty_final"):
+        record["empty_final"] = True
     record["outcome"] = outcome or meta.get("outcome", "failed")
     failure = failure or meta.get("failure")
     if failure:

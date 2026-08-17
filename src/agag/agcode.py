@@ -41,8 +41,15 @@ DUMMY_API_KEY = "agcode-local"  # sent because the API shape wants it; never val
 # Machine-readable failure vocabulary (P3). Every non-done run carries exactly
 # one of these in ``meta["failure_kind"]``, beside the human-readable
 # ``meta["failure"]`` string. Mirrors pyagag run_harness(): budget/deadline end
-# as outcome "aborted", backend/model misbehavior as "failed" — and an empty
-# final text with a clean stop is still a failure.
+# as outcome "aborted", backend/model misbehavior as "failed".
+#
+# A clean stop with no final text is not among them. It used to be
+# ("empty_output"), on the reading that a run which says nothing achieved
+# nothing — but what a run achieved is read from what it *did* (the files it
+# wrote, the flags it left), which only the caller can judge. Local models
+# routinely end a finished job with a thinking block and no text, and failing
+# those runs threw away completed work. The fact is reported instead, as
+# ``meta["empty_final"]``.
 FAILURE_KINDS = frozenset(
     {
         "deadline_exceeded",  # aborted: wall-clock deadline hit
@@ -50,7 +57,6 @@ FAILURE_KINDS = frozenset(
         "cancelled",  # aborted: the caller's stop callable asked to end the run
         "connect_error",  # failed: connection refused / HTTP error / timeout
         "malformed_response",  # failed: non-JSON body, missing content, tool_use stop without tool_use blocks
-        "empty_output",  # failed: clean stop but no final text
     }
 )
 
@@ -354,9 +360,11 @@ class AgcodeResult:
     done — ``failure``, a human string prefixed with its machine-readable
     kind (``"<failure_kind>: <detail>"``; the kind also stays available as
     the separate ``failure_kind`` key for in-process callers). Extra keys
-    beyond the contract: ``run_id``, ``malformed_tool_calls``, and ``truncated``
+    beyond the contract: ``run_id``, ``malformed_tool_calls``, ``truncated``
     (the backend stopped the last response at ``max_tokens``; the run can
-    still be ``done``, with partial text as its output).
+    still be ``done``, with partial text as its output), and ``empty_final``
+    (the run stopped cleanly with no closing text; also ``done``, with an
+    empty ``output`` — what it achieved is read from what it did).
 
     The contract's identity fields (``role`` / ``profile`` / ``harness`` /
     ``provider`` / ``model``) are caller-side and never appear here, and
@@ -643,16 +651,13 @@ def run(
                 emit({"type": "user", "message": {"role": "user", "content": results}})
                 continue
 
+            # A clean stop is a done run, whatever the final response carried:
+            # a max_tokens stop with text is a partial but real answer
+            # (meta["truncated"] says so), and a stop with no text at all is a
+            # run that ended without a closing message (meta["empty_final"]).
+            # Neither is the harness's to call a failure.
             output = response_text(resp)
-            if not output.strip():
-                # run_harness() semantics: empty output with a clean stop is a failure.
-                outcome, failure_kind = "failed", "empty_output"
-                failure = "backend stopped cleanly but the final response has no text"
-            else:
-                # A max_tokens stop with text is still an answer — partial, but
-                # real — so the outcome stays done and meta["truncated"] tells
-                # the caller.
-                outcome = "done"
+            outcome = "done"
             break
     except Exception as e:  # noqa: BLE001 - last-resort backstop, see below
         # The known holes each have specific handling above; this exists for
@@ -670,6 +675,7 @@ def run(
         "duration_ms": int((time.monotonic() - started) * 1000),
         "outcome": outcome,
         "truncated": truncated,
+        "empty_final": not output.strip(),
     }
     if failure is not None:
         meta["failure"] = f"{failure_kind}: {failure}"

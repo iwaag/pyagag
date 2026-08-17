@@ -337,10 +337,14 @@ def test_tool_use_stop_without_tool_use_blocks(backend, tmp_path):
     assert_failure(r, "failed", "malformed_response")
 
 
-def test_empty_final_text_is_failure(backend, tmp_path):
+def test_empty_final_text_is_a_done_run_that_says_so(backend, tmp_path):
+    """A clean stop with no closing text is a fact, not a failure: what the
+    run achieved is its files and flags, which only the caller can weigh."""
     backend.responses.append(text_response("  \n\t"))
     r = run(backend, tmp_path)
-    assert_failure(r, "failed", "empty_output")
+    assert (r.status, r.meta["outcome"]) == ("ok", "done")
+    assert r.meta["empty_final"] is True
+    assert "failure" not in r.meta
     assert r.output == "  \n\t"
 
 
@@ -488,12 +492,13 @@ def test_non_dict_content_block_with_text(backend, tmp_path):
     assert (r.meta["outcome"], r.output) == ("done", "all done")
 
 
-def test_content_blocks_all_non_dict_is_empty_output(backend, tmp_path):
+def test_content_blocks_all_non_dict_leave_an_empty_final(backend, tmp_path):
     resp = text_response("ignored")
     resp["content"] = ["stray", 7]
     backend.responses.append(resp)
     r = run(backend, tmp_path)
-    assert_failure(r, "failed", "empty_output")
+    assert (r.meta["outcome"], r.output) == ("done", "")
+    assert r.meta["empty_final"] is True
 
 
 # The scripted-garbage corpus: deliberately malformed-but-parseable responses.
@@ -636,11 +641,11 @@ def test_untruncated_run_says_so(backend, tmp_path):
     assert r.meta["truncated"] is False
 
 
-def test_max_tokens_stop_without_text_is_empty_output(backend, tmp_path):
+def test_max_tokens_stop_without_text_is_done_and_empty(backend, tmp_path):
     backend.responses.append(text_response("", stop_reason="max_tokens"))
     r = run(backend, tmp_path)
-    assert_failure(r, "failed", "empty_output")
-    assert r.meta["truncated"] is True
+    assert r.meta["outcome"] == "done"
+    assert (r.meta["truncated"], r.meta["empty_final"]) == (True, True)
 
 
 # --- Content-handing mode ----------------------------------------------------
@@ -916,13 +921,13 @@ def test_meta_never_carries_identity_or_cost(backend, tmp_path):
 def test_failed_run_failure_is_kind_prefixed(backend, tmp_path):
     """failure_kind has no §9 field of its own; it survives into records as
     a machine-readable prefix of the failure string."""
-    backend.responses.append(text_response(""))  # clean stop, no text
+    backend.responses.append({"id": "msg", "stop_reason": "end_turn"})  # no content key
     r = run(backend, tmp_path)
 
     record = record_from(r.meta)
     assert record["outcome"] == "failed"
     kind, _, detail = record["failure"].partition(": ")
-    assert kind == r.meta["failure_kind"] == "empty_output"
+    assert kind == r.meta["failure_kind"] == "malformed_response"
     assert kind in agcode.FAILURE_KINDS and detail
     # The separate key stays for in-process callers but is not a §9 field.
     assert "failure_kind" not in record
@@ -1001,12 +1006,23 @@ def test_cli_rejects_unknown_tool_preset(backend, tmp_path):
 
 
 def test_cli_failed_run_exit_1(backend, tmp_path):
-    backend.responses.append(text_response(""))
+    backend.responses.append({"id": "msg", "stop_reason": "end_turn"})  # no content key
     proc = run_cli(backend, "--working-dir", str(tmp_path))
     assert proc.returncode == 1
     _, meta = extract_cli(proc)
     assert meta["outcome"] == "failed"
-    assert meta["failure"].startswith("empty_output: ")
+    assert meta["failure"].startswith("malformed_response: ")
+
+
+def test_cli_empty_final_run_exit_0(backend, tmp_path):
+    """A run that ends without a closing message is done: exit 0, empty
+    output, and the fact reported for the caller to weigh."""
+    backend.responses.append(text_response(""))
+    proc = run_cli(backend, "--working-dir", str(tmp_path))
+    assert proc.returncode == 0
+    doc = json.loads(proc.stdout)
+    assert (doc["output"], doc["outcome"], doc["empty_final"]) == ("", "done", True)
+    assert "failure" not in doc
 
 
 def test_cli_aborted_run_exit_2(backend, tmp_path):

@@ -194,6 +194,16 @@ itself — a run it ended on its own budget or deadline, as agcode does — that
 distinction is kept rather than flattened into `failed`, matching how the
 runner labels its own timeout.
 
+A run that stops cleanly with no closing text is `done`, with an empty
+`output` and `meta["empty_final"] = True`. It was once a failure, on the
+reading that a run which says nothing achieved nothing; but what a run
+achieved is read from what it *did* — the files it wrote, the flags it left —
+and only the application knows which of those count. Weak models routinely
+end a finished job with a thinking block and no text, and failing those runs
+threw completed work away. The harness reports the fact; the application
+decides what an empty answer means for its flow (a conversation may have
+nothing to post, while a work run is judged by its report and flag).
+
 ## `ag.agent-run.v1`
 
 Applications select the evidence path. The shared writer produces this JSON
@@ -220,7 +230,9 @@ shape:
 `schema`, `request_id`, and `outcome` are required. Resolved identity fields
 are expected after a successful resolution. Timing, cost, usage, turn count,
 and transcript are included only when observed; values are never invented.
-Failed records may include `failure`. A timeout uses `aborted`.
+Failed records may include `failure`. A timeout uses `aborted`. A record
+carries `empty_final: true` when the run left no closing text, and omits the
+key otherwise.
 
 ## Implementations
 

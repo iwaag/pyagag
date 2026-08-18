@@ -164,6 +164,16 @@ def test_a_clean_run_with_no_output_is_done_and_says_so(tmp_path):
     assert record["empty_final"] is True
 
 
+def test_an_empty_run_keeps_its_stderr_as_evidence(tmp_path):
+    command = stub(tmp_path / "claude", '''
+        import sys
+        print("panic: something harness-side", file=sys.stderr)
+    ''')
+    result = run_harness(agent(command, "claude_code"), "p", cwd=tmp_path, timeout=5)
+    assert result.meta["empty_final"] is True
+    assert result.meta["stderr_tail"] == "panic: something harness-side"
+
+
 def test_a_run_with_output_carries_no_empty_final(tmp_path):
     command = stub(tmp_path / "fake", "print('spoke')\n")
     result = run_harness(agent(command, "fake"), "p", cwd=tmp_path, timeout=5)

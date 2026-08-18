@@ -360,6 +360,11 @@ def run_harness(
     # report; the caller decides what an empty answer means for its flow.
     if failure is None and not output.strip():
         meta["empty_final"] = True
+        # An empty run's stderr is the only trace of what happened inside it;
+        # keep it as evidence for the caller instead of discarding it with the
+        # process.
+        if stderr_tail:
+            meta["stderr_tail"] = stderr_tail
     # A progress display that quietly stopped working leaves this behind. It
     # says nothing about the run itself, which is why it is not a failure.
     if consumer_errors:

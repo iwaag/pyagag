@@ -300,21 +300,42 @@ class ZulipClient:
         description: str,
         principals: list[int],
         announce: bool = False,
+        folder_id: int | None = None,
     ) -> dict:
         """Create (or join) a public channel and subscribe `principals` to it.
 
         Zulip's subscribe call creates the channel when the name is new; a
         default-role bot may do this on this realm (proven in Step 1). The
         response says who was newly subscribed vs already subscribed.
+
+        `folder_id` places a newly created channel into a channel folder
+        (Zulip 11.0+). It only applies at creation: joining an existing
+        channel leaves that channel's folder alone.
         """
-        return self.call(
-            "POST", "users/me/subscriptions",
-            {
-                "subscriptions": [{"name": name, "description": description}],
-                "principals": principals,
-                "announce": announce,
-            },
+        params: dict = {
+            "subscriptions": [{"name": name, "description": description}],
+            "principals": principals,
+            "announce": announce,
+        }
+        if folder_id is not None:
+            params["folder_id"] = folder_id
+        return self.call("POST", "users/me/subscriptions", params)
+
+    def channel_folders(self) -> list[dict]:
+        """Channel folders in the realm, unarchived only, each with its `id`."""
+        return self.call("GET", "channel_folders").get("channel_folders", [])
+
+    def create_channel_folder(self, name: str, description: str = "") -> int:
+        """Create a channel folder and return its id.
+
+        Not idempotent — Zulip rejects a duplicate name — so look the name up
+        in `channel_folders()` first when the folder may already exist.
+        """
+        result = self.call(
+            "POST", "channel_folders/create",
+            {"name": name, "description": description},
         )
+        return int(result["channel_folder_id"])
 
     def channels(self) -> list[dict]:
         """Public channels visible to this bot."""

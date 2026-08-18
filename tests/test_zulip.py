@@ -236,6 +236,47 @@ def test_channel_discovery_and_subscription_wrappers():
     assert len(calls) == before
 
 
+def test_create_channel_sends_folder_id_only_when_given():
+    calls = []
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+    client.call = lambda method, path, params=None, **kw: (
+        calls.append((method, path, params)) or {"subscribed": {"pj-one": [7]}}
+    )
+    client.create_channel("pj-one", "main channel", [7, 8])
+    assert calls[-1] == (
+        "POST",
+        "users/me/subscriptions",
+        {
+            "subscriptions": [{"name": "pj-one", "description": "main channel"}],
+            "principals": [7, 8],
+            "announce": False,
+        },
+    )
+    client.create_channel("pj-one-assets", "derived channel", [7, 8], folder_id=3)
+    assert calls[-1][2]["folder_id"] == 3
+
+
+def test_channel_folder_wrappers_list_and_create():
+    calls = []
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+
+    def call(method, path, params=None, **kwargs):
+        calls.append((method, path, params))
+        if method == "GET":
+            return {"channel_folders": [{"id": 3, "name": "pj-one"}]}
+        return {"channel_folder_id": 4}
+
+    client.call = call
+    assert client.channel_folders() == [{"id": 3, "name": "pj-one"}]
+    assert calls[-1] == ("GET", "channel_folders", None)
+    assert client.create_channel_folder("pj-two", "project two") == 4
+    assert calls[-1] == (
+        "POST",
+        "channel_folders/create",
+        {"name": "pj-two", "description": "project two"},
+    )
+
+
 def test_unsubscribe_channels_sends_names_and_skips_an_empty_list():
     calls = []
     client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")

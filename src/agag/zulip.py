@@ -30,6 +30,7 @@ import urllib.request
 from base64 import b64encode
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from agag.status import StatusWriter, default_status_path
 
@@ -530,8 +531,21 @@ def channel_name(message: dict) -> str:
     return recipient if isinstance(recipient, str) else ""
 
 
+TopicFilter = str | tuple[str, ...] | Callable[[str, str], bool]
+
+
+def topic_matches(channel: str, topic: str, topic_filter: TopicFilter) -> bool:
+    """Whether a channel/topic pair belongs to a consumer's sweep.
+
+    Prefix strings keep the original lightweight route. A callable lets an
+    agent own every topic in one named channel while still applying prefixes
+    in its other subscriptions.
+    """
+    return topic_filter(channel, topic) if callable(topic_filter) else topic.startswith(topic_filter)
+
+
 def topic_from_event(
-    message: dict, self_id: int, topic_filter: str | tuple[str, ...]
+    message: dict, self_id: int, topic_filter: TopicFilter
 ) -> tuple[str, str] | None:
     """The `(channel, topic)` a message event points at, if it can await us.
 
@@ -543,12 +557,12 @@ def topic_from_event(
     if not is_channel_message_for_us(message, self_id):
         return None
     topic = str(message.get("subject") or "")
-    if not topic or not topic.startswith(topic_filter):
+    channel = channel_name(message)
+    if not topic or not channel or not topic_matches(channel, topic, topic_filter):
         return None
     if topic.startswith(RESOLVED_TOPIC_PREFIX):
         return None
-    channel = channel_name(message)
-    return (channel, topic) if channel else None
+    return (channel, topic)
 
 
 def log(message: str) -> None:
@@ -625,13 +639,13 @@ def serve(client: ZulipClient, handler, log=log, accept=is_dm_for_us, status=Non
 
 
 def sweep_topics(
-    client: ZulipClient, self_id: int, topic_filter: str | tuple[str, ...]
+    client: ZulipClient, self_id: int, topic_filter: TopicFilter
 ) -> list[tuple[str, str]]:
     """Every `(channel, topic)` currently awaiting this bot's reply.
 
     A topic qualifies when it is in a channel this bot is subscribed to, its
-    name passes `topic_filter` (prefix match — a tuple matches any of its
-    prefixes, like `str.startswith`), it is not resolved, and its
+    name passes `topic_filter` (a prefix, tuple of prefixes, or callable), it
+    is not resolved, and its
     last poster is somebody else. The last-poster rule is what makes the pull
     loop self-stabilizing: the bot's own ack or reply silences a topic until
     a human speaks again.
@@ -643,7 +657,7 @@ def sweep_topics(
         if not channel or stream is None:
             continue
         for topic in client.channel_topics(int(stream)):
-            if not topic.startswith(topic_filter):
+            if not topic_matches(channel, topic, topic_filter):
                 continue
             if topic.startswith(RESOLVED_TOPIC_PREFIX):
                 continue
@@ -655,7 +669,7 @@ def sweep_topics(
 
 
 def sweep_serve(
-    client: ZulipClient, handler, *, topic_filter: str | tuple[str, ...], log=log, status=None
+    client: ZulipClient, handler, *, topic_filter: TopicFilter, log=log, status=None
 ) -> None:
     """Pull-based listener: poll for message events and serve the topics that
     await a reply. `handler(channel, topic)` is called once per topic;

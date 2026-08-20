@@ -498,6 +498,33 @@ def test_sweep_topics_accepts_several_prefixes():
     assert matches == [("general", "run-1"), ("general", "mission-stray")]
 
 
+def test_sweep_topics_accepts_a_channel_aware_callable():
+    client = SweepClient(
+        whoami_results=[],
+        poll_results=[],
+        topics_by_channel={
+            "own-agent": ["question", "create-request"],
+            "general": ["question", "create-request"],
+        },
+        last_sender={
+            ("own-agent", "question"): 99,
+            ("own-agent", "create-request"): 99,
+            ("general", "question"): 99,
+            ("general", "create-request"): 99,
+        },
+    )
+    matches = sweep_topics(
+        client,
+        self_id=7,
+        topic_filter=lambda channel, topic: channel == "own-agent" or topic.startswith("create-"),
+    )
+    assert matches == [
+        ("general", "create-request"),
+        ("own-agent", "question"),
+        ("own-agent", "create-request"),
+    ]
+
+
 def test_sweep_serve_sweeps_on_startup_before_any_event():
     client = SweepClient(
         whoami_results=[{"user_id": 7}],
@@ -580,6 +607,18 @@ def test_topic_from_event_applies_the_same_rules_as_the_sweep():
     assert topic_from_event(message(type="private"), 7, "mission-") is None
     assert topic_from_event(message(display_recipient=""), 7, "mission-") is None
     assert topic_from_event(message(subject=""), 7, "") is None
+
+
+def test_topic_from_event_passes_channel_and_topic_to_a_callable():
+    message = channel_event(1, sender_id=99, channel="own-agent", topic="question")["message"]
+    seen = []
+
+    def matches(channel, topic):
+        seen.append((channel, topic))
+        return channel == "own-agent" and topic == "question"
+
+    assert topic_from_event(message, 7, matches) == ("own-agent", "question")
+    assert seen == [("own-agent", "question")]
 
 
 def test_sweep_serve_ignores_non_message_events():

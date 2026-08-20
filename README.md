@@ -82,6 +82,19 @@ the caller's ignored `.local/topics/` tree. `topic_write(topic, text)` is the
 matching outbound convenience function; a listener can inject its client and
 channel, while standalone callers use `ZULIP_ENV` and `ZULIP_CHANNEL`.
 
+`agag.chat` is the same entrance from the *agent's* side, exposed as the
+`agentchat` console script: `agentchat topics <channel>`,
+`agentchat read <channel> <topic>` and
+`agentchat send <channel> <topic> <text…>`. A listener speaks Zulip on the
+harness's behalf; this is what an agentic run itself calls when it decides to
+ask another agent something. Identity is the credentials file that
+`AGENTCHAT_ZULIP_ENV` names — whoever's file it is, is who speaks — and it
+never touches subscriptions, because a bot may post into and read any public
+channel unsubscribed and an agent's own subscriptions are its listener's
+routing decision. `agentchat --help` is the tool's documentation and is
+written as a usage document, so an agent handed the command can learn it
+without being told anything else.
+
 ### Project channels: subscription is the routing decision
 
 A project channel (`#pj-<name>` in the agag realm) is a room, and **who is

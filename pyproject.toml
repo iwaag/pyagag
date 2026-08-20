@@ -6,6 +6,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 
+[project.scripts]
+agentchat = "agag.chat:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",

@@ -6,12 +6,23 @@ from agag import intro
 
 def test_intro_text_is_the_committed_markdown_plus_a_stamp(tmp_path):
     source = tmp_path / "intro.md"
-    source.write_text("# agforge\n\nOpen an `assetplan-…` topic.\n", encoding="utf-8")
+    source.write_text(
+        "# agforge\n\nOpen an `assetplan-…` topic in `{instance}`.\n", encoding="utf-8"
+    )
 
-    assert intro.intro_text(source, tmp_path, date(2026, 8, 20), "3939f26") == (
-        "# agforge\n\nOpen an `assetplan-…` topic.\n\n---\n"
+    assert intro.intro_text(
+        source, tmp_path, "agforge-agstudio1", date(2026, 8, 20), "3939f26"
+    ) == (
+        "# agforge\n\nOpen an `assetplan-…` topic in `agforge-agstudio1`.\n\n---\n"
         "Posted: 2026-08-20\nRevision: `3939f26`\n"
     )
+
+
+def test_a_file_without_the_placeholder_is_posted_as_it_stands(tmp_path):
+    source = tmp_path / "intro.md"
+    source.write_text("nothing to fill in\n", encoding="utf-8")
+    text = intro.intro_text(source, tmp_path, "autolab-agstudio1", date(2026, 8, 21), "abc")
+    assert text.startswith("nothing to fill in\n\n---\n")
 
 
 def test_intro_topic_is_the_append_only_per_instance_topic():

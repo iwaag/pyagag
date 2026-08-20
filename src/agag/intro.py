@@ -11,6 +11,11 @@ The introduction is the *contract* another agent reads. It travels as content,
 never as code: a consumer learns the entrance by reading this post, so no
 routing vocabulary needs to be compiled into anyone else's guide.
 
+`{instance}` in the file is replaced with this instance's name as it is
+posted. The instance label is the host, which tracked files are not supposed
+to carry (`devdocs/README_DEV.md`), and one introduction that any instance of
+the agent can post is the better shape anyway.
+
 An agent wires this up with one call:
 
     from agag.intro import post_intro
@@ -58,13 +63,14 @@ def intro_topic(instance: str) -> str:
 def intro_text(
     intro_path: Path,
     root: Path,
+    instance: str,
     today: date | None = None,
     commit: str | None = None,
 ) -> str:
-    """The committed Markdown plus this post's freshness stamp."""
+    """The committed Markdown, with `{instance}` filled in, plus the stamp."""
     posted = today or date.today()
     current_revision = commit if commit is not None else revision(root)
-    body = intro_path.read_text(encoding="utf-8").rstrip()
+    body = intro_path.read_text(encoding="utf-8").rstrip().replace("{instance}", instance)
     return f"{body}\n\n---\nPosted: {posted.isoformat()}\nRevision: `{current_revision}`\n"
 
 
@@ -73,6 +79,6 @@ def post_intro(client, *, instance: str, intro_path: Path, root: Path) -> str:
 
     Returns the posted text, so a caller can log or test what it announced.
     """
-    text = intro_text(intro_path, root)
+    text = intro_text(intro_path, root, instance)
     client.send_to_channel(AGENTS_CHANNEL, intro_topic(instance), text)
     return text

@@ -151,6 +151,10 @@ name = instance_name(ROOT / ".local" / "instance.toml", fallback="autolab")
 post_intro(client, instance=name, intro_path=ROOT / "params" / "intro.md", root=ROOT)
 ```
 
+`{instance}` inside the Markdown is replaced with the instance's name as it is
+posted, so the tracked file carries no host label and one introduction serves
+every instance of that agent.
+
 Nothing deduplicates: re-post after a behavior change and the newest
 introduction is simply the newest message. **The introduction is the contract.**
 It is what another agent reads to learn this one's entrance, which is why that

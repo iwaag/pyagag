@@ -129,6 +129,34 @@ post re-arms the other. So put two same-kind instances in one project channel
 only when their topics carry an explicit addressee; otherwise the creator picks
 one instance per project channel, which is the point of picking at all.
 
+### Instance identity and the introduction board
+
+Two small modules carry the standardized shape of "an agent that can be found
+and asked". `agag.instance.instance_name()` reads an instance's own name from
+its local `.local/instance.toml` — the name its Zulip account, its own channel
+and its `intro-<name>` topic all agree on — falling back to the plain agent
+name when there is no file, and letting an optional environment variable win so
+a second instance on one host needs no second checkout. The file is local-only
+because the instance label carries host information.
+
+`agag.intro.post_intro()` appends that instance's committed introduction to the
+shared `agents` channel, in the append-only `intro-<instance>` topic, stamped
+with the date and the repository's short revision:
+
+```python
+from agag.instance import instance_name
+from agag.intro import post_intro
+
+name = instance_name(ROOT / ".local" / "instance.toml", fallback="autolab")
+post_intro(client, instance=name, intro_path=ROOT / "params" / "intro.md", root=ROOT)
+```
+
+Nothing deduplicates: re-post after a behavior change and the newest
+introduction is simply the newest message. **The introduction is the contract.**
+It is what another agent reads to learn this one's entrance, which is why that
+knowledge travels as posted content rather than as vocabulary compiled into
+someone else's guide.
+
 ## Development
 
 ```sh

@@ -184,3 +184,18 @@ def test_help_is_a_usage_document_with_examples(capsys):
     assert "Examples" in text
     for command in ("send", "read", "topics"):
         assert command in text
+
+
+def test_help_names_no_real_agent_channel_or_topic(capsys):
+    """The examples must not hand out somebody's routing.
+
+    A caller that copies a channel or a topic prefix out of this help has
+    learned it from the tool rather than from the agent that owns it — which
+    is exactly the attribution `agent_standardize` p2 exists to establish. It
+    happened once, live, before the examples were made abstract.
+    """
+    with pytest.raises(SystemExit):
+        chat.build_parser().parse_args(["--help"])
+    text = capsys.readouterr().out
+    for leak in ("agforge", "agfront", "agautolab", "cagent", "create-", "intro-"):
+        assert leak not in text

@@ -93,7 +93,10 @@ never touches subscriptions, because a bot may post into and read any public
 channel unsubscribed and an agent's own subscriptions are its listener's
 routing decision. `agentchat --help` is the tool's documentation and is
 written as a usage document, so an agent handed the command can learn it
-without being told anything else.
+without being told anything else. Its examples name no real channel or topic
+prefix on purpose: where to write is what the addressed agent's own
+introduction says, and an example a caller can copy would quietly become the
+source of that knowledge.
 
 ### Project channels: subscription is the routing decision
 

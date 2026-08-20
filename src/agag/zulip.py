@@ -417,6 +417,36 @@ class ZulipClient:
         )
         return result.get("messages", [])
 
+    def topic_since(
+        self, channel: str, topic: str, after_id: int, num_after: int = 100
+    ) -> list[dict]:
+        """Messages of the topic strictly newer than `after_id`, oldest first.
+
+        The anchor itself is excluded, so an id already seen never comes back
+        — which is what makes a caller's "has anything new arrived?" loop
+        cheap and idempotent.
+        """
+        result = self.call(
+            "GET", "messages",
+            {
+                "anchor": str(int(after_id)),
+                "include_anchor": "false",
+                "num_before": "0",
+                "num_after": str(num_after),
+                "apply_markdown": "false",
+                "narrow": [
+                    {"operator": "channel", "operand": channel},
+                    {"operator": "topic", "operand": topic},
+                ],
+            },
+        )
+        return result.get("messages", [])
+
+    def topic_last_id(self, channel: str, topic: str) -> int:
+        """Id of the topic's newest message, or 0 when it has none yet."""
+        messages = self.topic_history(channel, topic, num_before=1)
+        return int(messages[-1]["id"]) if messages else 0
+
     def stream_id(self, name: str) -> int:
         """Resolve a channel name to Zulip's numeric stream id."""
         return int(self.call("GET", "get_stream_id", {"stream": name})["stream_id"])

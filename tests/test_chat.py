@@ -35,6 +35,14 @@ class Client:
         self.calls.append(("history", channel, topic, num_before))
         return self.messages
 
+    def topic_last_id(self, channel, topic):
+        self.calls.append(("last_id", channel, topic))
+        return self.messages[-1]["id"] if self.messages else 0
+
+    def topic_since(self, channel, topic, after_id, num_after=100):
+        self.calls.append(("since", channel, topic, after_id))
+        return [m for m in self.messages if m["id"] > after_id]
+
     def stream_id(self, name):
         self.calls.append(("stream_id", name))
         return 42
@@ -54,9 +62,9 @@ def run(monkeypatch, argv, client):
     return code, out.getvalue(), err.getvalue()
 
 
-def message(sender="Forge", content="on it", timestamp=1755600000, sender_id=13):
+def message(sender="Forge", content="on it", timestamp=1755600000, sender_id=13, id=5):
     return {
-        "id": 5,
+        "id": id,
         "sender_id": sender_id,
         "sender_full_name": sender,
         "timestamp": timestamp,
@@ -145,6 +153,104 @@ def test_read_rejects_a_non_positive_count(monkeypatch):
     assert code == 1 and calls == [] and "--count" in err
 
 
+def test_read_since_asks_only_for_what_is_newer(monkeypatch):
+    calls = []
+    client = Client(calls, messages=[message(id=5, content="old"), message(id=9, content="new")])
+    code, out, err = run(monkeypatch, ["read", CHANNEL, TOPIC, "--since", "5"], client)
+    assert code == 0 and err == ""
+    assert calls == [("since", CHANNEL, TOPIC, 5)]
+    assert "new" in out and "old" not in out
+
+
+def test_read_since_with_nothing_newer_still_succeeds(monkeypatch):
+    client = Client([], messages=[message(id=5)])
+    code, out, err = run(monkeypatch, ["read", CHANNEL, TOPIC, "--since", "5"], client)
+    assert code == 0 and err == "" and "nothing newer" in out
+
+
+def test_a_printed_message_carries_the_id_since_takes(monkeypatch):
+    code, out, _ = run(monkeypatch, ["read", CHANNEL, TOPIC], Client([], messages=[message(id=77)]))
+    assert code == 0 and "77" in out
+
+
+# --- wait ------------------------------------------------------------------
+
+
+def wait_run(monkeypatch, argv, client, clock=None):
+    """Drive `wait` with a fake clock so a test never actually sleeps."""
+    slept = []
+    ticks = iter(clock if clock is not None else range(0, 10_000, 1))
+    monkeypatch.setattr(chat, "client_from_environment", lambda: client)
+    original = chat._wait
+    monkeypatch.setattr(
+        chat, "_wait",
+        lambda args, c, out: original(args, c, out, sleep=slept.append, now=lambda: next(ticks)),
+    )
+    out, err = io.StringIO(), io.StringIO()
+    code = chat.main(argv, out=out, err=err)
+    return code, out.getvalue(), err.getvalue(), slept
+
+
+def test_wait_returns_what_arrived_after_the_current_last_message(monkeypatch):
+    calls = []
+
+    class Arriving(Client):
+        """Quiet on the first look, answered on the second."""
+
+        def topic_since(self, channel, topic, after_id, num_after=100):
+            self.calls.append(("since", channel, topic, after_id))
+            if len([c for c in self.calls if c[0] == "since"]) < 2:
+                return []
+            return [message(id=12, sender="Autolab", content="task done")]
+
+    client = Arriving(calls, messages=[message(id=5)])
+    code, out, err, slept = wait_run(monkeypatch, ["wait", CHANNEL, TOPIC], client)
+    assert code == 0 and err == ""
+    assert calls[0] == ("last_id", CHANNEL, TOPIC)
+    assert calls[1] == ("since", CHANNEL, TOPIC, 5)
+    assert "task done" in out and "12" in out
+    assert slept == [chat.DEFAULT_WAIT_INTERVAL]
+
+
+def test_wait_since_skips_the_baseline_lookup(monkeypatch):
+    calls = []
+    client = Client(calls, messages=[message(id=5), message(id=9, content="answer")])
+    code, out, err, _ = wait_run(monkeypatch, ["wait", CHANNEL, TOPIC, "--since", "5"], client)
+    assert code == 0 and err == ""
+    assert calls == [("since", CHANNEL, TOPIC, 5)]
+    assert "answer" in out
+
+
+def test_wait_that_times_out_has_its_own_exit_code(monkeypatch):
+    client = Client([], messages=[message(id=5)])
+    code, out, err, _ = wait_run(
+        monkeypatch,
+        ["wait", CHANNEL, TOPIC, "--since", "5", "--timeout", "30", "--interval", "10"],
+        client,
+    )
+    assert code == chat.TIMEOUT_EXIT_CODE != 1
+    assert err == "" and "nothing new" in out and "5" in out
+
+
+def test_wait_never_sleeps_past_its_deadline(monkeypatch):
+    client = Client([], messages=[message(id=5)])
+    code, _, _, slept = wait_run(
+        monkeypatch,
+        ["wait", CHANNEL, TOPIC, "--since", "5", "--timeout", "5", "--interval", "10"],
+        client,
+    )
+    assert code == chat.TIMEOUT_EXIT_CODE
+    assert max(slept) <= 5
+
+
+def test_wait_rejects_a_non_positive_interval(monkeypatch):
+    calls = []
+    code, _, err = run(
+        monkeypatch, ["wait", CHANNEL, TOPIC, "--interval", "0"], Client(calls)
+    )
+    assert code == 1 and calls == [] and "--interval" in err
+
+
 # --- topics ----------------------------------------------------------------
 
 
@@ -182,7 +288,7 @@ def test_help_is_a_usage_document_with_examples(capsys):
         chat.build_parser().parse_args(["--help"])
     text = capsys.readouterr().out
     assert "Examples" in text
-    for command in ("send", "read", "topics"):
+    for command in ("send", "read", "topics", "wait"):
         assert command in text
 
 

@@ -84,14 +84,23 @@ channel, while standalone callers use `ZULIP_ENV` and `ZULIP_CHANNEL`.
 
 `agag.chat` is the same entrance from the *agent's* side, exposed as the
 `agentchat` console script: `agentchat topics <channel>`,
-`agentchat read <channel> <topic>` and
-`agentchat send <channel> <topic> <text…>`. A listener speaks Zulip on the
+`agentchat read <channel> <topic>`,
+`agentchat send <channel> <topic> <text…>` and
+`agentchat wait <channel> <topic>`. A listener speaks Zulip on the
 harness's behalf; this is what an agentic run itself calls when it decides to
 ask another agent something. Identity is the credentials file that
 `AGENTCHAT_ZULIP_ENV` names — whoever's file it is, is who speaks — and it
 never touches subscriptions, because a bot may post into and read any public
 channel unsubscribed and an agent's own subscriptions are its listener's
-routing decision. `agentchat --help` is the tool's documentation and is
+routing decision. `wait` blocks until a message newer than `--since` (default: the topic's
+current last message) appears, prints it and exits 0, or exits `3` when
+`--timeout` passes with nothing new — a status of its own so a supervising
+run can tell "still quiet" from "it failed" and decide whether to keep
+waiting. `read --since` is the same window without the waiting, which is what
+makes a supervision that outlived its run resumable: every printed message
+carries the id that `--since` takes.
+
+`agentchat --help` is the tool's documentation and is
 written as a usage document, so an agent handed the command can learn it
 without being told anything else. Its examples name no real channel or topic
 prefix on purpose: where to write is what the addressed agent's own

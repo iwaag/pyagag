@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,10 +36,16 @@ from .zulip import ZulipClient, ZulipError
 
 ENV_VARIABLE = "AGENTCHAT_ZULIP_ENV"
 DEFAULT_READ_COUNT = 30
+DEFAULT_WAIT_TIMEOUT = 900
+DEFAULT_WAIT_INTERVAL = 15
+TIMEOUT_EXIT_CODE = 3
 
 __all__ = [
     "DEFAULT_READ_COUNT",
+    "DEFAULT_WAIT_INTERVAL",
+    "DEFAULT_WAIT_TIMEOUT",
     "ENV_VARIABLE",
+    "TIMEOUT_EXIT_CODE",
     "AgentChatError",
     "build_parser",
     "client_from_environment",
@@ -73,6 +80,17 @@ Examples
   # Multi-line text is fine; Zulip renders Markdown.
   agentchat send <their-channel> <topic> "$(cat request.md)"
 
+  # Block until somebody answers, then print what they said. Waiting is how
+  # you follow a conversation that takes a while: send, wait, read the
+  # answer, reply. Exit status 3 means the wait timed out with nothing new,
+  # so a loop can decide whether to keep waiting or report back.
+  agentchat wait <their-channel> <topic>
+
+  # Resume where you left off: everything newer than a message you have
+  # already seen, whether it arrived while you were waiting or before.
+  agentchat wait <their-channel> <topic> --since <message-id>
+  agentchat read <their-channel> <topic> --since <message-id>
+
   The channel and the topic name are not for this tool to suggest: they are
   whatever the agent you are addressing said its entrance is. Read its
   introduction, and use the names it gave.
@@ -80,7 +98,11 @@ Examples
 Notes
 
   Ask before you speak on somebody's behalf: a post is public and permanent.
-  Answers do not come back here — read the topic again to see the reply.
+  Answers do not come back here — read or wait on the topic to see the reply.
+
+  Every message printed carries its id in its header, and that id is what
+  --since takes, so a long conversation can be followed one step at a time
+  without reading it from the beginning again.
 """
 
 
@@ -115,13 +137,18 @@ def _timestamp(value) -> str:
 
 
 def format_messages(messages: list[dict]) -> str:
-    """One `[time] sender:` header per message, body below it, oldest first."""
+    """One `[time] sender (message id):` header per message, body below it,
+    oldest first. The id is printed because it is what `--since` takes."""
     blocks = []
     for message in messages:
         sender = message.get("sender_full_name") or f"user{message.get('sender_id')}"
         content = str(message.get("content", "")).strip()
-        blocks.append(f"[{_timestamp(message.get('timestamp'))}] {sender}:\n{content}")
+        header = f"[{_timestamp(message.get('timestamp'))}] {sender}"
+        if message.get("id") is not None:
+            header += f" (message {message['id']})"
+        blocks.append(f"{header}:\n{content}")
     return "\n\n".join(blocks)
+
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -159,6 +186,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--count", type=int, default=DEFAULT_READ_COUNT,
         help=f"how many recent messages to show (default {DEFAULT_READ_COUNT})",
     )
+    read.add_argument(
+        "--since", type=int, default=None, metavar="MESSAGE_ID",
+        help=(
+            "show only what is newer than this message id, instead of the "
+            "last --count messages; nothing new prints nothing and still "
+            "succeeds"
+        ),
+    )
 
     topics = subcommands.add_parser(
         "topics",
@@ -171,7 +206,68 @@ def build_parser() -> argparse.ArgumentParser:
     )
     topics.add_argument("channel", help="channel name, without the leading '#'")
 
+    wait = subcommands.add_parser(
+        "wait",
+        help="block until somebody posts in one channel's topic",
+        description=(
+            "Wait for a message newer than --since (default: whatever is "
+            "last in the topic right now), print the new messages the same "
+            "way 'read' does, and exit 0. If the timeout passes with nothing "
+            f"new, print one line and exit {TIMEOUT_EXIT_CODE} — a distinct "
+            "status so a loop can tell 'still quiet' from 'it failed'."
+        ),
+    )
+    wait.add_argument("channel", help="channel name, without the leading '#'")
+    wait.add_argument("topic", help="topic name")
+    wait.add_argument(
+        "--since", type=int, default=None, metavar="MESSAGE_ID",
+        help=(
+            "wait for something newer than this message id; without it the "
+            "topic's current last message is the starting point, so only "
+            "what arrives from now on counts"
+        ),
+    )
+    wait.add_argument(
+        "--timeout", type=float, default=DEFAULT_WAIT_TIMEOUT, metavar="SECONDS",
+        help=(
+            f"give up after this long (default {DEFAULT_WAIT_TIMEOUT}); "
+            "0 waits forever"
+        ),
+    )
+    wait.add_argument(
+        "--interval", type=float, default=DEFAULT_WAIT_INTERVAL, metavar="SECONDS",
+        help=f"how often to look (default {DEFAULT_WAIT_INTERVAL})",
+    )
+
     return parser
+
+
+def _wait(args, client: ZulipClient, out, sleep=time.sleep, now=time.monotonic) -> int:
+    """Poll the topic until something newer than the baseline shows up."""
+    if args.timeout < 0:
+        raise AgentChatError("--timeout cannot be negative")
+    if args.interval <= 0:
+        raise AgentChatError("--interval must be greater than 0")
+    since = args.since
+    if since is None:
+        since = client.topic_last_id(args.channel, args.topic)
+    deadline = None if args.timeout == 0 else now() + args.timeout
+    while True:
+        messages = client.topic_since(args.channel, args.topic, since)
+        if messages:
+            print(format_messages(messages), file=out)
+            return 0
+        if deadline is not None and now() >= deadline:
+            print(
+                f"nothing new in #{args.channel} > {args.topic} after "
+                f"{args.timeout:g}s (last seen message {since})",
+                file=out,
+            )
+            return TIMEOUT_EXIT_CODE
+        if deadline is None:
+            sleep(args.interval)
+        else:
+            sleep(min(args.interval, max(0.0, deadline - now())))
 
 
 def _run(args, client: ZulipClient, out) -> int:
@@ -188,12 +284,26 @@ def _run(args, client: ZulipClient, out) -> int:
     if args.command == "read":
         if args.count < 1:
             raise AgentChatError("--count must be at least 1")
-        messages = client.topic_history(args.channel, args.topic, num_before=args.count)
-        if not messages:
-            print(f"no messages in #{args.channel} > {args.topic}", file=out)
-            return 0
+        if args.since is not None:
+            messages = client.topic_since(args.channel, args.topic, args.since)
+            if not messages:
+                print(
+                    f"nothing newer than message {args.since} in "
+                    f"#{args.channel} > {args.topic}",
+                    file=out,
+                )
+                return 0
+        else:
+            messages = client.topic_history(
+                args.channel, args.topic, num_before=args.count
+            )
+            if not messages:
+                print(f"no messages in #{args.channel} > {args.topic}", file=out)
+                return 0
         print(format_messages(messages), file=out)
         return 0
+    if args.command == "wait":
+        return _wait(args, client, out)
     if args.command == "topics":
         names = client.channel_topics(client.stream_id(args.channel))
         if not names:

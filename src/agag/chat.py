@@ -32,7 +32,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .zulip import ZulipClient, ZulipError
+from .zulip import RESOLVED_TOPIC_PREFIX, ZulipClient, ZulipError
 
 ENV_VARIABLE = "AGENTCHAT_ZULIP_ENV"
 DEFAULT_READ_COUNT = 30
@@ -50,7 +50,10 @@ __all__ = [
     "build_parser",
     "client_from_environment",
     "format_messages",
+    "last_id",
     "main",
+    "messages_since",
+    "topic_names",
 ]
 
 USAGE_DOC = """\
@@ -103,7 +106,38 @@ Notes
   Every message printed carries its id in its header, and that id is what
   --since takes, so a long conversation can be followed one step at a time
   without reading it from the beginning again.
+
+  A topic that somebody marks resolved is renamed to "✔ <topic>". Keep using
+  the name you know: reading and waiting follow the topic across that rename,
+  so the close-out itself is not what makes you lose sight of it.
 """
+
+
+def topic_names(topic: str) -> list[str]:
+    """The topic under both of the names Zulip may be keeping it under.
+
+    Resolving a topic *renames* it — every message moves to `✔ <topic>` — so
+    a reader that only knows the open name goes blind at exactly the moment
+    it cares about most: the conversation being finished. Both names are
+    tried, and the resolved one is not a different conversation.
+    """
+    if topic.startswith(RESOLVED_TOPIC_PREFIX):
+        return [topic, topic[len(RESOLVED_TOPIC_PREFIX):]]
+    return [topic, f"{RESOLVED_TOPIC_PREFIX}{topic}"]
+
+
+def messages_since(client: ZulipClient, channel: str, topic: str, after_id: int) -> list[dict]:
+    """What is newer than `after_id`, under whichever name the topic has."""
+    for name in topic_names(topic):
+        messages = client.topic_since(channel, name, after_id)
+        if messages:
+            return messages
+    return []
+
+
+def last_id(client: ZulipClient, channel: str, topic: str) -> int:
+    """The newest message id under either name, or 0 when there is none."""
+    return max(client.topic_last_id(channel, name) for name in topic_names(topic))
 
 
 class AgentChatError(RuntimeError):
@@ -250,10 +284,10 @@ def _wait(args, client: ZulipClient, out, sleep=time.sleep, now=time.monotonic) 
         raise AgentChatError("--interval must be greater than 0")
     since = args.since
     if since is None:
-        since = client.topic_last_id(args.channel, args.topic)
+        since = last_id(client, args.channel, args.topic)
     deadline = None if args.timeout == 0 else now() + args.timeout
     while True:
-        messages = client.topic_since(args.channel, args.topic, since)
+        messages = messages_since(client, args.channel, args.topic, since)
         if messages:
             print(format_messages(messages), file=out)
             return 0
@@ -285,7 +319,7 @@ def _run(args, client: ZulipClient, out) -> int:
         if args.count < 1:
             raise AgentChatError("--count must be at least 1")
         if args.since is not None:
-            messages = client.topic_since(args.channel, args.topic, args.since)
+            messages = messages_since(client, args.channel, args.topic, args.since)
             if not messages:
                 print(
                     f"nothing newer than message {args.since} in "

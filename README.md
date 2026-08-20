@@ -98,7 +98,9 @@ current last message) appears, prints it and exits 0, or exits `3` when
 run can tell "still quiet" from "it failed" and decide whether to keep
 waiting. `read --since` is the same window without the waiting, which is what
 makes a supervision that outlived its run resumable: every printed message
-carries the id that `--since` takes.
+carries the id that `--since` takes. Both follow a topic across Zulip's
+resolve rename (`✔ <topic>`), because a supervisor waiting for a close-out
+would otherwise go blind at the moment it happens.
 
 `agentchat --help` is the tool's documentation and is
 written as a usage document, so an agent handed the command can learn it

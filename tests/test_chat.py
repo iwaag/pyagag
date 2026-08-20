@@ -35,12 +35,23 @@ class Client:
         self.calls.append(("history", channel, topic, num_before))
         return self.messages
 
+    #: When set, only this topic name holds the messages — the others are
+    #: empty, which is what a resolved (renamed) topic looks like.
+    holder = None
+
+    def _holds(self, topic):
+        return self.holder is None or topic == self.holder
+
     def topic_last_id(self, channel, topic):
         self.calls.append(("last_id", channel, topic))
-        return self.messages[-1]["id"] if self.messages else 0
+        if not self._holds(topic) or not self.messages:
+            return 0
+        return self.messages[-1]["id"]
 
     def topic_since(self, channel, topic, after_id, num_after=100):
         self.calls.append(("since", channel, topic, after_id))
+        if not self._holds(topic):
+            return []
         return [m for m in self.messages if m["id"] > after_id]
 
     def stream_id(self, name):
@@ -199,7 +210,9 @@ def test_wait_returns_what_arrived_after_the_current_last_message(monkeypatch):
 
         def topic_since(self, channel, topic, after_id, num_after=100):
             self.calls.append(("since", channel, topic, after_id))
-            if len([c for c in self.calls if c[0] == "since"]) < 2:
+            if topic != TOPIC:
+                return []
+            if len([c for c in self.calls if c[0] == "since" and c[2] == TOPIC]) < 2:
                 return []
             return [message(id=12, sender="Autolab", content="task done")]
 
@@ -207,7 +220,7 @@ def test_wait_returns_what_arrived_after_the_current_last_message(monkeypatch):
     code, out, err, slept = wait_run(monkeypatch, ["wait", CHANNEL, TOPIC], client)
     assert code == 0 and err == ""
     assert calls[0] == ("last_id", CHANNEL, TOPIC)
-    assert calls[1] == ("since", CHANNEL, TOPIC, 5)
+    assert ("since", CHANNEL, TOPIC, 5) in calls
     assert "task done" in out and "12" in out
     assert slept == [chat.DEFAULT_WAIT_INTERVAL]
 
@@ -241,6 +254,31 @@ def test_wait_never_sleeps_past_its_deadline(monkeypatch):
     )
     assert code == chat.TIMEOUT_EXIT_CODE
     assert max(slept) <= 5
+
+
+def test_wait_follows_a_topic_that_was_resolved_while_waiting(monkeypatch):
+    """Resolving renames the topic, and the close-out is what a supervisor
+    is waiting for — losing it there would defeat the whole command."""
+    calls = []
+    client = Client(calls, messages=[message(id=5), message(id=9, content="done, resolving")])
+    client.holder = f"\u2714 {TOPIC}"
+    code, out, err, _ = wait_run(monkeypatch, ["wait", CHANNEL, TOPIC, "--since", "5"], client)
+    assert code == 0 and err == "" and "done, resolving" in out
+    assert ("since", CHANNEL, TOPIC, 5) in calls
+    assert ("since", CHANNEL, f"\u2714 {TOPIC}", 5) in calls
+
+
+def test_read_since_follows_a_resolved_topic_too(monkeypatch):
+    client = Client([], messages=[message(id=5), message(id=9, content="closed")])
+    client.holder = f"\u2714 {TOPIC}"
+    code, out, _ = run(monkeypatch, ["read", CHANNEL, TOPIC, "--since", "5"], client)
+    assert code == 0 and "closed" in out
+
+
+def test_the_resolved_name_is_not_looked_up_twice(monkeypatch):
+    """Given the resolved name, the open one is the alternative — not a
+    third variant with the check mark twice."""
+    assert chat.topic_names(f"\u2714 {TOPIC}") == [f"\u2714 {TOPIC}", TOPIC]
 
 
 def test_wait_rejects_a_non_positive_interval(monkeypatch):

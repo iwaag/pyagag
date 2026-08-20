@@ -145,7 +145,7 @@ def test_is_dm_for_us_rejects_our_own_echo():
     assert not is_dm_for_us({"type": "stream", "sender_id": 99}, self_id=7)
 
 
-def channel_event(event_id, sender_id, channel="create-x", topic="request", message_id=1):
+def channel_event(event_id, sender_id, channel="assetplan-x", topic="request", message_id=1):
     return {
         "id": event_id,
         "type": "message",
@@ -168,7 +168,7 @@ def test_is_channel_message_for_us_rejects_dms_and_our_own_echo():
 
 
 def test_channel_name_is_empty_for_dms():
-    assert channel_name(channel_event(1, sender_id=99)["message"]) == "create-x"
+    assert channel_name(channel_event(1, sender_id=99)["message"]) == "assetplan-x"
     assert channel_name({"display_recipient": [{"id": 7}]}) == ""
 
 
@@ -424,7 +424,7 @@ class SweepClient(FakeClient):
         return [] if sender is None else [{"sender_id": sender}]
 
 
-def sweep_run(client, topic_filter="mission-"):
+def sweep_run(client, topic_filter="workplan-"):
     """Drive `sweep_serve` until a fake call raises `_Stop`; collect matches."""
     handled = []
     with pytest.raises(_Stop):
@@ -446,11 +446,11 @@ def test_stream_id_and_channel_topics_wrappers():
         calls.append((method, path, params))
         if path == "get_stream_id":
             return {"stream_id": 31}
-        return {"topics": [{"name": "mission-two", "max_id": 9}, {"name": "mission-one", "max_id": 3}]}
+        return {"topics": [{"name": "workplan-two", "max_id": 9}, {"name": "workplan-one", "max_id": 3}]}
 
     client.call = call
     assert client.stream_id("pj-demo") == 31
-    assert client.channel_topics(31) == ["mission-two", "mission-one"]
+    assert client.channel_topics(31) == ["workplan-two", "workplan-one"]
     assert calls == [
         ("GET", "get_stream_id", {"stream": "pj-demo"}),
         ("GET", "users/me/31/topics", None),
@@ -463,20 +463,20 @@ def test_sweep_topics_applies_prefix_resolved_and_last_poster_rules():
         poll_results=[],
         topics_by_channel={
             "pj-demo": [
-                "mission-open",                              # match
-                "mission-answered",                          # bot posted last
-                f"{RESOLVED_TOPIC_PREFIX}mission-done",      # resolved
-                "create-other",                              # wrong prefix
-                "mission-empty",                             # no history at all
+                "workplan-open",                              # match
+                "workplan-answered",                          # bot posted last
+                f"{RESOLVED_TOPIC_PREFIX}workplan-done",      # resolved
+                "assetplan-other",                              # wrong prefix
+                "workplan-empty",                             # no history at all
             ],
         },
         last_sender={
-            ("pj-demo", "mission-open"): 99,
-            ("pj-demo", "mission-answered"): 7,
+            ("pj-demo", "workplan-open"): 99,
+            ("pj-demo", "workplan-answered"): 7,
         },
     )
-    matches = sweep_topics(client, self_id=7, topic_filter="mission-")
-    assert matches == [("pj-demo", "mission-open"), ("pj-demo", "mission-empty")]
+    matches = sweep_topics(client, self_id=7, topic_filter="workplan-")
+    assert matches == [("pj-demo", "workplan-open"), ("pj-demo", "workplan-empty")]
     # The last-poster check reads exactly one message per candidate topic.
     assert all(call[2] == 1 for call in client.history_calls)
 
@@ -486,16 +486,16 @@ def test_sweep_topics_accepts_several_prefixes():
         whoami_results=[],
         poll_results=[],
         topics_by_channel={
-            "general": ["run-1", "mission-stray", "create-other"],
+            "general": ["workrun-1", "workplan-stray", "assetplan-other"],
         },
         last_sender={
-            ("general", "run-1"): 99,
-            ("general", "mission-stray"): 99,
-            ("general", "create-other"): 99,
+            ("general", "workrun-1"): 99,
+            ("general", "workplan-stray"): 99,
+            ("general", "assetplan-other"): 99,
         },
     )
-    matches = sweep_topics(client, self_id=7, topic_filter=("mission-", "run-"))
-    assert matches == [("general", "run-1"), ("general", "mission-stray")]
+    matches = sweep_topics(client, self_id=7, topic_filter=("workplan-", "workrun-"))
+    assert matches == [("general", "workrun-1"), ("general", "workplan-stray")]
 
 
 def test_sweep_topics_accepts_a_channel_aware_callable():
@@ -503,25 +503,25 @@ def test_sweep_topics_accepts_a_channel_aware_callable():
         whoami_results=[],
         poll_results=[],
         topics_by_channel={
-            "own-agent": ["question", "create-request"],
-            "general": ["question", "create-request"],
+            "own-agent": ["question", "assetplan-request"],
+            "general": ["question", "assetplan-request"],
         },
         last_sender={
             ("own-agent", "question"): 99,
-            ("own-agent", "create-request"): 99,
+            ("own-agent", "assetplan-request"): 99,
             ("general", "question"): 99,
-            ("general", "create-request"): 99,
+            ("general", "assetplan-request"): 99,
         },
     )
     matches = sweep_topics(
         client,
         self_id=7,
-        topic_filter=lambda channel, topic: channel == "own-agent" or topic.startswith("create-"),
+        topic_filter=lambda channel, topic: channel == "own-agent" or topic.startswith("assetplan-"),
     )
     assert matches == [
-        ("general", "create-request"),
+        ("general", "assetplan-request"),
         ("own-agent", "question"),
-        ("own-agent", "create-request"),
+        ("own-agent", "assetplan-request"),
     ]
 
 
@@ -529,47 +529,47 @@ def test_sweep_serve_sweeps_on_startup_before_any_event():
     client = SweepClient(
         whoami_results=[{"user_id": 7}],
         poll_results=[_Stop()],
-        topics_by_channel={"pj-demo": ["mission-waiting"]},
-        last_sender={("pj-demo", "mission-waiting"): 99},
+        topics_by_channel={"pj-demo": ["workplan-waiting"]},
+        last_sender={("pj-demo", "workplan-waiting"): 99},
     )
-    assert sweep_run(client) == [("pj-demo", "mission-waiting")]
+    assert sweep_run(client) == [("pj-demo", "workplan-waiting")]
 
 
 def test_sweep_serve_turns_an_event_into_one_targeted_check():
     client = SweepClient(
         whoami_results=[{"user_id": 7}],
-        poll_results=[[channel_event(1, sender_id=99, channel="pj-demo", topic="mission-new")],
+        poll_results=[[channel_event(1, sender_id=99, channel="pj-demo", topic="workplan-new")],
                       _Stop()],
         topics_by_channel={"pj-demo": []},  # the sweep finds nothing
-        last_sender={("pj-demo", "mission-new"): 99},
+        last_sender={("pj-demo", "workplan-new"): 99},
     )
-    assert sweep_run(client) == [("pj-demo", "mission-new")]
+    assert sweep_run(client) == [("pj-demo", "workplan-new")]
     # The topic the event named was checked; no channel listing was re-read.
-    assert client.history_calls == [("pj-demo", "mission-new", 1)]
+    assert client.history_calls == [("pj-demo", "workplan-new", 1)]
 
 
 def test_sweep_serve_coalesces_a_burst_on_one_topic_into_one_check():
     burst = [
-        channel_event(i, sender_id=99, channel="pj-demo", topic="mission-new", message_id=i)
+        channel_event(i, sender_id=99, channel="pj-demo", topic="workplan-new", message_id=i)
         for i in range(1, 6)
     ]
     client = SweepClient(
         whoami_results=[{"user_id": 7}],
         poll_results=[burst, _Stop()],
         topics_by_channel={"pj-demo": []},
-        last_sender={("pj-demo", "mission-new"): 99},
+        last_sender={("pj-demo", "workplan-new"): 99},
     )
     # Five messages, one entry in the pending set, one verification, one call.
-    assert sweep_run(client) == [("pj-demo", "mission-new")]
+    assert sweep_run(client) == [("pj-demo", "workplan-new")]
     assert len(client.history_calls) == 1
 
 
 def test_sweep_serve_spends_nothing_on_an_event_that_cannot_match():
     events = [
-        channel_event(1, sender_id=99, channel="pj-demo", topic="create-other"),   # prefix
-        channel_event(2, sender_id=7, channel="pj-demo", topic="mission-mine"),    # our echo
+        channel_event(1, sender_id=99, channel="pj-demo", topic="assetplan-other"),   # prefix
+        channel_event(2, sender_id=7, channel="pj-demo", topic="workplan-mine"),    # our echo
         channel_event(3, sender_id=99, channel="pj-demo",
-                      topic=f"{RESOLVED_TOPIC_PREFIX}mission-done"),               # resolved
+                      topic=f"{RESOLVED_TOPIC_PREFIX}workplan-done"),               # resolved
         message_event(4, sender_id=99),                                            # a DM
     ]
     client = SweepClient(
@@ -585,10 +585,10 @@ def test_sweep_serve_spends_nothing_on_an_event_that_cannot_match():
 def test_sweep_serve_rechecks_before_serving_an_event_it_already_answered():
     client = SweepClient(
         whoami_results=[{"user_id": 7}],
-        poll_results=[[channel_event(1, sender_id=99, channel="pj-demo", topic="mission-new")],
+        poll_results=[[channel_event(1, sender_id=99, channel="pj-demo", topic="workplan-new")],
                       _Stop()],
         topics_by_channel={"pj-demo": []},
-        last_sender={("pj-demo", "mission-new"): 7},  # the bot posted last after all
+        last_sender={("pj-demo", "workplan-new"): 7},  # the bot posted last after all
     )
     # The event is a hint, not the truth: the check overrules it.
     assert sweep_run(client) == []
@@ -597,15 +597,15 @@ def test_sweep_serve_rechecks_before_serving_an_event_it_already_answered():
 
 def test_topic_from_event_applies_the_same_rules_as_the_sweep():
     def message(**overrides):
-        base = channel_event(1, sender_id=99, channel="pj-demo", topic="mission-new")["message"]
+        base = channel_event(1, sender_id=99, channel="pj-demo", topic="workplan-new")["message"]
         return {**base, **overrides}
 
-    assert topic_from_event(message(), 7, "mission-") == ("pj-demo", "mission-new")
-    assert topic_from_event(message(), 7, ("run-", "mission-")) == ("pj-demo", "mission-new")
-    assert topic_from_event(message(sender_id=7), 7, "mission-") is None
-    assert topic_from_event(message(subject="create-x"), 7, "mission-") is None
-    assert topic_from_event(message(type="private"), 7, "mission-") is None
-    assert topic_from_event(message(display_recipient=""), 7, "mission-") is None
+    assert topic_from_event(message(), 7, "workplan-") == ("pj-demo", "workplan-new")
+    assert topic_from_event(message(), 7, ("workrun-", "workplan-")) == ("pj-demo", "workplan-new")
+    assert topic_from_event(message(sender_id=7), 7, "workplan-") is None
+    assert topic_from_event(message(subject="assetplan-x"), 7, "workplan-") is None
+    assert topic_from_event(message(type="private"), 7, "workplan-") is None
+    assert topic_from_event(message(display_recipient=""), 7, "workplan-") is None
     assert topic_from_event(message(subject=""), 7, "") is None
 
 
@@ -625,20 +625,20 @@ def test_sweep_serve_ignores_non_message_events():
     client = SweepClient(
         whoami_results=[{"user_id": 7}],
         poll_results=[[{"id": 1, "type": "heartbeat"}], _Stop()],
-        topics_by_channel={"pj-demo": ["mission-waiting"]},
-        last_sender={("pj-demo", "mission-waiting"): 99},
+        topics_by_channel={"pj-demo": ["workplan-waiting"]},
+        last_sender={("pj-demo", "workplan-waiting"): 99},
     )
-    assert sweep_run(client) == [("pj-demo", "mission-waiting")]  # startup only
+    assert sweep_run(client) == [("pj-demo", "workplan-waiting")]  # startup only
 
 
 def test_sweep_serve_sweeps_again_after_queue_expiry():
     client = SweepClient(
         whoami_results=[{"user_id": 7}],
         poll_results=[QueueExpired("bad event queue id"), _Stop()],
-        topics_by_channel={"pj-demo": ["mission-waiting"]},
-        last_sender={("pj-demo", "mission-waiting"): 99},
+        topics_by_channel={"pj-demo": ["workplan-waiting"]},
+        last_sender={("pj-demo", "workplan-waiting"): 99},
     )
-    assert sweep_run(client) == [("pj-demo", "mission-waiting")] * 2
+    assert sweep_run(client) == [("pj-demo", "workplan-waiting")] * 2
     assert client.registrations == 2
 
 
@@ -646,34 +646,34 @@ def test_sweep_serve_keeps_going_when_the_handler_raises():
     client = SweepClient(
         whoami_results=[{"user_id": 7}],
         poll_results=[_Stop()],
-        topics_by_channel={"pj-demo": ["mission-a", "mission-b"]},
-        last_sender={("pj-demo", "mission-a"): 99, ("pj-demo", "mission-b"): 99},
+        topics_by_channel={"pj-demo": ["workplan-a", "workplan-b"]},
+        last_sender={("pj-demo", "workplan-a"): 99, ("pj-demo", "workplan-b"): 99},
     )
     logged = []
     handled = []
 
     def handler(channel, topic):
-        if topic == "mission-a":
+        if topic == "workplan-a":
             raise RuntimeError("handler exploded")
         handled.append(topic)
 
     with pytest.raises(_Stop):
-        sweep_serve(client, handler, topic_filter="mission-", log=logged.append, status=no_status())
-    assert handled == ["mission-b"]
+        sweep_serve(client, handler, topic_filter="workplan-", log=logged.append, status=no_status())
+    assert handled == ["workplan-b"]
     assert any("handler exploded" in line for line in logged)
 
 
 def test_topic_dump_preserves_numbered_versions(tmp_path):
-    first = topic_dump("pj-demo", "mission-one", "first\n", cwd=tmp_path)
-    second = topic_dump("pj-demo", "mission-one", "second\n", cwd=tmp_path)
+    first = topic_dump("pj-demo", "workplan-one", "first\n", cwd=tmp_path)
+    second = topic_dump("pj-demo", "workplan-one", "second\n", cwd=tmp_path)
 
     assert first == (
-        ".local/topics/pj-demo/mission-one/1/chatlog.txt is the log of a chat "
+        ".local/topics/pj-demo/workplan-one/1/chatlog.txt is the log of a chat "
         "you are participating in."
     )
-    assert second.startswith(".local/topics/pj-demo/mission-one/2/chatlog.txt ")
-    assert (tmp_path / ".local/topics/pj-demo/mission-one/1/chatlog.txt").read_text() == "first\n"
-    assert (tmp_path / ".local/topics/pj-demo/mission-one/2/chatlog.txt").read_text() == "second\n"
+    assert second.startswith(".local/topics/pj-demo/workplan-one/2/chatlog.txt ")
+    assert (tmp_path / ".local/topics/pj-demo/workplan-one/1/chatlog.txt").read_text() == "first\n"
+    assert (tmp_path / ".local/topics/pj-demo/workplan-one/2/chatlog.txt").read_text() == "second\n"
 
 
 @pytest.mark.parametrize("channel,topic", [("../outside", "mission"), ("pj-demo", "a/b")])
@@ -690,8 +690,8 @@ def test_topic_write_uses_an_existing_client():
             calls.append((channel, topic, text))
             return 42
 
-    assert topic_write("mission-one", "done", channel="pj-demo", client=Client()) == "success"
-    assert calls == [("pj-demo", "mission-one", "done")]
+    assert topic_write("workplan-one", "done", channel="pj-demo", client=Client()) == "success"
+    assert calls == [("pj-demo", "workplan-one", "done")]
 
 
 def test_topic_write_builds_client_from_shared_environment(monkeypatch, tmp_path):
@@ -706,8 +706,8 @@ def test_topic_write_builds_client_from_shared_environment(monkeypatch, tmp_path
     monkeypatch.setenv("ZULIP_ENV", str(credentials))
     monkeypatch.setattr(ZulipClient, "from_env", lambda path: Client())
 
-    assert topic_write("mission-one", "done") == "success"
-    assert calls == [("pj-demo", "mission-one", "done")]
+    assert topic_write("workplan-one", "done") == "success"
+    assert calls == [("pj-demo", "workplan-one", "done")]
 
 
 class RecordingStatus:
@@ -835,12 +835,12 @@ def test_sweep_serve_keeps_its_queue_and_its_pending_sweep_on_429(monkeypatch):
     client = SweepClient(
         whoami_results=[{"user_id": 7}],
         poll_results=[RateLimited("429", retry_after=42), _Stop()],
-        topics_by_channel={"pj-demo": ["mission-waiting"]},
-        last_sender={("pj-demo", "mission-waiting"): 99},
+        topics_by_channel={"pj-demo": ["workplan-waiting"]},
+        last_sender={("pj-demo", "workplan-waiting"): 99},
     )
     # Startup sweep, then a 429 on the poll: no re-register, no second sweep
     # (the first one completed), and the wait honours the header.
-    assert sweep_run(client) == [("pj-demo", "mission-waiting")]
+    assert sweep_run(client) == [("pj-demo", "workplan-waiting")]
     assert client.registrations == 1
     assert slept == [pytest.approx(42, abs=4.3)]
 
@@ -862,12 +862,12 @@ def test_sweep_serve_resumes_a_sweep_that_a_429_cut_short(monkeypatch):
     client = Interrupted(
         whoami_results=[{"user_id": 7}],
         poll_results=[_Stop()],
-        topics_by_channel={"pj-demo": ["mission-waiting"]},
-        last_sender={("pj-demo", "mission-waiting"): 99},
+        topics_by_channel={"pj-demo": ["workplan-waiting"]},
+        last_sender={("pj-demo", "workplan-waiting"): 99},
     )
     # The startup sweep dies on its first call; `dirty` survives the backoff,
     # so the retry sweeps rather than dropping the work on the floor.
-    assert sweep_run(client) == [("pj-demo", "mission-waiting")]
+    assert sweep_run(client) == [("pj-demo", "workplan-waiting")]
     assert client.registrations == 1
 
 
@@ -942,14 +942,14 @@ def test_sweep_serve_defers_the_full_sweep_when_the_window_is_nearly_spent():
     client = SweepClient(
         whoami_results=[{"user_id": 7}],
         poll_results=[[], _Stop()],
-        topics_by_channel={"pj-demo": ["mission-waiting"]},
-        last_sender={("pj-demo", "mission-waiting"): 99},
+        topics_by_channel={"pj-demo": ["workplan-waiting"]},
+        last_sender={("pj-demo", "workplan-waiting"): 99},
     )
     client.rate_limit_remaining = SWEEP_BUDGET_RESERVE - 1
     logged = []
     with pytest.raises(_Stop):
         sweep_serve(
-            client, lambda channel, topic: None, topic_filter="mission-",
+            client, lambda channel, topic: None, topic_filter="workplan-",
             log=logged.append, status=no_status(),
         )
     # Deferred, not slept through and not errored: the long poll is the wait.
@@ -966,11 +966,11 @@ def test_sweep_serve_runs_the_deferred_sweep_once_the_window_slides():
     client = Recovering(
         whoami_results=[{"user_id": 7}],
         poll_results=[[], _Stop()],
-        topics_by_channel={"pj-demo": ["mission-waiting"]},
-        last_sender={("pj-demo", "mission-waiting"): 99},
+        topics_by_channel={"pj-demo": ["workplan-waiting"]},
+        last_sender={("pj-demo", "workplan-waiting"): 99},
     )
     client.rate_limit_remaining = SWEEP_BUDGET_RESERVE - 1
-    assert sweep_run(client) == [("pj-demo", "mission-waiting")]
+    assert sweep_run(client) == [("pj-demo", "workplan-waiting")]
     assert client.subscription_calls == 1
 
 
@@ -978,14 +978,14 @@ def test_sweep_serve_logs_one_line_per_full_sweep_with_its_cost():
     client = SweepClient(
         whoami_results=[{"user_id": 7}],
         poll_results=[_Stop()],
-        topics_by_channel={"pj-demo": ["mission-waiting"], "general": []},
-        last_sender={("pj-demo", "mission-waiting"): 99},
+        topics_by_channel={"pj-demo": ["workplan-waiting"], "general": []},
+        last_sender={("pj-demo", "workplan-waiting"): 99},
     )
     client.rate_limit_remaining = 190
     logged = []
     with pytest.raises(_Stop):
         sweep_serve(
-            client, lambda channel, topic: None, topic_filter="mission-",
+            client, lambda channel, topic: None, topic_filter="workplan-",
             log=logged.append, status=no_status(),
         )
     line = [entry for entry in logged if entry.startswith("full sweep:")]
@@ -1004,17 +1004,17 @@ def test_sweep_serve_serves_the_rest_of_pending_after_a_rate_limit(monkeypatch):
             return super().topic_history(channel, topic, num_before)
 
     events = [
-        channel_event(1, sender_id=99, channel="pj-demo", topic="mission-a", message_id=1),
-        channel_event(2, sender_id=99, channel="pj-demo", topic="mission-b", message_id=2),
+        channel_event(1, sender_id=99, channel="pj-demo", topic="workplan-a", message_id=1),
+        channel_event(2, sender_id=99, channel="pj-demo", topic="workplan-b", message_id=2),
     ]
     client = Limited(
         whoami_results=[{"user_id": 7}],
         poll_results=[events, _Stop()],
         topics_by_channel={"pj-demo": []},
-        last_sender={("pj-demo", "mission-a"): 99, ("pj-demo", "mission-b"): 99},
+        last_sender={("pj-demo", "workplan-a"): 99, ("pj-demo", "workplan-b"): 99},
     )
     # The 429 lands on the first pending entry; both are still served.
-    assert sweep_run(client) == [("pj-demo", "mission-a"), ("pj-demo", "mission-b")]
+    assert sweep_run(client) == [("pj-demo", "workplan-a"), ("pj-demo", "workplan-b")]
     assert client.registrations == 1
 
 
@@ -1028,7 +1028,7 @@ def test_sweep_serve_records_a_poll_only_when_the_poll_returned():
     status = RecordingStatus()
     with pytest.raises(_Stop):
         sweep_serve(
-            client, lambda channel, topic: None, topic_filter="mission-",
+            client, lambda channel, topic: None, topic_filter="workplan-",
             log=lambda _: None, status=status,
         )
     assert [kind for kind, _ in status.calls] == ["ok", "error"]

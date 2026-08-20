@@ -7,7 +7,7 @@ from agag import topics
 BOT_ID = 11
 HUMAN_ID = 8
 CHANNEL = "pj-demo"
-TOPIC = "mission-one"
+TOPIC = "workplan-one"
 
 
 def message(sender_id=HUMAN_ID, name="Developer", content="Build it", id=1):

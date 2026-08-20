@@ -14,7 +14,7 @@ from agag import chat
 from agag.zulip import ZulipError
 
 CHANNEL = "agforge-agstudio1"
-TOPIC = "create-title-image-1"
+TOPIC = "assetplan-title-image-1"
 
 
 class Client:
@@ -150,11 +150,11 @@ def test_read_rejects_a_non_positive_count(monkeypatch):
 
 def test_topics_lists_the_channel_topics(monkeypatch):
     calls = []
-    client = Client(calls, topics=["create-title-image-1", "✔ create-old-1"])
+    client = Client(calls, topics=["assetplan-title-image-1", "✔ assetplan-old-1"])
     code, out, err = run(monkeypatch, ["topics", CHANNEL], client)
     assert code == 0 and err == ""
     assert calls == [("stream_id", CHANNEL), ("topics", 42)]
-    assert out.splitlines() == ["create-title-image-1", "✔ create-old-1"]
+    assert out.splitlines() == ["assetplan-title-image-1", "✔ assetplan-old-1"]
 
 
 def test_topics_says_so_when_the_channel_is_empty(monkeypatch):
@@ -197,5 +197,5 @@ def test_help_names_no_real_agent_channel_or_topic(capsys):
     with pytest.raises(SystemExit):
         chat.build_parser().parse_args(["--help"])
     text = capsys.readouterr().out
-    for leak in ("agforge", "agfront", "agautolab", "cagent", "create-", "intro-"):
+    for leak in ("agforge", "agfront", "agautolab", "cagent", "assetplan-", "intro-"):
         assert leak not in text

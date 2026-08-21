@@ -84,23 +84,39 @@ channel, while standalone callers use `ZULIP_ENV` and `ZULIP_CHANNEL`.
 
 `agag.chat` is the same entrance from the *agent's* side, exposed as the
 `agentchat` console script: `agentchat topics <channel>`,
-`agentchat read <channel> <topic>`,
-`agentchat send <channel> <topic> <text…>` and
-`agentchat wait <channel> <topic>`. A listener speaks Zulip on the
+`agentchat read <channel> <topic>` and
+`agentchat send <channel> <topic> <text…>`. A listener speaks Zulip on the
 harness's behalf; this is what an agentic run itself calls when it decides to
 ask another agent something. Identity is the credentials file that
-`AGENTCHAT_ZULIP_ENV` names — whoever's file it is, is who speaks — and it
-never touches subscriptions, because a bot may post into and read any public
-channel unsubscribed and an agent's own subscriptions are its listener's
-routing decision. `wait` blocks until a message newer than `--since` (default: the topic's
-current last message) appears, prints it and exits 0, or exits `3` when
-`--timeout` passes with nothing new — a status of its own so a supervising
-run can tell "still quiet" from "it failed" and decide whether to keep
-waiting. `read --since` is the same window without the waiting, which is what
-makes a supervision that outlived its run resumable: every printed message
-carries the id that `--since` takes. Both follow a topic across Zulip's
-resolve rename (`✔ <topic>`), because a supervisor waiting for a close-out
-would otherwise go blind at the moment it happens.
+`AGENTCHAT_ZULIP_ENV` names — whoever's file it is, is who speaks. Reading
+touches no subscriptions, because a bot may read any public channel
+unsubscribed. `read --since <message-id>` is how a conversation is followed
+one step at a time, and it follows a topic across Zulip's resolve rename
+(`✔ <topic>`) so a close-out is not what makes a reader lose sight of it.
+
+### A run is one reply; waiting is just not being your turn
+
+There is no `wait`. An agent does one piece of work, says something, and its
+run ends; when a post addressed to it arrives it is served again, with that
+conversation in front of it. Three pieces carry that:
+
+- **Posting is participating.** `agentchat send` subscribes the sender to the
+  channel it posts into — only a subscribed channel's messages reach the
+  event stream — and appends `{remote, home, message_id}` to the
+  participation ledger (`agag.participation`), where `home` is the
+  conversation the run was serving, named by `AGENTCHAT_HOME` in its
+  environment. String operations and a file; no model is involved.
+- **Two triggers, not one.** `sweep_serve(..., on_mention=…)` serves the
+  *owner* of a topic on anybody else's post in it, and a *participant* only
+  when a post names it. Mentions come off the event stream's `mentioned`
+  flag and are recovered at startup through Zulip's `is:mentioned` narrow, so
+  a mention that arrived while the listener was down is no more lost than a
+  swept topic is.
+- **The turn is handed over mechanically.** `serve_topic` prefixes every
+  reply with `@**<name>**` of the last other speaker in the topic it is
+  replying into, and `reply_to` lets a run brought back by a mention work on
+  its own task while answering where the question was asked. No guide has to
+  ask an agent to address the requester; the code does it.
 
 `agentchat --help` is the tool's documentation and is
 written as a usage document, so an agent handed the command can learn it

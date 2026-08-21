@@ -53,6 +53,8 @@ RATE_LIMIT_JITTER_FRACTION = 0.1
 # window has less than this left, the sweep waits for the window to slide
 # rather than spending its last requests halfway through.
 SWEEP_BUDGET_RESERVE = 40
+#: How far back a startup mention recovery looks.
+MENTION_HISTORY = 50
 
 # Zulip's resolved-topic marker: the topic is renamed to "✔ <topic>".
 RESOLVED_TOPIC_PREFIX = "✔ "
@@ -367,6 +369,21 @@ class ZulipClient:
             params["principals"] = principals
         return self.call("POST", "users/me/subscriptions", params)
 
+    def ensure_subscribed(self, channel: str) -> bool:
+        """Subscribe to `channel` unless already there. True if it changed.
+
+        Reading and posting never need this — a bot may do both in any public
+        channel unsubscribed. What needs it is *being called back*: only a
+        subscribed channel's messages reach the event stream, so an agent
+        that has joined a conversation elsewhere must be in that room to
+        learn that somebody answered.
+        """
+        for subscription in self.subscriptions():
+            if str(subscription.get("name", "")) == channel:
+                return False
+        self.subscribe_channels([channel])
+        return True
+
     def unsubscribe_channels(self, names: list[str], principals: list[int] | None = None) -> dict:
         """Unsubscribe this bot, or `principals`, from channels by name.
 
@@ -446,6 +463,25 @@ class ZulipClient:
         """Id of the topic's newest message, or 0 when it has none yet."""
         messages = self.topic_history(channel, topic, num_before=1)
         return int(messages[-1]["id"]) if messages else 0
+
+    def mentions(self, num_before: int = MENTION_HISTORY) -> list[dict]:
+        """Recent messages that mention this bot, oldest last.
+
+        Zulip's `is:mentioned` narrow, which is what makes a mention that
+        arrived while the listener was down recoverable at startup — the same
+        losslessness the full topic sweep gives the owner route.
+        """
+        result = self.call(
+            "GET", "messages",
+            {
+                "anchor": "newest",
+                "num_before": str(num_before),
+                "num_after": "0",
+                "apply_markdown": "false",
+                "narrow": [{"operator": "is", "operand": "mentioned"}],
+            },
+        )
+        return result.get("messages", [])
 
     def stream_id(self, name: str) -> int:
         """Resolve a channel name to Zulip's numeric stream id."""
@@ -595,6 +631,69 @@ def topic_from_event(
     return (channel, topic)
 
 
+def is_mention_for_us(
+    message: dict, self_id: int, flags=None, bot_name: str | None = None
+) -> bool:
+    """Whether a channel message calls this bot by name.
+
+    Zulip's own `mentioned` flag is the authority; the name scan is a
+    fallback for payloads that arrive without flags, so a mention is not
+    missed because of where it was read from.
+    """
+    if not is_channel_message_for_us(message, self_id):
+        return False
+    carried = list(flags or []) + list(message.get("flags") or [])
+    if "mentioned" in carried:
+        return True
+    if bot_name:
+        return f"@**{bot_name}**" in str(message.get("content", ""))
+    return False
+
+
+def mention_from_event(
+    event: dict, self_id: int, bot_name: str | None = None
+) -> tuple[str, str] | None:
+    """The `(channel, topic)` a mention of this bot points at, if it is one.
+
+    The second trigger beside the owner sweep. An owner is served by anybody
+    else's post in its own topic; a *participant* is served only when it is
+    named — which is how a run that posted somewhere and finished gets its
+    turn back without anyone waiting.
+    """
+    message = event.get("message") or {}
+    if not is_mention_for_us(message, self_id, event.get("flags"), bot_name):
+        return None
+    topic = str(message.get("subject") or "")
+    channel = channel_name(message)
+    if not topic or not channel or topic.startswith(RESOLVED_TOPIC_PREFIX):
+        return None
+    return (channel, topic)
+
+
+def sweep_mentions(
+    client: ZulipClient, self_id: int, num_before: int = MENTION_HISTORY
+) -> list[tuple[str, str]]:
+    """Every `(channel, topic)` where this bot was recently mentioned.
+
+    Startup and queue-expiry recovery for the mention route: a mention that
+    landed while this was down is found here rather than lost, which is the
+    same discipline `sweep_topics` gives the owner route. Whether the topic
+    still awaits an answer is decided afterwards by reading its last message,
+    exactly as a swept topic is.
+    """
+    found: list[tuple[str, str]] = []
+    for message in client.mentions(num_before):
+        if message.get("type") != "stream" or message.get("sender_id") == self_id:
+            continue
+        topic = str(message.get("subject") or "")
+        channel = channel_name(message)
+        if not topic or not channel or topic.startswith(RESOLVED_TOPIC_PREFIX):
+            continue
+        if (channel, topic) not in found:
+            found.append((channel, topic))
+    return found
+
+
 def log(message: str) -> None:
     """Default listener log line: UTC-stamped, unbuffered, on stderr."""
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -699,7 +798,14 @@ def sweep_topics(
 
 
 def sweep_serve(
-    client: ZulipClient, handler, *, topic_filter: TopicFilter, log=log, status=None
+    client: ZulipClient,
+    handler,
+    *,
+    topic_filter: TopicFilter,
+    on_mention=None,
+    mention_messages: int = MENTION_HISTORY,
+    log=log,
+    status=None,
 ) -> None:
     """Pull-based listener: poll for message events and serve the topics that
     await a reply. `handler(channel, topic)` is called once per topic;
@@ -719,21 +825,37 @@ def sweep_serve(
     (`1 + channels + matching topics` calls), so it waits for the quota window
     to slide when fewer than `SWEEP_BUDGET_RESERVE` requests are left.
 
+    **The second trigger.** `on_mention(channel, topic)`, when given, is
+    called for a topic this bot was *mentioned* in but does not own. That is
+    the turn-taking rule made mechanical: the owner of a topic is served by
+    anybody else's post in it, and a participant is served only when it is
+    named. It is what replaces waiting inside a run — an agent posts
+    somewhere, finishes, and is called again when the answer names it.
+    Mentions have their own pending set, drained after the owner set, and
+    recovered on every queue registration through `sweep_mentions`, so a
+    mention that arrived while this was down is not lost either. A topic that
+    `topic_filter` already matches is served as an owner topic and never as a
+    mention.
+
     The loop is single-threaded and serial, so a long handler simply delays
     the next poll; events keep queueing meanwhile. `status` behaves exactly as
     in `serve`.
     """
     status = status if status is not None else StatusWriter(default_status_path(), log=log)
     self_id: int | None = None
+    bot_name: str | None = None
     queue_id: str | None = None
     last_event_id = -1
     pending: set[tuple[str, str]] = set()
+    pending_mentions: set[tuple[str, str]] = set()
     full_sweep = False
     strikes = 0
     while True:
         try:
             if self_id is None:
-                self_id = int(client.whoami()["user_id"])
+                self_user = client.whoami()
+                self_id = int(self_user["user_id"])
+                bot_name = str(self_user.get("full_name") or "") or None
                 log(f"sweeping as user_id={self_id} ({client.email})")
             if queue_id is None:
                 queue_id, last_event_id = client.register()
@@ -752,23 +874,38 @@ def sweep_serve(
                     # cut short is work still owed, not work done.
                     full_sweep = False
                     pending.update(matched)
+                    mentioned: list[tuple[str, str]] = []
+                    if on_mention is not None:
+                        mentioned = [
+                            match
+                            for match in sweep_mentions(client, self_id, mention_messages)
+                            if not topic_matches(match[0], match[1], topic_filter)
+                        ]
+                        pending_mentions.update(match for match in mentioned if match not in pending)
                     spent = getattr(client, "calls", 0) - before
                     left = getattr(client, "rate_limit_remaining", None)
                     log(
-                        f"full sweep: {len(matched)} awaiting, {spent} calls spent, "
+                        f"full sweep: {len(matched)} awaiting, "
+                        f"{len(mentioned)} mentioning, {spent} calls spent, "
                         f"{'unknown' if left is None else f'{left:.0f}'} left in the window"
                     )
-            while pending:
+            while pending or pending_mentions:
                 # Peeked, not popped: a rate limit inside the check leaves this
                 # entry — and every other one — pending for after the backoff.
-                channel, topic = min(pending)
+                # Owned topics first: a topic this bot owns is never also a
+                # mention to answer somewhere else.
+                if pending:
+                    queue, serve_one, kind = pending, handler, "serving"
+                else:
+                    queue, serve_one, kind = pending_mentions, on_mention, "serving mention in"
+                channel, topic = min(queue)
                 history = client.topic_history(channel, topic, num_before=1)
-                pending.discard((channel, topic))
+                queue.discard((channel, topic))
                 if history and history[-1].get("sender_id") == self_id:
                     continue  # we already answered; the event was stale
-                log(f"serving {channel!r}/{topic!r}")
+                log(f"{kind} {channel!r}/{topic!r}")
                 try:
-                    handler(channel, topic)
+                    serve_one(channel, topic)
                 except Exception as error:  # one bad topic must not end the loop
                     log(f"handler failed on {channel!r}/{topic!r}: {error!r}")
             events = client.poll(queue_id, last_event_id)
@@ -807,3 +944,10 @@ def sweep_serve(
                 # A hint about where to look, not a decision to act. Repeats
                 # within one burst collapse into a single set entry.
                 pending.add(match)
+                pending_mentions.discard(match)
+                continue
+            if on_mention is None:
+                continue
+            match = mention_from_event(event, self_id, bot_name)
+            if match is not None and match not in pending:
+                pending_mentions.add(match)

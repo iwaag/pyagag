@@ -1,16 +1,18 @@
-"""`agentchat`: identity comes from the environment, and nothing subscribes.
+"""`agentchat`: identity comes from the environment, and posting participates.
 
 What is pinned here is the contract an agent's run depends on — which
-credentials file speaks, that each subcommand makes exactly the Zulip calls
-it needs and no subscription call ever, and that a misconfigured environment
-fails with a message that names what was missing rather than a traceback.
+credentials file speaks, that reading makes exactly the Zulip calls it needs
+and never touches subscriptions, that *posting* joins the channel and records
+the participation so the answer can find this agent after the run is over,
+and that a misconfigured environment fails with a message that names what was
+missing rather than a traceback.
 """
 
 import io
 
 import pytest
 
-from agag import chat
+from agag import chat, participation
 from agag.zulip import ZulipError
 
 CHANNEL = "agforge-agstudio1"
@@ -62,8 +64,22 @@ class Client:
         self.calls.append(("topics", stream_id))
         return self.topics
 
-    def subscribe_channels(self, *args, **kwargs):  # pragma: no cover - guard
-        raise AssertionError("agentchat must never touch subscriptions")
+    subscribed = ("some-other-channel",)
+
+    def subscriptions(self):
+        self.calls.append(("subscriptions",))
+        return [{"name": name} for name in self.subscribed]
+
+    def subscribe_channels(self, names, principals=None):
+        self.calls.append(("subscribe", tuple(names)))
+        return {"subscribed": list(names)}
+
+    def ensure_subscribed(self, channel):
+        for subscription in self.subscriptions():
+            if subscription["name"] == channel:
+                return False
+        self.subscribe_channels([channel])
+        return True
 
 
 def run(monkeypatch, argv, client):
@@ -122,8 +138,60 @@ def test_send_posts_the_joined_text_and_reports_the_message_id(monkeypatch):
         Client(calls),
     )
     assert code == 0 and err == ""
-    assert calls == [("send", CHANNEL, TOPIC, "a lighthouse at dusk")]
+    assert ("send", CHANNEL, TOPIC, "a lighthouse at dusk") in calls
     assert "901" in out and CHANNEL in out and TOPIC in out
+
+
+def test_send_joins_the_channel_before_it_posts(monkeypatch):
+    """The answer may arrive in seconds, and only a subscribed channel's
+    messages reach the event stream — so joining cannot wait until after."""
+    calls = []
+    code, out, _ = run(monkeypatch, ["send", CHANNEL, TOPIC, "hello"], Client(calls))
+    kinds = [call[0] for call in calls]
+    assert code == 0
+    assert kinds.index("subscribe") < kinds.index("send")
+    assert ("subscribe", (CHANNEL,)) in calls
+    assert f"joined #{CHANNEL}" in out
+
+
+def test_send_into_a_channel_already_joined_subscribes_nothing(monkeypatch):
+    calls = []
+
+    class Member(Client):
+        subscribed = (CHANNEL,)
+
+    code, out, _ = run(monkeypatch, ["send", CHANNEL, TOPIC, "hello"], Member(calls))
+    assert code == 0
+    assert [call for call in calls if call[0] == "subscribe"] == []
+    assert "joined" not in out
+
+
+def test_send_records_the_participation_against_the_home_conversation(
+    monkeypatch, tmp_path
+):
+    ledger = tmp_path / "participations.jsonl"
+    monkeypatch.setenv(participation.HOME_VARIABLE, "work-s2-10/workrun-task1-s2-10")
+    monkeypatch.setenv(participation.LEDGER_VARIABLE, str(ledger))
+    code, _, _ = run(monkeypatch, ["send", CHANNEL, TOPIC, "please draw"], Client([]))
+    assert code == 0
+    rows = participation.entries(ledger)
+    assert rows == [
+        {
+            "remote": f"{CHANNEL}/{TOPIC}",
+            "home": "work-s2-10/workrun-task1-s2-10",
+            "message_id": 901,
+            "at": rows[0]["at"],
+        }
+    ]
+
+
+def test_send_without_a_home_records_nothing(monkeypatch, tmp_path):
+    """A run nobody will call back has nothing to be called back *to*."""
+    ledger = tmp_path / "participations.jsonl"
+    monkeypatch.delenv(participation.HOME_VARIABLE, raising=False)
+    monkeypatch.setenv(participation.LEDGER_VARIABLE, str(ledger))
+    code, _, _ = run(monkeypatch, ["send", CHANNEL, TOPIC, "hi"], Client([]))
+    assert code == 0 and not ledger.exists()
 
 
 def test_send_refuses_an_empty_message(monkeypatch):
@@ -179,114 +247,17 @@ def test_read_since_with_nothing_newer_still_succeeds(monkeypatch):
     assert code == 0 and err == "" and "nothing newer" in out
 
 
+def test_reading_never_touches_subscriptions(monkeypatch):
+    """Looking is free and invisible; only posting joins."""
+    for argv in (["read", CHANNEL, TOPIC], ["topics", CHANNEL]):
+        calls = []
+        run(monkeypatch, argv, Client(calls, messages=[message()], topics=["t"]))
+        assert [call for call in calls if call[0] in {"subscribe", "subscriptions"}] == []
+
+
 def test_a_printed_message_carries_the_id_since_takes(monkeypatch):
     code, out, _ = run(monkeypatch, ["read", CHANNEL, TOPIC], Client([], messages=[message(id=77)]))
     assert code == 0 and "77" in out
-
-
-# --- wait ------------------------------------------------------------------
-
-
-def wait_run(monkeypatch, argv, client, clock=None):
-    """Drive `wait` with a fake clock so a test never actually sleeps."""
-    slept = []
-    ticks = iter(clock if clock is not None else range(0, 10_000, 1))
-    monkeypatch.setattr(chat, "client_from_environment", lambda: client)
-    original = chat._wait
-    monkeypatch.setattr(
-        chat, "_wait",
-        lambda args, c, out: original(args, c, out, sleep=slept.append, now=lambda: next(ticks)),
-    )
-    out, err = io.StringIO(), io.StringIO()
-    code = chat.main(argv, out=out, err=err)
-    return code, out.getvalue(), err.getvalue(), slept
-
-
-def test_wait_returns_what_arrived_after_the_current_last_message(monkeypatch):
-    calls = []
-
-    class Arriving(Client):
-        """Quiet on the first look, answered on the second."""
-
-        def topic_since(self, channel, topic, after_id, num_after=100):
-            self.calls.append(("since", channel, topic, after_id))
-            if topic != TOPIC:
-                return []
-            if len([c for c in self.calls if c[0] == "since" and c[2] == TOPIC]) < 2:
-                return []
-            return [message(id=12, sender="Autolab", content="task done")]
-
-    client = Arriving(calls, messages=[message(id=5)])
-    code, out, err, slept = wait_run(monkeypatch, ["wait", CHANNEL, TOPIC], client)
-    assert code == 0 and err == ""
-    assert calls[0] == ("last_id", CHANNEL, TOPIC)
-    assert ("since", CHANNEL, TOPIC, 5) in calls
-    assert "task done" in out and "12" in out
-    assert slept == [chat.DEFAULT_WAIT_INTERVAL]
-
-
-def test_wait_since_skips_the_baseline_lookup(monkeypatch):
-    calls = []
-    client = Client(calls, messages=[message(id=5), message(id=9, content="answer")])
-    code, out, err, _ = wait_run(monkeypatch, ["wait", CHANNEL, TOPIC, "--since", "5"], client)
-    assert code == 0 and err == ""
-    assert calls == [("since", CHANNEL, TOPIC, 5)]
-    assert "answer" in out
-
-
-def test_wait_that_times_out_has_its_own_exit_code(monkeypatch):
-    client = Client([], messages=[message(id=5)])
-    code, out, err, _ = wait_run(
-        monkeypatch,
-        ["wait", CHANNEL, TOPIC, "--since", "5", "--timeout", "30", "--interval", "10"],
-        client,
-    )
-    assert code == chat.TIMEOUT_EXIT_CODE != 1
-    assert err == "" and "nothing new" in out and "5" in out
-
-
-def test_wait_never_sleeps_past_its_deadline(monkeypatch):
-    client = Client([], messages=[message(id=5)])
-    code, _, _, slept = wait_run(
-        monkeypatch,
-        ["wait", CHANNEL, TOPIC, "--since", "5", "--timeout", "5", "--interval", "10"],
-        client,
-    )
-    assert code == chat.TIMEOUT_EXIT_CODE
-    assert max(slept) <= 5
-
-
-def test_wait_follows_a_topic_that_was_resolved_while_waiting(monkeypatch):
-    """Resolving renames the topic, and the close-out is what a supervisor
-    is waiting for — losing it there would defeat the whole command."""
-    calls = []
-    client = Client(calls, messages=[message(id=5), message(id=9, content="done, resolving")])
-    client.holder = f"\u2714 {TOPIC}"
-    code, out, err, _ = wait_run(monkeypatch, ["wait", CHANNEL, TOPIC, "--since", "5"], client)
-    assert code == 0 and err == "" and "done, resolving" in out
-    assert ("since", CHANNEL, TOPIC, 5) in calls
-    assert ("since", CHANNEL, f"\u2714 {TOPIC}", 5) in calls
-
-
-def test_read_since_follows_a_resolved_topic_too(monkeypatch):
-    client = Client([], messages=[message(id=5), message(id=9, content="closed")])
-    client.holder = f"\u2714 {TOPIC}"
-    code, out, _ = run(monkeypatch, ["read", CHANNEL, TOPIC, "--since", "5"], client)
-    assert code == 0 and "closed" in out
-
-
-def test_the_resolved_name_is_not_looked_up_twice(monkeypatch):
-    """Given the resolved name, the open one is the alternative — not a
-    third variant with the check mark twice."""
-    assert chat.topic_names(f"\u2714 {TOPIC}") == [f"\u2714 {TOPIC}", TOPIC]
-
-
-def test_wait_rejects_a_non_positive_interval(monkeypatch):
-    calls = []
-    code, _, err = run(
-        monkeypatch, ["wait", CHANNEL, TOPIC, "--interval", "0"], Client(calls)
-    )
-    assert code == 1 and calls == [] and "--interval" in err
 
 
 # --- topics ----------------------------------------------------------------
@@ -318,6 +289,20 @@ def test_a_zulip_failure_is_a_message_not_a_traceback(monkeypatch):
     assert code == 1 and "channel not found" in err
 
 
+def test_a_subscription_that_fails_still_lets_the_message_through(monkeypatch):
+    """The post matters more than the callback: say it, then say so."""
+    calls = []
+
+    class Unjoinable(Client):
+        def subscribe_channels(self, names, principals=None):
+            raise ZulipError("cannot subscribe")
+
+    code, out, err = run(monkeypatch, ["send", CHANNEL, TOPIC, "hi"], Unjoinable(calls))
+    assert code == 0 and err == ""
+    assert ("send", CHANNEL, TOPIC, "hi") in calls
+    assert "could not subscribe" in out
+
+
 # --- documentation ---------------------------------------------------------
 
 
@@ -326,8 +311,10 @@ def test_help_is_a_usage_document_with_examples(capsys):
         chat.build_parser().parse_args(["--help"])
     text = capsys.readouterr().out
     assert "Examples" in text
-    for command in ("send", "read", "topics", "wait"):
+    for command in ("send", "read", "topics"):
         assert command in text
+    # Waiting is not a thing an agent does any more, so it is not offered.
+    assert "wait" not in text
 
 
 def test_help_names_no_real_agent_channel_or_topic(capsys):

@@ -27,8 +27,10 @@ from agag.zulip import (
     dm_partners,
     is_channel_message_for_us,
     is_dm_for_us,
+    mention_from_event,
     read_env,
     serve,
+    sweep_mentions,
     sweep_serve,
     sweep_topics,
     topic_dump,
@@ -403,6 +405,14 @@ class SweepClient(FakeClient):
         self.last_sender = dict(last_sender)
         self.history_calls = []
         self.subscription_calls = 0
+        #: What `is:mentioned` answers with — the startup mention recovery.
+        self.mention_messages = []
+        self.mention_calls = 0
+
+    def mentions(self, num_before=50):
+        self.calls += 1
+        self.mention_calls += 1
+        return list(self.mention_messages)
 
     def subscriptions(self):
         self.calls += 1
@@ -422,6 +432,24 @@ class SweepClient(FakeClient):
         self.history_calls.append((channel, topic, num_before))
         sender = self.last_sender.get((channel, topic))
         return [] if sender is None else [{"sender_id": sender}]
+
+
+def mention_event(event_id, sender_id, channel, topic, message_id=1, flags=("mentioned",)):
+    event = channel_event(event_id, sender_id, channel=channel, topic=topic,
+                          message_id=message_id)
+    event["flags"] = list(flags)
+    return event
+
+
+def mention_message(sender_id, channel, topic, message_id=1):
+    return {
+        "id": message_id,
+        "type": "stream",
+        "sender_id": sender_id,
+        "content": "@**Autolab** your turn",
+        "display_recipient": channel,
+        "subject": topic,
+    }
 
 
 def sweep_run(client, topic_filter="workplan-"):
@@ -990,7 +1018,9 @@ def test_sweep_serve_logs_one_line_per_full_sweep_with_its_cost():
         )
     line = [entry for entry in logged if entry.startswith("full sweep:")]
     # 1 subscriptions + 2 channel_topics + 1 topic_history for the candidate.
-    assert line == ["full sweep: 1 awaiting, 4 calls spent, 190 left in the window"]
+    assert line == [
+        "full sweep: 1 awaiting, 0 mentioning, 4 calls spent, 190 left in the window"
+    ]
 
 
 def test_sweep_serve_serves_the_rest_of_pending_after_a_rate_limit(monkeypatch):
@@ -1032,3 +1062,181 @@ def test_sweep_serve_records_a_poll_only_when_the_poll_returned():
             log=lambda _: None, status=status,
         )
     assert [kind for kind, _ in status.calls] == ["ok", "error"]
+
+
+# --- the second trigger: served because you were named ---------------------
+
+
+def test_ensure_subscribed_joins_only_when_not_already_there():
+    joined = []
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+
+    def call(method, path, params=None, **kwargs):
+        if path == "users/me/subscriptions" and method == "GET":
+            return {"subscriptions": [{"name": "already-in"}]}
+        joined.append(params)
+        return {"subscribed": {}}
+
+    client.call = call
+    assert client.ensure_subscribed("already-in") is False
+    assert joined == []
+    assert client.ensure_subscribed("new-room") is True
+    assert joined == [{"subscriptions": [{"name": "new-room"}]}]
+
+
+def test_mentions_uses_the_is_mentioned_narrow():
+    seen = []
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+
+    def call(method, path, params=None, **kwargs):
+        seen.append((method, path, params))
+        return {"messages": [{"id": 5}]}
+
+    client.call = call
+    assert client.mentions(num_before=7) == [{"id": 5}]
+    assert seen[0][2]["narrow"] == [{"operator": "is", "operand": "mentioned"}]
+    assert seen[0][2]["num_before"] == "7"
+
+
+def test_a_mention_flag_names_the_topic_to_serve():
+    event = mention_event(1, sender_id=99, channel="agforge-x", topic="assetplan-a")
+    assert mention_from_event(event, self_id=7) == ("agforge-x", "assetplan-a")
+
+
+def test_a_mention_by_name_is_seen_even_without_the_flag():
+    """A payload read from a narrow rather than the event stream carries no
+    flags; the bot's own name in the text is the fallback."""
+    event = mention_event(1, sender_id=99, channel="agforge-x", topic="assetplan-a",
+                          flags=())
+    event["message"]["content"] = "@**Autolab** it is ready"
+    assert mention_from_event(event, self_id=7) is None
+    assert mention_from_event(event, self_id=7, bot_name="Autolab") == (
+        "agforge-x", "assetplan-a"
+    )
+
+
+def test_our_own_post_and_a_resolved_topic_are_not_mentions():
+    own = mention_event(1, sender_id=7, channel="agforge-x", topic="assetplan-a")
+    assert mention_from_event(own, self_id=7) is None
+    closed = mention_event(2, sender_id=99, channel="agforge-x", topic="\u2714 assetplan-a")
+    assert mention_from_event(closed, self_id=7) is None
+
+
+def test_sweep_mentions_recovers_what_arrived_while_we_were_down():
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    client.mention_messages = [
+        mention_message(99, "agforge-x", "assetplan-a", message_id=1),
+        mention_message(99, "agforge-x", "assetplan-a", message_id=2),  # same topic
+        mention_message(7, "agforge-x", "assetplan-b"),                 # our own
+        mention_message(99, "agforge-x", "\u2714 assetplan-c"),             # finished
+    ]
+    assert sweep_mentions(client, self_id=7) == [("agforge-x", "assetplan-a")]
+
+
+def test_a_mention_elsewhere_is_served_by_the_mention_handler():
+    client = SweepClient(
+        whoami_results=[{"user_id": 7, "full_name": "Autolab"}],
+        poll_results=[
+            [mention_event(1, sender_id=99, channel="agforge-x", topic="assetplan-a")],
+            _Stop(),
+        ],
+        topics_by_channel={"agforge-x": []},
+        last_sender={("agforge-x", "assetplan-a"): 99},
+    )
+    owned, mentioned = [], []
+    with pytest.raises(_Stop):
+        sweep_serve(
+            client,
+            lambda channel, topic: owned.append((channel, topic)),
+            topic_filter="workplan-",
+            on_mention=lambda channel, topic: mentioned.append((channel, topic)),
+            log=lambda _: None,
+            status=no_status(),
+        )
+    assert owned == []
+    assert mentioned == [("agforge-x", "assetplan-a")]
+
+
+def test_a_mention_in_a_topic_we_own_stays_an_owner_serving():
+    """Owning beats being named: the owner route already answers everything
+    posted there, and serving it twice would be two runs for one post."""
+    client = SweepClient(
+        whoami_results=[{"user_id": 7, "full_name": "Autolab"}],
+        poll_results=[
+            [mention_event(1, sender_id=99, channel="pj-demo", topic="workplan-a")],
+            _Stop(),
+        ],
+        topics_by_channel={"pj-demo": []},
+        last_sender={("pj-demo", "workplan-a"): 99},
+    )
+    owned, mentioned = [], []
+    with pytest.raises(_Stop):
+        sweep_serve(
+            client,
+            lambda channel, topic: owned.append((channel, topic)),
+            topic_filter="workplan-",
+            on_mention=lambda channel, topic: mentioned.append((channel, topic)),
+            log=lambda _: None,
+            status=no_status(),
+        )
+    assert owned == [("pj-demo", "workplan-a")] and mentioned == []
+
+
+def test_a_mention_we_already_answered_is_not_served_again():
+    client = SweepClient(
+        whoami_results=[{"user_id": 7, "full_name": "Autolab"}],
+        poll_results=[
+            [mention_event(1, sender_id=99, channel="agforge-x", topic="assetplan-a")],
+            _Stop(),
+        ],
+        topics_by_channel={"agforge-x": []},
+        last_sender={("agforge-x", "assetplan-a"): 7},  # our reply is the last post
+    )
+    mentioned = []
+    with pytest.raises(_Stop):
+        sweep_serve(
+            client, lambda channel, topic: None, topic_filter="workplan-",
+            on_mention=lambda channel, topic: mentioned.append((channel, topic)),
+            log=lambda _: None, status=no_status(),
+        )
+    assert mentioned == []
+
+
+def test_startup_recovers_mentions_and_owned_topics_together():
+    client = SweepClient(
+        whoami_results=[{"user_id": 7, "full_name": "Autolab"}],
+        poll_results=[_Stop()],
+        topics_by_channel={"agforge-x": [], "pj-demo": ["workplan-a"]},
+        last_sender={("pj-demo", "workplan-a"): 99, ("agforge-x", "assetplan-a"): 99},
+    )
+    client.mention_messages = [mention_message(99, "agforge-x", "assetplan-a")]
+    owned, mentioned = [], []
+    with pytest.raises(_Stop):
+        sweep_serve(
+            client,
+            lambda channel, topic: owned.append((channel, topic)),
+            topic_filter="workplan-",
+            on_mention=lambda channel, topic: mentioned.append((channel, topic)),
+            log=lambda _: None,
+            status=no_status(),
+        )
+    assert owned == [("pj-demo", "workplan-a")]
+    assert mentioned == [("agforge-x", "assetplan-a")]
+
+
+def test_without_a_mention_handler_nothing_mention_shaped_costs_a_call():
+    """The route is opt-in: an agent that is nobody's participant pays for
+    none of it."""
+    client = SweepClient(
+        whoami_results=[{"user_id": 7, "full_name": "Autolab"}],
+        poll_results=[
+            [mention_event(1, sender_id=99, channel="agforge-x", topic="assetplan-a")],
+            _Stop(),
+        ],
+        topics_by_channel={"agforge-x": []},
+        last_sender={("agforge-x", "assetplan-a"): 99},
+    )
+    assert sweep_run(client) == []
+    assert client.mention_calls == 0

@@ -12,11 +12,12 @@ Two properties are the whole design:
   file and whoever's file that is, is who speaks. There is no `--as` flag and
   no shared service account: the caller's identity is the caller's
   environment, decided by whoever launched the run.
-- **No subscriptions.** Zulip lets a bot post into and read any public
-  channel without subscribing, so this never touches subscriptions. What an
-  agent is *subscribed* to decides what gets swept into its own inbox; that
-  is a routing decision belonging to the listener, and reading or answering
-  elsewhere must not silently change it.
+- **Posting is participating.** Zulip lets a bot read any public channel
+  unsubscribed, and `read`/`topics` keep doing exactly that. `send` is
+  different: posting somewhere is the decision to be part of that
+  conversation, so it subscribes the sender to that channel and writes the
+  post into the participation ledger. That is what lets the answer find this
+  agent later — the run that posted is long over by then.
 
 `--help` is this tool's documentation — it is written as a usage document
 with examples, because a powerful command handed over with a bare argparse
@@ -28,28 +29,24 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import participation
 from .zulip import RESOLVED_TOPIC_PREFIX, ZulipClient, ZulipError
 
 ENV_VARIABLE = "AGENTCHAT_ZULIP_ENV"
 DEFAULT_READ_COUNT = 30
-DEFAULT_WAIT_TIMEOUT = 900
-DEFAULT_WAIT_INTERVAL = 15
-TIMEOUT_EXIT_CODE = 3
 
 __all__ = [
     "DEFAULT_READ_COUNT",
-    "DEFAULT_WAIT_INTERVAL",
-    "DEFAULT_WAIT_TIMEOUT",
     "ENV_VARIABLE",
-    "TIMEOUT_EXIT_CODE",
     "AgentChatError",
     "build_parser",
     "client_from_environment",
     "format_messages",
+    "join_and_record",
+    "note_participation",
     "last_id",
     "main",
     "messages_since",
@@ -64,9 +61,9 @@ one conversation. Another agent's entrance is a channel of its own, and a
 topic name prefix is usually how you tell it what kind of request this is —
 whatever that agent's introduction told you.
 
-You speak as whichever bot account the credentials file names, and reading or
-posting in a channel does not subscribe you to it: your own inbox is
-unchanged by anything you do here.
+You speak as whichever bot account the credentials file names. Looking at a
+channel leaves your own inbox alone; posting into one joins you to it, which
+is how the answer reaches you.
 
 Examples
 
@@ -83,15 +80,7 @@ Examples
   # Multi-line text is fine; Zulip renders Markdown.
   agentchat send <their-channel> <topic> "$(cat request.md)"
 
-  # Block until somebody answers, then print what they said. Waiting is how
-  # you follow a conversation that takes a while: send, wait, read the
-  # answer, reply. Exit status 3 means the wait timed out with nothing new,
-  # so a loop can decide whether to keep waiting or report back.
-  agentchat wait <their-channel> <topic>
-
-  # Resume where you left off: everything newer than a message you have
-  # already seen, whether it arrived while you were waiting or before.
-  agentchat wait <their-channel> <topic> --since <message-id>
+  # Everything newer than a message you have already seen.
   agentchat read <their-channel> <topic> --since <message-id>
 
   The channel and the topic name are not for this tool to suggest: they are
@@ -101,15 +90,18 @@ Examples
 Notes
 
   Ask before you speak on somebody's behalf: a post is public and permanent.
-  Answers do not come back here — read or wait on the topic to see the reply.
+
+  Say what you want and finish. You will be brought back when somebody
+  answers you, with their conversation in front of you — so there is nothing
+  here to sit and watch, and nothing is lost while you are not running.
 
   Every message printed carries its id in its header, and that id is what
   --since takes, so a long conversation can be followed one step at a time
   without reading it from the beginning again.
 
   A topic that somebody marks resolved is renamed to "✔ <topic>". Keep using
-  the name you know: reading and waiting follow the topic across that rename,
-  so the close-out itself is not what makes you lose sight of it.
+  the name you know: reading follows the topic across that rename, so the
+  close-out itself is not what makes you lose sight of it.
 """
 
 
@@ -185,6 +177,43 @@ def format_messages(messages: list[dict]) -> str:
 
 
 
+def join_and_record(client: ZulipClient, channel: str, topic: str, out) -> bool:
+    """Subscribe to the channel being posted into, if not already there.
+
+    Before the post, not after: the answer may arrive in seconds, and the
+    event stream only carries what this bot is subscribed to. A subscription
+    that cannot be made is not fatal — the message still matters more than
+    the callback — so it prints and goes on.
+    """
+    try:
+        return client.ensure_subscribed(channel)
+    except ZulipError as error:
+        print(f"agentchat: could not subscribe to #{channel}: {error}", file=out)
+        return False
+
+
+def note_participation(channel: str, topic: str, message_id: int, out) -> None:
+    """Write this post into the participation ledger.
+
+    `AGENTCHAT_HOME` is the conversation this run is serving. Without it
+    there is nothing to come back *to*, so the post is simply not recorded —
+    which is the right answer for a run nobody is going to call again.
+    """
+    home = participation.home_from_environment()
+    if home is None:
+        return
+    path = participation.ledger_from_environment()
+    try:
+        participation.record(
+            path,
+            remote=participation.Conversation(channel, topic),
+            home=home,
+            message_id=message_id,
+        )
+    except OSError as error:
+        print(f"agentchat: could not record the participation: {error}", file=out)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentchat",
@@ -199,7 +228,9 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Post into <channel> > <topic>. A topic that does not exist yet "
             "is created by posting into it, which is how a new request is "
-            "opened. The message id is printed on success."
+            "opened. The message id is printed on success. Posting joins you "
+            "to that channel, so an answer to this can reach you after this "
+            "run is over."
         ),
     )
     send.add_argument("channel", help="channel name, without the leading '#'")
@@ -240,68 +271,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     topics.add_argument("channel", help="channel name, without the leading '#'")
 
-    wait = subcommands.add_parser(
-        "wait",
-        help="block until somebody posts in one channel's topic",
-        description=(
-            "Wait for a message newer than --since (default: whatever is "
-            "last in the topic right now), print the new messages the same "
-            "way 'read' does, and exit 0. If the timeout passes with nothing "
-            f"new, print one line and exit {TIMEOUT_EXIT_CODE} — a distinct "
-            "status so a loop can tell 'still quiet' from 'it failed'."
-        ),
-    )
-    wait.add_argument("channel", help="channel name, without the leading '#'")
-    wait.add_argument("topic", help="topic name")
-    wait.add_argument(
-        "--since", type=int, default=None, metavar="MESSAGE_ID",
-        help=(
-            "wait for something newer than this message id; without it the "
-            "topic's current last message is the starting point, so only "
-            "what arrives from now on counts"
-        ),
-    )
-    wait.add_argument(
-        "--timeout", type=float, default=DEFAULT_WAIT_TIMEOUT, metavar="SECONDS",
-        help=(
-            f"give up after this long (default {DEFAULT_WAIT_TIMEOUT}); "
-            "0 waits forever"
-        ),
-    )
-    wait.add_argument(
-        "--interval", type=float, default=DEFAULT_WAIT_INTERVAL, metavar="SECONDS",
-        help=f"how often to look (default {DEFAULT_WAIT_INTERVAL})",
-    )
-
     return parser
-
-
-def _wait(args, client: ZulipClient, out, sleep=time.sleep, now=time.monotonic) -> int:
-    """Poll the topic until something newer than the baseline shows up."""
-    if args.timeout < 0:
-        raise AgentChatError("--timeout cannot be negative")
-    if args.interval <= 0:
-        raise AgentChatError("--interval must be greater than 0")
-    since = args.since
-    if since is None:
-        since = last_id(client, args.channel, args.topic)
-    deadline = None if args.timeout == 0 else now() + args.timeout
-    while True:
-        messages = messages_since(client, args.channel, args.topic, since)
-        if messages:
-            print(format_messages(messages), file=out)
-            return 0
-        if deadline is not None and now() >= deadline:
-            print(
-                f"nothing new in #{args.channel} > {args.topic} after "
-                f"{args.timeout:g}s (last seen message {since})",
-                file=out,
-            )
-            return TIMEOUT_EXIT_CODE
-        if deadline is None:
-            sleep(args.interval)
-        else:
-            sleep(min(args.interval, max(0.0, deadline - now())))
 
 
 def _run(args, client: ZulipClient, out) -> int:
@@ -309,11 +279,15 @@ def _run(args, client: ZulipClient, out) -> int:
         text = " ".join(args.text).strip()
         if not text:
             raise AgentChatError("refusing to send an empty message")
+        joined = join_and_record(client, args.channel, args.topic, out)
         message_id = client.send_to_channel(args.channel, args.topic, text)
         print(
             f"sent message {message_id} to #{args.channel} > {args.topic}",
             file=out,
         )
+        note_participation(args.channel, args.topic, message_id, out)
+        if joined:
+            print(f"joined #{args.channel}", file=out)
         return 0
     if args.command == "read":
         if args.count < 1:
@@ -336,8 +310,6 @@ def _run(args, client: ZulipClient, out) -> int:
                 return 0
         print(format_messages(messages), file=out)
         return 0
-    if args.command == "wait":
-        return _wait(args, client, out)
     if args.command == "topics":
         names = client.channel_topics(client.stream_id(args.channel))
         if not names:

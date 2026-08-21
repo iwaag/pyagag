@@ -22,7 +22,9 @@ from agag.selfnote import (
     parse_conversation,
     parse_note,
     parse_rootchat,
+    parse_served,
     rootchat_note,
+    served_note,
     without_selfnotes,
 )
 
@@ -68,6 +70,32 @@ def test_a_note_of_another_kind_is_not_this_one(content):
 
 def test_the_root_note_round_trips():
     assert parse_rootchat(rootchat_note(HOME)) == HOME
+
+
+def test_the_served_note_round_trips():
+    remote = Conversation("agforge-agstudio1", "assetplan-x")
+    assert served_note(remote, 913) == (
+        "[selfnote][served] agforge-agstudio1/assetplan-x 913"
+    )
+    assert parse_served(served_note(remote, 913)) == (remote, 913)
+
+
+def test_a_served_topic_may_hold_a_slash_and_the_id_is_the_last_word():
+    remote = Conversation("pj-x", "workrun-a/b")
+    assert parse_served(served_note(remote, 7)) == (remote, 7)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[selfnote][served] agforge-x/assetplan-a",     # no id
+        "[selfnote][served] agforge-x/assetplan-a xyz",  # not a number
+        "[selfnote][rootchat] agforge-x/assetplan-a",    # another kind of note
+        "served agforge-x/assetplan-a 3",                # not a note at all
+    ],
+)
+def test_anything_that_is_not_a_served_note_parses_to_none(content):
+    assert parse_served(content) is None
 
 
 def test_a_topic_may_hold_a_slash():

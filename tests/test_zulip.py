@@ -30,9 +30,11 @@ from agag.zulip import (
     is_channel_message_for_us,
     is_dm_for_us,
     mention_from_event,
+    note_served,
     read_env,
     remotes_for_home,
     rootchat_home,
+    served_marks,
     serve,
     sweep_mentions,
     sweep_rootchats,
@@ -416,6 +418,11 @@ class SweepClient(FakeClient):
         #: What the `sender:me search:rootchat` narrow answers with — the
         #: startup recovery for topics this bot anchored.
         self.rootchat_messages = []
+        #: What the `sender:me search:served` narrow answers with — the
+        #: callbacks this bot has already answered, and up to which message.
+        self.served_messages = []
+        #: Everything this bot posted: `(channel, topic, content)`.
+        self.posted = []
         #: {(channel, topic): content of its last post}, when it matters.
         self.last_content = {}
 
@@ -427,6 +434,15 @@ class SweepClient(FakeClient):
     def own_rootchat_notes(self, num_before=200):
         self.calls += 1
         return list(self.rootchat_messages)
+
+    def own_served_notes(self, num_before=200):
+        self.calls += 1
+        return list(self.served_messages)
+
+    def send_to_channel(self, channel, topic, content):
+        self.calls += 1
+        self.posted.append((channel, topic, content))
+        return 1000 + len(self.posted)
 
     def subscriptions(self):
         self.calls += 1
@@ -1291,6 +1307,19 @@ def rootchat_note_message(sender_id, channel, topic, home, message_id=1):
     }
 
 
+def served_note_message(sender_id, home, remote_channel, remote_topic,
+                        served_id, message_id=1):
+    channel, _, topic = home.partition("/")
+    return {
+        "id": message_id,
+        "type": "stream",
+        "sender_id": sender_id,
+        "content": f"[selfnote][served] {remote_channel}/{remote_topic} {served_id}",
+        "display_recipient": channel,
+        "subject": topic,
+    }
+
+
 def test_a_topic_whose_last_post_is_a_selfnote_does_not_await_us():
     """`sweep_topics`: forge anchoring its own topic is not a turn for forge."""
     client = SweepClient(
@@ -1410,6 +1439,142 @@ def test_startup_recovers_the_topics_this_bot_anchored():
             status=no_status(),
         )
     assert mentioned == [("agforge-x", "assetplan-a")]
+
+
+# --- the served marker (agent_standardize p9) ------------------------------
+
+
+def test_a_callback_already_answered_is_not_swept_again():
+    """The p8 open item: recovery must not re-serve a finished exchange.
+
+    A called-back run answers at home, so this bot is never the last poster
+    in the topic that named it — "somebody else spoke and named me" stays
+    true forever there. The served note is what makes the second sweep quiet.
+    """
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    client.rootchat_messages = [
+        rootchat_note_message(7, "agforge-x", "assetplan-a", "pj-demo/workplan-a", 1),
+        rootchat_note_message(7, "agforge-x", "assetplan-b", "pj-demo/workplan-b", 2),
+    ]
+    client.histories = {
+        ("agforge-x", "assetplan-a"): [
+            {"id": 40, "sender_id": 13, "content": "@**Autolab** here it is"},
+        ],
+        ("agforge-x", "assetplan-b"): [
+            {"id": 41, "sender_id": 13, "content": "@**Autolab** here it is"},
+        ],
+    }
+    assert sweep_rootchats(client, self_id=7, bot_name="Autolab") == [
+        ("agforge-x", "assetplan-a"),
+        ("agforge-x", "assetplan-b"),
+    ]
+
+    client.served_messages = [
+        served_note_message(7, "pj-demo/workplan-a", "agforge-x", "assetplan-a", 40),
+    ]
+    assert sweep_rootchats(client, self_id=7, bot_name="Autolab") == [
+        ("agforge-x", "assetplan-b")
+    ]
+
+
+def test_a_post_newer_than_the_mark_calls_us_back_again():
+    """The mark bounds one exchange, it does not retire the topic."""
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    client.rootchat_messages = [
+        rootchat_note_message(7, "agforge-x", "assetplan-a", "pj-demo/workplan-a", 1),
+    ]
+    client.served_messages = [
+        served_note_message(7, "pj-demo/workplan-a", "agforge-x", "assetplan-a", 40),
+    ]
+    client.histories = {
+        ("agforge-x", "assetplan-a"): [
+            {"id": 40, "sender_id": 13, "content": "@**Autolab** here it is"},
+            {"id": 55, "sender_id": 13, "content": "@**Autolab** and one more thing"},
+        ],
+    }
+    assert sweep_rootchats(client, self_id=7, bot_name="Autolab") == [
+        ("agforge-x", "assetplan-a")
+    ]
+
+
+def test_the_newest_mark_wins():
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    client.served_messages = [
+        served_note_message(7, "pj-demo/workplan-a", "agforge-x", "assetplan-a", 40, 1),
+        served_note_message(7, "pj-demo/workplan-a", "agforge-x", "assetplan-a", 55, 2),
+        # not a served note, however well it matched the search word
+        {
+            "id": 3, "type": "stream", "sender_id": 7,
+            "content": "served the request already",
+            "display_recipient": "pj-demo", "subject": "workplan-a",
+        },
+    ]
+    assert served_marks(client) == {("agforge-x", "assetplan-a"): 55}
+
+
+def test_the_mark_is_written_at_home_and_names_the_post_it_answered():
+    """Into home, never into the topic that called: that is the p8 rule."""
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    client.histories = {
+        ("agforge-x", "assetplan-a"): [
+            {"id": 40, "sender_id": 13, "content": "@**Autolab** here it is"},
+            {"id": 41, "sender_id": 13, "content": "[selfnote][rootchat] x/y"},
+        ],
+    }
+    recorded = note_served(
+        client, Conversation("pj-demo", "workplan-a"), "agforge-x", "assetplan-a"
+    )
+    assert recorded == 40  # the newest *real* post, not the note after it
+    assert client.posted == [
+        ("pj-demo", "workplan-a",
+         "[selfnote][served] agforge-x/assetplan-a 40"),
+    ]
+
+
+def test_a_topic_with_nothing_real_in_it_is_not_marked():
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    client.histories = {("agforge-x", "assetplan-a"): []}
+    assert note_served(
+        client, Conversation("pj-demo", "workplan-a"), "agforge-x", "assetplan-a"
+    ) is None
+    assert client.posted == []
+
+
+def test_a_home_buried_under_its_own_notes_still_knows_who_spoke_last():
+    """`LAST_SPEAKER_LOOKBACK` has to clear a run of accumulated selfnotes.
+
+    A home collects a `[served]` note per callback and a `[rootchat]` note per
+    topic it reaches out to. Read too few messages back and a conversation
+    full of its own bookkeeping reads as "nobody has spoken" — and a topic
+    that awaits nobody is never served again.
+    """
+    notes = [
+        {"id": 100 + n, "sender_id": 7,
+         "content": f"[selfnote][served] agforge-x/assetplan-{n} {n}"}
+        for n in range(LAST_SPEAKER_LOOKBACK - 1)
+    ]
+    history = [{"id": 99, "sender_id": 8, "content": "please do it"}, *notes]
+    client = SweepClient(
+        whoami_results=[{"user_id": 7, "full_name": "Autolab"}],
+        poll_results=[_Stop()],
+        topics_by_channel={"pj-demo": ["workplan-a"]},
+        last_sender={},
+    )
+    client.histories = {("pj-demo", "workplan-a"): history}
+    assert sweep_topics(client, self_id=7, topic_filter="workplan-") == [
+        ("pj-demo", "workplan-a")
+    ]
+    assert len(history) <= LAST_SPEAKER_LOOKBACK
 
 
 def test_the_rootchat_sweep_skips_resolved_topics_and_foreign_matches():

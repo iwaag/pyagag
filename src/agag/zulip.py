@@ -34,11 +34,15 @@ from typing import Callable
 
 from agag.selfnote import (
     ROOTCHAT_TAG,
+    SERVED_TAG,
     Conversation,
     is_selfnote,
+    last_real_message,
     last_real_sender,
     own_rootchat,
     parse_rootchat,
+    parse_served,
+    served_note,
 )
 from agag.status import StatusWriter, default_status_path
 
@@ -68,7 +72,14 @@ ROOTCHAT_HISTORY = 200
 #: How many messages a "who spoke last" check reads. More than one,
 #: because the newest messages may be selfnotes and a selfnote is not
 #: somebody speaking — see `agag.selfnote`.
-LAST_SPEAKER_LOOKBACK = 10
+#:
+#: Raised from 10 in `agent_standardize` p9, when the served note gave home
+#: topics a second kind of note that accumulates. A home now collects one
+#: `[served]` note per callback, and a busy conversation can end on a run of
+#: them; read too few messages back and a topic full of its own bookkeeping
+#: reads as "nobody has spoken". The cost is unchanged — it is the
+#: `num_before` of a call already being made.
+LAST_SPEAKER_LOOKBACK = 30
 
 # Zulip's resolved-topic marker: the topic is renamed to "✔ <topic>".
 RESOLVED_TOPIC_PREFIX = "✔ "
@@ -497,15 +508,14 @@ class ZulipClient:
         )
         return result.get("messages", [])
 
-    def own_rootchat_notes(self, num_before: int = ROOTCHAT_HISTORY) -> list[dict]:
-        """Recent root notes written by this bot, oldest first.
+    def own_notes(self, tag: str, num_before: int = ROOTCHAT_HISTORY) -> list[dict]:
+        """Recent `[selfnote][<tag>]` messages written by this bot, oldest first.
 
-        `sender:<me>` narrowed by a full-text `search` for the tag word. This
-        one call lists every conversation this agent is party to on somebody
-        else's behalf — the question the participation ledger existed to
-        answer, asked of the chat instead. Messages that are not actually
-        root notes (a human quoting the word) are filtered by the caller,
-        because parsing is what decides, not the search.
+        `sender:<me>` narrowed by a full-text `search` for the tag word. One
+        call lists a whole kind of memory this agent has written down.
+        Messages that are not actually notes of that kind (a human quoting
+        the word) are filtered by the caller, because parsing is what
+        decides, not the search.
         """
         result = self.call(
             "GET", "messages",
@@ -516,11 +526,28 @@ class ZulipClient:
                 "apply_markdown": "false",
                 "narrow": [
                     {"operator": "sender", "operand": self.email},
-                    {"operator": "search", "operand": ROOTCHAT_TAG},
+                    {"operator": "search", "operand": tag},
                 ],
             },
         )
         return result.get("messages", [])
+
+    def own_rootchat_notes(self, num_before: int = ROOTCHAT_HISTORY) -> list[dict]:
+        """Recent root notes written by this bot, oldest first.
+
+        This one call lists every conversation this agent is party to on
+        somebody else's behalf — the question the participation ledger
+        existed to answer, asked of the chat instead.
+        """
+        return self.own_notes(ROOTCHAT_TAG, num_before)
+
+    def own_served_notes(self, num_before: int = ROOTCHAT_HISTORY) -> list[dict]:
+        """Recent served notes written by this bot, oldest first.
+
+        The companion question: of the topics this agent is party to, which
+        callbacks has it already answered, and up to which message.
+        """
+        return self.own_notes(SERVED_TAG, num_before)
 
     def stream_id(self, name: str) -> int:
         """Resolve a channel name to Zulip's numeric stream id."""
@@ -809,6 +836,71 @@ def rootchat_home(
     return own_rootchat(history, self_id)
 
 
+def served_marks(
+    client: ZulipClient, num_before: int = ROOTCHAT_HISTORY
+) -> dict[tuple[str, str], int]:
+    """`{(channel, topic): newest served message id}` for this bot's callbacks.
+
+    The other half of the chat-as-memory: `rootchat_notes` says which topics
+    this agent is party to, and this says how far into each of them it has
+    already answered. Only the highest id per topic matters — a later note
+    supersedes an earlier one.
+    """
+    marks: dict[tuple[str, str], int] = {}
+    for message in client.own_served_notes(num_before):
+        parsed = parse_served(message.get("content"))
+        if parsed is None:
+            continue
+        remote, message_id = parsed
+        key = remote.as_pair()
+        if message_id > marks.get(key, 0):
+            marks[key] = message_id
+    return marks
+
+
+def mark_served(
+    client: ZulipClient,
+    home: Conversation,
+    remote: Conversation,
+    message_id: int,
+) -> None:
+    """Record in `home` that `remote` has been answered up to `message_id`."""
+    client.send_to_channel(
+        home.channel, home.topic, served_note(remote, message_id)
+    )
+
+
+def note_served(
+    client: ZulipClient,
+    home: Conversation,
+    channel: str,
+    topic: str,
+    message_id: int | None = None,
+) -> int | None:
+    """Mark the callback from `<channel>/<topic>` served, and say up to where.
+
+    `message_id` defaults to the newest real message in the remote topic —
+    the post that named this agent, read at the moment the serving finished.
+    Anything posted there afterwards is newer than the mark and calls this
+    agent back again, which is exactly right.
+
+    Returns the id recorded, or None when there was nothing real to mark.
+    """
+    if message_id is None:
+        try:
+            history = client.topic_history(
+                channel, topic, num_before=LAST_SPEAKER_LOOKBACK
+            )
+        except ZulipError:
+            return None
+        last = last_real_message(history)
+        if last is None or last.get("id") is None:
+            return None
+        message_id = int(last["id"])
+    mark_served(client, home, Conversation(channel, topic), int(message_id))
+    return int(message_id)
+
+
 def sweep_rootchats(
     client: ZulipClient,
     self_id: int,
@@ -820,23 +912,31 @@ def sweep_rootchats(
     Startup and queue-expiry recovery for the callback route, and the thing
     that made the ledger walk unnecessary: the topics this agent is party to
     are the topics carrying its own root notes. A topic qualifies when its
-    last real speaker is somebody else and that message names this bot —
-    the same two conditions the live mention route applies, asked of history.
+    last real speaker is somebody else, that message names this bot, and it
+    is **newer than the served mark** for that topic.
+
+    That last condition is `agent_standardize` p9, and without it this sweep
+    cannot be run twice. Since p8 a called-back run answers at home, so this
+    bot never becomes the last poster in the topic that named it: the first
+    two conditions stay true for the rest of the topic's life, and every
+    listener restart would re-serve every exchange the agent ever had. Where
+    a run costs a supercoder against a live repository, that is not an extra
+    post — it is the work done twice.
     """
+    marks = served_marks(client, num_before)
     waiting: list[tuple[str, str]] = []
     for (channel, topic), _home in rootchat_notes(client, num_before):
         history = client.topic_history(
             channel, topic, num_before=LAST_SPEAKER_LOOKBACK
         )
-        last = None
-        for message in reversed(history):
-            if not is_selfnote(message.get("content")):
-                last = message
-                break
+        last = last_real_message(history)
         if last is None or last.get("sender_id") == self_id:
             continue
         if bot_name and f"@**{bot_name}**" not in str(last.get("content", "")):
             continue
+        served = marks.get((channel, topic))
+        if served is not None and int(last.get("id") or 0) <= served:
+            continue  # already answered; the answer went home, not here
         if (channel, topic) not in waiting:
             waiting.append((channel, topic))
     return waiting

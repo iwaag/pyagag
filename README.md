@@ -129,6 +129,16 @@ conversation in front of it. Three pieces carry that:
   lists every topic this agent anchored and asks which of them is waiting on
   it. So a mention that arrived while the listener was down is no more lost
   than a swept topic is.
+- **And a callback answered once is not answered again.** After serving a
+  callback the listener calls `note_served`, which writes into *home*:
+
+      [selfnote][served] <channel>/<topic> <message id>
+
+  Recovery needs it because the reply goes home: this agent never becomes the
+  last poster in the topic that named it, so "somebody else spoke there and
+  named me" is true forever and every restart would re-serve every exchange
+  the agent ever had. `sweep_rootchats` skips a topic whose newest naming
+  post is at or below its mark, and serves it the moment a newer one arrives.
 - **The turn is handed over mechanically.** `serve_topic` prefixes every
   reply with `@**<name>**` of the last other speaker in the topic it is
   replying into, and `reply_to` lets a run brought back by a mention work on

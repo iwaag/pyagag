@@ -22,9 +22,21 @@ of mine. A reply naming this agent then resolves to a home to serve, and
 every topic anchored this way is one this agent is party to — the two
 questions the ledger used to answer, asked of the chat instead.
 
-The general shape is `[selfnote][<tag>] <value>`; `rootchat` is the one this
-module names, and consumers add their own (agforge anchors an `assetrun-`
-topic to its Work with a `work` note).
+The second note this module names is the **served note**:
+
+    [selfnote][served] <channel>/<topic> <message id>
+
+written **into home** after a callback from that topic has been answered. It
+is the answer to "have I already dealt with this?", which the chat could not
+be asked before: a called-back run replies at home, so the agent never
+becomes the last poster in the topic that named it, and "the last real post
+there names me" stays true forever. Recovery would then re-serve every
+exchange it ever had. The note bounds that — a naming post at or below the
+served id is one already answered.
+
+The general shape is `[selfnote][<tag>] <value>`; `rootchat` and `served` are
+the ones this module names, and consumers add their own (agforge anchors an
+`assetrun-` topic to its Work with a `work` note).
 
 **The crux is that a selfnote must never buy anybody a run.** Everywhere a
 listener asks "who spoke last", the answer has to be the last *non-selfnote*
@@ -43,6 +55,8 @@ from dataclasses import dataclass
 SELFNOTE_MARKER = "[selfnote]"
 #: The tag of the note that names the conversation a run is working for.
 ROOTCHAT_TAG = "rootchat"
+#: The tag of the note that says a callback has already been answered.
+SERVED_TAG = "served"
 
 #: The conversation a run is serving. The listener sets it; `agentchat`
 #: reads it and writes the root note from it. A run without it posts without
@@ -53,6 +67,7 @@ __all__ = [
     "HOME_VARIABLE",
     "ROOTCHAT_TAG",
     "SELFNOTE_MARKER",
+    "SERVED_TAG",
     "Conversation",
     "home_from_environment",
     "is_selfnote",
@@ -63,7 +78,9 @@ __all__ = [
     "parse_conversation",
     "parse_note",
     "parse_rootchat",
+    "parse_served",
     "rootchat_note",
+    "served_note",
     "without_selfnotes",
 ]
 
@@ -142,6 +159,32 @@ def rootchat_note(home: Conversation) -> str:
 def parse_rootchat(content) -> Conversation | None:
     """The conversation a root note names, or None if this is not one."""
     return parse_conversation(parse_note(content, ROOTCHAT_TAG))
+
+
+def served_note(remote: Conversation, message_id: int) -> str:
+    """The note saying a callback from `remote` up to `message_id` is answered.
+
+    Written **into home** — the agent's own conversation — because a post in
+    the remote topic would be a post in somebody else's conversation, and
+    answering at home exists precisely not to do that. Home is this agent's
+    own topic, so the note triggers nobody either.
+    """
+    return note(SERVED_TAG, f"{remote} {int(message_id)}")
+
+
+def parse_served(content) -> tuple[Conversation, int] | None:
+    """`(remote, message id)` of a served note, or None for anything else."""
+    value = parse_note(content, SERVED_TAG)
+    if value is None:
+        return None
+    text, _, tail = value.rpartition(" ")
+    remote = parse_conversation(text)
+    if remote is None:
+        return None
+    try:
+        return remote, int(tail)
+    except ValueError:
+        return None
 
 
 def own_rootchat(messages, self_id: int) -> Conversation | None:

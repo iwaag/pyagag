@@ -83,9 +83,10 @@ matching outbound convenience function; a listener can inject its client and
 channel, while standalone callers use `ZULIP_ENV` and `ZULIP_CHANNEL`.
 
 `agag.chat` is the same entrance from the *agent's* side, exposed as the
-`agentchat` console script: `agentchat topics <channel>`,
-`agentchat read <channel> <topic>` and
-`agentchat send <channel> <topic> <text…>`. A listener speaks Zulip on the
+`agentchat` console script: `agentchat channels [--prefix <p>]`,
+`agentchat topics <channel>`, `agentchat read <channel> <topic>`,
+`agentchat send <channel> <topic> <text…>` and
+`agentchat resolve <channel> <topic>`. A listener speaks Zulip on the
 harness's behalf; this is what an agentic run itself calls when it decides to
 ask another agent something. Identity is the credentials file that
 `AGENTCHAT_ZULIP_ENV` names — whoever's file it is, is who speaks. Reading
@@ -93,6 +94,15 @@ touches no subscriptions, because a bot may read any public channel
 unsubscribed. `read --since <message-id>` is how a conversation is followed
 one step at a time, and it follows a topic across Zulip's resolve rename
 (`✔ <topic>`) so a close-out is not what makes a reader lose sight of it.
+
+`channels` prints `<name> — <description>` per line: the description is the
+half worth having, because a channel derived from one piece of work is where
+that work is named in a sentence a person wrote. Nothing parses it.
+`resolve` is the other side of the rename — it takes the name the caller
+knows, reports an already-resolved topic instead of touching it, and moves
+the whole topic through its last message. A bot may resolve a topic another
+bot opened on this realm (checked live in `agent_standardize` p10); unlike
+archiving, it needs no creator or admin right.
 
 ### A run is one reply; waiting is just not being your turn
 

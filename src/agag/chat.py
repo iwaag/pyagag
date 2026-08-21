@@ -62,6 +62,7 @@ __all__ = [
     "ENV_VARIABLE",
     "AgentChatError",
     "build_parser",
+    "channel_lines",
     "client_from_environment",
     "format_messages",
     "ensure_rootchat",
@@ -86,6 +87,9 @@ is how the answer reaches you.
 
 Examples
 
+  # Which channels are there, and what does each one say it is for?
+  agentchat channels --prefix <name-prefix>
+
   # What conversations exist in another agent's channel?
   agentchat topics <their-channel>
 
@@ -101,6 +105,9 @@ Examples
 
   # Everything newer than a message you have already seen.
   agentchat read <their-channel> <topic> --since <message-id>
+
+  # Mark a conversation finished, once you have read it and it is finished.
+  agentchat resolve <their-channel> <topic>
 
   The channel and the topic name are not for this tool to suggest: they are
   whatever the agent you are addressing said its entrance is. Read its
@@ -120,7 +127,12 @@ Notes
 
   A topic that somebody marks resolved is renamed to "✔ <topic>". Keep using
   the name you know: reading follows the topic across that rename, so the
-  close-out itself is not what makes you lose sight of it.
+  close-out itself is not what makes you lose sight of it. `resolve` takes
+  the name you know too, and says so when it was already resolved.
+
+  Resolving is somebody's decision, not a tidying reflex. Read the
+  conversation, satisfy yourself that it is over, and resolve it when you
+  were asked to.
 """
 
 
@@ -135,6 +147,24 @@ def topic_names(topic: str) -> list[str]:
     if topic.startswith(RESOLVED_TOPIC_PREFIX):
         return [topic, topic[len(RESOLVED_TOPIC_PREFIX):]]
     return [topic, f"{RESOLVED_TOPIC_PREFIX}{topic}"]
+
+
+def channel_lines(channels: list[dict], prefix: str | None = None) -> list[str]:
+    """One line per channel: its name, and what it says it is for.
+
+    The description is the interesting half. It is where a channel that was
+    derived from something else — a run channel made for one mission, say —
+    says which thing that was, in a sentence a person wrote for a person.
+    Nothing parses it here; it is printed so the reader can read it.
+    """
+    lines = []
+    for row in sorted(channels, key=lambda row: str(row.get("name", ""))):
+        name = str(row.get("name", ""))
+        if prefix and not name.startswith(prefix):
+            continue
+        description = " ".join(str(row.get("description", "")).split())
+        lines.append(f"{name} — {description}" if description else name)
+    return lines
 
 
 def messages_since(client: ZulipClient, channel: str, topic: str, after_id: int) -> list[dict]:
@@ -328,6 +358,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     topics.add_argument("channel", help="channel name, without the leading '#'")
 
+    channels = subcommands.add_parser(
+        "channels",
+        help="list the channels, with what each says it is for",
+        description=(
+            "Print every public channel this bot can see, one per line, as "
+            "'<name> — <description>'. The description is the channel's own "
+            "sentence about itself, which is often where a channel made for "
+            "one piece of work names that work."
+        ),
+    )
+    channels.add_argument(
+        "--prefix", default=None,
+        help="show only channels whose name starts with this",
+    )
+
+    resolve = subcommands.add_parser(
+        "resolve",
+        help="mark one channel's topic resolved",
+        description=(
+            "Rename <topic> to '✔ <topic>', which is how Zulip says a "
+            "conversation is finished. Give the name you know: an already "
+            "resolved topic is reported as such and nothing is changed. "
+            "Read the conversation before you close it."
+        ),
+    )
+    resolve.add_argument("channel", help="channel name, without the leading '#'")
+    resolve.add_argument("topic", help="topic name, resolved or not")
+
     return parser
 
 
@@ -369,6 +427,31 @@ def _run(args, client: ZulipClient, out) -> int:
                 print(f"no messages in #{args.channel} > {args.topic}", file=out)
                 return 0
         print(format_messages(messages), file=out)
+        return 0
+    if args.command == "channels":
+        lines = channel_lines(client.channels(), args.prefix)
+        if not lines:
+            where = f" starting with {args.prefix}" if args.prefix else ""
+            print(f"no channels{where}", file=out)
+            return 0
+        print("\n".join(lines), file=out)
+        return 0
+    if args.command == "resolve":
+        bare = args.topic
+        if bare.startswith(RESOLVED_TOPIC_PREFIX):
+            bare = bare[len(RESOLVED_TOPIC_PREFIX):]
+        resolved = f"{RESOLVED_TOPIC_PREFIX}{bare}"
+        if client.topic_last_id(args.channel, resolved):
+            print(f"#{args.channel} > {bare} is already resolved", file=out)
+            return 0
+        message_id = client.topic_last_id(args.channel, bare)
+        if not message_id:
+            raise AgentChatError(
+                f"no messages in #{args.channel} > {bare}: there is no "
+                "conversation here to resolve"
+            )
+        client.resolve_topic(message_id, bare)
+        print(f"resolved #{args.channel} > {bare}", file=out)
         return 0
     if args.command == "topics":
         names = client.channel_topics(client.stream_id(args.channel))

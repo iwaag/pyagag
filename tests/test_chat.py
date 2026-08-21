@@ -52,6 +52,8 @@ class Client:
 
     def topic_last_id(self, channel, topic):
         self.calls.append(("last_id", channel, topic))
+        if self.holders is not None:
+            return self.holders.get(topic, 0)
         if not self._holds(topic) or not self.messages:
             return 0
         return self.messages[-1]["id"]
@@ -69,6 +71,20 @@ class Client:
     def channel_topics(self, stream_id):
         self.calls.append(("topics", stream_id))
         return self.topics
+
+    #: What `channels` sees. Descriptions matter: they are the half a
+    #: reader is after.
+    channel_rows = ()
+
+    def channels(self):
+        self.calls.append(("channels",))
+        return [dict(row) for row in self.channel_rows]
+
+    #: Topic names that hold messages, mapped to their last message id.
+    holders = None
+
+    def resolve_topic(self, message_id, topic):
+        self.calls.append(("resolve", message_id, topic))
 
     subscribed = ("some-other-channel",)
 
@@ -332,6 +348,92 @@ def test_topics_says_so_when_the_channel_is_empty(monkeypatch):
     assert code == 0 and err == "" and "no topics" in out
 
 
+# --- channels --------------------------------------------------------------
+
+
+class Listing(Client):
+    channel_rows = (
+        {"name": "work-title-image", "description": "project: demo; mission: cover art"},
+        {"name": "pj-demo", "description": "the demo project"},
+        {"name": "random", "description": ""},
+    )
+
+
+def test_channels_prints_the_name_and_what_it_says_it_is_for(monkeypatch):
+    code, out, err = run(monkeypatch, ["channels"], Listing([]))
+    assert code == 0 and err == ""
+    assert out.splitlines() == [
+        "pj-demo — the demo project",
+        "random",
+        "work-title-image — project: demo; mission: cover art",
+    ]
+
+
+def test_channels_prefix_narrows_the_listing(monkeypatch):
+    code, out, _ = run(monkeypatch, ["channels", "--prefix", "pj-"], Listing([]))
+    assert code == 0 and out.splitlines() == ["pj-demo — the demo project"]
+
+
+def test_channels_says_so_when_the_prefix_matches_nothing(monkeypatch):
+    code, out, err = run(monkeypatch, ["channels", "--prefix", "nope-"], Listing([]))
+    assert code == 0 and err == "" and "no channels starting with nope-" in out
+
+
+def test_a_multiline_description_stays_on_its_one_line(monkeypatch):
+    class Wrapped(Client):
+        channel_rows = ({"name": "work-x", "description": "project: demo;\nmission: art"},)
+
+    code, out, _ = run(monkeypatch, ["channels"], Wrapped([]))
+    assert out.splitlines() == ["work-x — project: demo; mission: art"]
+
+
+def test_listing_channels_never_touches_subscriptions(monkeypatch):
+    calls = []
+    run(monkeypatch, ["channels"], Listing(calls))
+    assert [call for call in calls if call[0] in {"subscribe", "subscriptions"}] == []
+
+
+# --- resolve ---------------------------------------------------------------
+
+
+def test_resolve_renames_the_topic_through_its_last_message(monkeypatch):
+    calls = []
+    client = Client(calls)
+    client.holders = {TOPIC: 77}
+    code, out, err = run(monkeypatch, ["resolve", CHANNEL, TOPIC], client)
+    assert code == 0 and err == ""
+    assert ("resolve", 77, TOPIC) in calls
+    assert f"resolved #{CHANNEL} > {TOPIC}" in out
+
+
+def test_resolve_says_so_when_it_was_already_resolved(monkeypatch):
+    """Idempotent, and the reader is told which it was."""
+    calls = []
+    client = Client(calls)
+    client.holders = {f"✔ {TOPIC}": 77}
+    code, out, err = run(monkeypatch, ["resolve", CHANNEL, TOPIC], client)
+    assert code == 0 and err == "" and "already resolved" in out
+    assert [call for call in calls if call[0] == "resolve"] == []
+
+
+def test_resolve_takes_the_resolved_name_too(monkeypatch):
+    calls = []
+    client = Client(calls)
+    client.holders = {f"✔ {TOPIC}": 77}
+    code, out, _ = run(monkeypatch, ["resolve", CHANNEL, f"✔ {TOPIC}"], client)
+    assert code == 0 and "already resolved" in out
+
+
+def test_resolving_an_empty_topic_is_an_error_not_a_rename(monkeypatch):
+    calls = []
+    client = Client(calls)
+    client.holders = {}
+    code, _, err = run(monkeypatch, ["resolve", CHANNEL, TOPIC], client)
+    assert code == 1 and "nothing" not in err
+    assert "no conversation here to resolve" in err or "no messages" in err
+    assert [call for call in calls if call[0] == "resolve"] == []
+
+
 # --- failures --------------------------------------------------------------
 
 
@@ -366,7 +468,7 @@ def test_help_is_a_usage_document_with_examples(capsys):
         chat.build_parser().parse_args(["--help"])
     text = capsys.readouterr().out
     assert "Examples" in text
-    for command in ("send", "read", "topics"):
+    for command in ("send", "read", "topics", "channels", "resolve"):
         assert command in text
     # Waiting is not a thing an agent does any more, so it is not offered.
     assert "wait" not in text

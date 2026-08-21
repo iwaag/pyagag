@@ -442,3 +442,10 @@ def test_threads_placement_takes_a_path_that_is_already_relative(tmp_path):
     workspace; both name the same file to the run."""
     line = topics.threads_placement([Path("threads/c/t.md")], tmp_path)
     assert '"threads/c/t.md"' in line
+
+
+def test_threads_placement_without_a_root_names_the_paths_as_given(tmp_path):
+    """A run whose working directory is elsewhere reaches its workspace by
+    absolute path, and so must reach these."""
+    absolute = tmp_path / "threads" / "c" / "t.md"
+    assert f'"{absolute.as_posix()}"' in topics.threads_placement([absolute])

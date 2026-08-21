@@ -1507,6 +1507,80 @@ def test_a_post_newer_than_the_mark_calls_us_back_again():
     ]
 
 
+def test_a_mention_already_answered_is_not_recovered_again():
+    """The mention route is no longer self-silencing.
+
+    Before p8, answering a mention meant posting in that topic, and Zulip
+    stops offering a mention once it is read. p8 sends the answer home
+    instead, so `is:mentioned` returns the same posts for the rest of the
+    topic's life. p9's proof run restarted a listener after everything was
+    finished and watched it serve two completed exchanges again — the mark
+    was there, but only `sweep_rootchats` was consulting it.
+    """
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    client.mention_messages = [
+        mention_message(13, "agforge-x", "assetplan-a", message_id=40),
+        mention_message(13, "agforge-x", "assetplan-b", message_id=41),
+    ]
+    assert sweep_mentions(client, self_id=7) == [
+        ("agforge-x", "assetplan-a"), ("agforge-x", "assetplan-b"),
+    ]
+    marks = {("agforge-x", "assetplan-a"): 40}
+    assert sweep_mentions(client, self_id=7, marks=marks) == [
+        ("agforge-x", "assetplan-b")
+    ]
+
+
+def test_a_mention_newer_than_the_mark_is_still_recovered():
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    client.mention_messages = [
+        mention_message(13, "agforge-x", "assetplan-a", message_id=55),
+    ]
+    marks = {("agforge-x", "assetplan-a"): 40}
+    assert sweep_mentions(client, self_id=7, marks=marks) == [
+        ("agforge-x", "assetplan-a")
+    ]
+
+
+def test_both_recovery_routes_share_one_marks_lookup():
+    """A restart after a finished exchange serves nothing, by either route."""
+    client = SweepClient(
+        whoami_results=[{"user_id": 7, "full_name": "Autolab"}],
+        poll_results=[_Stop()],
+        topics_by_channel={"pj-demo": []},
+        last_sender={},
+    )
+    client.mention_messages = [
+        mention_message(13, "agforge-x", "assetplan-a", message_id=40),
+    ]
+    client.rootchat_messages = [
+        rootchat_note_message(7, "agforge-x", "assetplan-a", "pj-demo/workplan-a", 1),
+    ]
+    client.served_messages = [
+        served_note_message(7, "pj-demo/workplan-a", "agforge-x", "assetplan-a", 40),
+    ]
+    client.histories = {
+        ("agforge-x", "assetplan-a"): [
+            {"id": 40, "sender_id": 13, "content": "@**Autolab** here it is"},
+        ],
+    }
+    mentioned = []
+    with pytest.raises(_Stop):
+        sweep_serve(
+            client,
+            lambda channel, topic: None,
+            topic_filter="workplan-",
+            on_mention=lambda channel, topic: mentioned.append((channel, topic)),
+            log=lambda _: None,
+            status=no_status(),
+        )
+    assert mentioned == []
+
+
 def test_the_newest_mark_wins():
     client = SweepClient(
         whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},

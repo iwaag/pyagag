@@ -741,7 +741,10 @@ def mention_from_event(
 
 
 def sweep_mentions(
-    client: ZulipClient, self_id: int, num_before: int = MENTION_HISTORY
+    client: ZulipClient,
+    self_id: int,
+    num_before: int = MENTION_HISTORY,
+    marks: dict[tuple[str, str], int] | None = None,
 ) -> list[tuple[str, str]]:
     """Every `(channel, topic)` where this bot was recently mentioned.
 
@@ -750,6 +753,15 @@ def sweep_mentions(
     same discipline `sweep_topics` gives the owner route. Whether the topic
     still awaits an answer is decided afterwards by reading its last message,
     exactly as a swept topic is.
+
+    `marks` is `served_marks` — a mention at or below the mark for its topic
+    is one this bot has already answered. Before `agent_standardize` p8 this
+    route was self-silencing, because answering a mention meant posting in
+    that topic and Zulip stops offering a mention once it is read. p8 sent
+    the answer *home* instead, so `is:mentioned` keeps returning the same
+    posts for the rest of the topic's life and every restart re-serves them.
+    p9 gave `sweep_rootchats` the mark and left this one out, and the proof
+    run found it on the very next restart.
     """
     found: list[tuple[str, str]] = []
     for message in client.mentions(num_before):
@@ -761,6 +773,9 @@ def sweep_mentions(
         channel = channel_name(message)
         if not topic or not channel or topic.startswith(RESOLVED_TOPIC_PREFIX):
             continue
+        served = (marks or {}).get((channel, topic))
+        if served is not None and int(message.get("id") or 0) <= served:
+            continue  # already answered; the answer went home, not here
         if (channel, topic) not in found:
             found.append((channel, topic))
     return found
@@ -957,6 +972,7 @@ def sweep_rootchats(
     self_id: int,
     bot_name: str | None = None,
     num_before: int = ROOTCHAT_HISTORY,
+    marks: dict[tuple[str, str], int] | None = None,
 ) -> list[tuple[str, str]]:
     """Every topic this bot anchored that is now waiting on it.
 
@@ -974,7 +990,7 @@ def sweep_rootchats(
     a run costs a supercoder against a live repository, that is not an extra
     post — it is the work done twice.
     """
-    marks = served_marks(client, num_before)
+    marks = served_marks(client, num_before) if marks is None else marks
     waiting: list[tuple[str, str]] = []
     for (channel, topic), _home in rootchat_notes(client, num_before):
         history = client.topic_history(
@@ -1187,8 +1203,16 @@ def sweep_serve(
                     pending.update(matched)
                     mentioned: list[tuple[str, str]] = []
                     if on_mention is not None:
-                        recovered = list(sweep_mentions(client, self_id, mention_messages))
-                        for match in sweep_rootchats(client, self_id, bot_name):
+                        # One lookup, both routes: what this bot has already
+                        # answered is a fact about the agent, not about the
+                        # route the recovery came in on.
+                        marks = served_marks(client)
+                        recovered = list(
+                            sweep_mentions(client, self_id, mention_messages, marks)
+                        )
+                        for match in sweep_rootchats(
+                            client, self_id, bot_name, marks=marks
+                        ):
                             if match not in recovered:
                                 recovered.append(match)
                         mentioned = [

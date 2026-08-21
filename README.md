@@ -118,6 +118,12 @@ conversation in front of it. Three pieces carry that:
   its own task while answering where the question was asked. No guide has to
   ask an agent to address the requester; the code does it.
 
+A serving that answers in somebody else's topic posts **once**, and posts no
+ack. An ack is how a bot's own sweep skips a topic it is already serving; in
+a topic it does not own it buys nothing and costs the owner a whole serving —
+triggered by "Message received", against a conversation that does not yet
+hold the reply being acknowledged.
+
 `agentchat --help` is the tool's documentation and is
 written as a usage document, so an agent handed the command can learn it
 without being told anything else. Its examples name no real channel or topic

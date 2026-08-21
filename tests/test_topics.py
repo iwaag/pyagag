@@ -335,11 +335,42 @@ def test_a_mention_serving_works_at_home_and_answers_where_it_was_asked():
     assert seen["replies"] == remote
     assert seen["chatlog"] == ["task 1, go"]
     assert seen["replies_here"] is False
-    # Both the ack and the reply went to the remote; home was left alone.
-    assert client.posts == [
-        (*remote, "ack"),
-        (*remote, "@**Forge**\n\ntriggered the run"),
-    ]
+    # One post, into the remote. Home was left alone, and so was the ack.
+    assert client.posts == [(*remote, "@**Forge**\n\ntriggered the run")]
+
+
+def test_a_mention_serving_does_not_ack_in_somebody_elses_topic():
+    """An ack is how this bot's own sweep skips a topic it is already
+    serving. In a topic it does not own it buys nothing and costs the owner a
+    whole serving — one triggered by "Message received", against a
+    conversation that does not yet hold the reply being acknowledged.
+
+    Seen live in `agent_standardize` p7: Front, brought back by a mention in
+    autolab's workplan topic, acked there; autolab served its own topic on
+    that ack, read a chatlog containing only acks, and answered that nothing
+    had arrived — twice, in a loop, while the real reply was still being
+    written.
+    """
+    remote = ("pj-simpleshooter", "workplan-add-powerup-icon")
+    client = Board({
+        (CHANNEL, TOPIC): [message()],
+        remote: [message(sender_id=99, name="Autolab", content="plan written")],
+    })
+    topics.serve_topic(
+        client, CHANNEL, TOPIC, lambda ctx: topics.TopicResult(["go"]),
+        ack_text="Message received. Please wait for the reply.",
+        reply_to=remote, log=lambda _: None,
+    )
+    assert [text for _, _, text in client.posts] == ["@**Autolab**\n\ngo"]
+
+
+def test_an_owner_serving_still_acks_first():
+    client = Board({(CHANNEL, TOPIC): [message(name="Front")]})
+    topics.serve_topic(
+        client, CHANNEL, TOPIC, lambda ctx: topics.TopicResult(["done"]),
+        ack_text="ack", log=lambda _: None,
+    )
+    assert [text for _, _, text in client.posts] == ["ack", "@**Front**\n\ndone"]
 
 
 def test_a_mention_serving_does_not_loop_on_its_own_topic():

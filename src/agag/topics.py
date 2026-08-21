@@ -349,12 +349,20 @@ def serve_topic(
     a topic with no messages at all matches every sweep forever, and the
     reply is what silences it.
 
-    `reply_to` is where the ack, the reply and the resolve go when that is not
-    the conversation being served — a run brought back by a mention elsewhere.
+    `reply_to` is where the reply and the resolve go when that is not the
+    conversation being served — a run brought back by a mention elsewhere.
     The work stays this topic's; the answer goes where the question was asked.
-    The post-run re-check is skipped in that case on purpose: this bot did not
-    become the served topic's last poster, so anything that arrived there is
-    found by the ordinary owner sweep instead of by looping here.
+    Two things change in that case, and both are about not making work for
+    somebody else:
+
+    - **No ack.** The ack exists so *this* bot's own sweep skips a topic it is
+      already serving. In a topic this bot does not own it buys nothing and
+      costs the owner a whole serving — one triggered by "Message received",
+      against a conversation that does not yet contain the reply being
+      acknowledged. That is not noise; it is a run spent answering nothing.
+    - **No post-run re-check.** This bot did not become the served topic's
+      last poster, so anything that arrived there is found by the ordinary
+      owner sweep instead of by looping here.
 
     Every reply is prefixed with a mention of the last other speaker in the
     topic being replied into. That is the turn-taking rule as code: whoever is
@@ -365,8 +373,11 @@ def serve_topic(
     bot_name = str(self_user.get("full_name") or client.email)
     reply_channel, reply_topic = reply_to or (channel, topic)
 
+    replies_here = (reply_channel, reply_topic) == (channel, topic)
+
     while True:
-        topic_write(reply_topic, ack_text, channel=reply_channel, client=client)
+        if replies_here:
+            topic_write(topic, ack_text, channel=channel, client=client)
 
         context = TopicContext(
             client, channel, topic, self_id, bot_name,

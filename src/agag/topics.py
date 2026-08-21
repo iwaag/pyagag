@@ -235,17 +235,25 @@ def chatlog_placement(bot_name: str) -> str:
     )
 
 
-def threads_placement(written, directory: Path) -> str:
+def threads_placement(written, directory: Path | None = None) -> str:
     """One line naming the other conversations placed in this workspace.
 
     Placement, not instruction: it says where the files are, the way the
     chatlog line does. Empty when this run is party to nothing else, so a
     prompt never carries a sentence about files that are not there.
+
+    `directory` is what the names are relative to, for a run whose working
+    directory is the workspace. Leave it out — as a run that works somewhere
+    else and reaches its workspace by absolute path does — and each path is
+    named exactly as it was given.
     """
     written = list(written)
     if not written:
         return ""
+
     def name(path: Path) -> str:
+        if directory is None:
+            return path.as_posix()
         try:
             return path.relative_to(directory).as_posix()
         except ValueError:

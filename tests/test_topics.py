@@ -1,5 +1,7 @@
 """The shared topic-serving skeleton."""
 
+from pathlib import Path
+
 import pytest
 
 from agag import topics
@@ -433,3 +435,10 @@ def test_threads_placement_names_the_files_and_nothing_else(tmp_path):
     line = topics.threads_placement(written, tmp_path)
     assert '"threads/agforge-x/assetplan-a.md"' in line
     assert topics.threads_placement([], tmp_path) == ""
+
+
+def test_threads_placement_takes_a_path_that_is_already_relative(tmp_path):
+    """The caller may hand over what it wrote, or what it will call it in the
+    workspace; both name the same file to the run."""
+    line = topics.threads_placement([Path("threads/c/t.md")], tmp_path)
+    assert '"threads/c/t.md"' in line

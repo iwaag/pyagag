@@ -245,9 +245,13 @@ def threads_placement(written, directory: Path) -> str:
     written = list(written)
     if not written:
         return ""
-    names = ", ".join(
-        f'"{path.relative_to(directory).as_posix()}"' for path in written
-    )
+    def name(path: Path) -> str:
+        try:
+            return path.relative_to(directory).as_posix()
+        except ValueError:
+            return path.as_posix()
+
+    names = ", ".join(f'"{name(path)}"' for path in written)
     return (
         "Other conversations you have taken part in are placed beside it: "
         f"{names}. One of them is why you are running."

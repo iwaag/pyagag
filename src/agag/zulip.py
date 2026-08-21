@@ -815,6 +815,54 @@ def remotes_for_home(
     return found
 
 
+def live_topic_name(client: ZulipClient, channel: str, topic: str) -> str:
+    """`topic`, or its resolved `\u2714 ` name when that is what exists now.
+
+    Resolving a topic *renames* it. Anything still holding the old name — an
+    event that was queued before the rename, a caller that remembers where it
+    posted — has to be told, or it reads an empty topic and writes into a new
+    one beside the real conversation.
+    """
+    if topic.startswith(RESOLVED_TOPIC_PREFIX):
+        return topic
+    resolved = f"{RESOLVED_TOPIC_PREFIX}{topic}"
+    try:
+        names = client.channel_topics(client.stream_id(channel))
+    except Exception:  # noqa: BLE001 - a lookup is never worth losing the post
+        return topic
+    return resolved if resolved in names and topic not in names else topic
+
+
+def topic_history_across_resolve(
+    client: ZulipClient, channel: str, topic: str, num_before: int
+) -> list[dict]:
+    """A topic's history, found under its `\u2714 ` name when it was renamed.
+
+    A conversation does not end when it is resolved, and a mention that
+    arrived just before the rename still names the topic as it was called
+    then. Reading the bare name in that window returns nothing at all — not
+    "no note of ours", but no messages — and `agent_standardize` p9 watched a
+    supervisor lose a task's completion report to exactly that gap: the task
+    reported, resolved itself a second later, and the callback that should
+    have started the next task found an empty topic.
+
+    `agentchat wait` and `read --since` have followed the rename since pyagag
+    `5bda102`; this is the same rule for the callback lookup.
+    """
+    try:
+        history = client.topic_history(channel, topic, num_before=num_before)
+    except ZulipError:
+        history = []
+    if history or topic.startswith(RESOLVED_TOPIC_PREFIX):
+        return history
+    try:
+        return client.topic_history(
+            channel, f"{RESOLVED_TOPIC_PREFIX}{topic}", num_before=num_before
+        )
+    except ZulipError:
+        return []
+
+
 def rootchat_home(
     client: ZulipClient,
     channel: str,
@@ -828,12 +876,13 @@ def rootchat_home(
     topic reads that topic, finds the root note it wrote there itself, and
     that note is the conversation to serve. `None` for a topic this bot never
     anchored — a mention that is somebody else's business.
+
+    Read across the resolve rename, because the post that names an agent is
+    very often the post that finishes the conversation.
     """
-    try:
-        history = client.topic_history(channel, topic, num_before=num_before)
-    except ZulipError:
-        return None
-    return own_rootchat(history, self_id)
+    return own_rootchat(
+        topic_history_across_resolve(client, channel, topic, num_before), self_id
+    )
 
 
 def served_marks(
@@ -865,8 +914,13 @@ def mark_served(
     message_id: int,
 ) -> None:
     """Record in `home` that `remote` has been answered up to `message_id`."""
+    # The serving may have resolved home on its way out — a task that closes
+    # renames its own topic. Posting under the old name would open a second
+    # topic beside it holding nothing but this note.
     client.send_to_channel(
-        home.channel, home.topic, served_note(remote, message_id)
+        home.channel,
+        live_topic_name(client, home.channel, home.topic),
+        served_note(remote, message_id),
     )
 
 
@@ -887,12 +941,9 @@ def note_served(
     Returns the id recorded, or None when there was nothing real to mark.
     """
     if message_id is None:
-        try:
-            history = client.topic_history(
-                channel, topic, num_before=LAST_SPEAKER_LOOKBACK
-            )
-        except ZulipError:
-            return None
+        history = topic_history_across_resolve(
+            client, channel, topic, LAST_SPEAKER_LOOKBACK
+        )
         last = last_real_message(history)
         if last is None or last.get("id") is None:
             return None

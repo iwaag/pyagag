@@ -30,11 +30,13 @@ from agag.zulip import (
     is_channel_message_for_us,
     is_dm_for_us,
     mention_from_event,
+    live_topic_name,
     note_served,
     read_env,
     remotes_for_home,
     rootchat_home,
     served_marks,
+    topic_history_across_resolve,
     serve,
     sweep_mentions,
     sweep_rootchats,
@@ -451,6 +453,10 @@ class SweepClient(FakeClient):
             {"name": name, "stream_id": index}
             for index, name in enumerate(sorted(self.topics_by_channel), start=1)
         ]
+
+    def stream_id(self, name):
+        self.calls += 1
+        return sorted(self.topics_by_channel).index(name) + 1
 
     def channel_topics(self, stream_id):
         self.calls += 1
@@ -1537,6 +1543,82 @@ def test_the_mark_is_written_at_home_and_names_the_post_it_answered():
         ("pj-demo", "workplan-a",
          "[selfnote][served] agforge-x/assetplan-a 40"),
     ]
+
+
+# --- the resolve rename (agent_standardize p9) -----------------------------
+
+
+def test_the_callback_reads_a_topic_that_was_resolved_since_it_named_us():
+    """The post that names an agent is often the post that finishes the job.
+
+    p9 watched a task report completion, resolve its own topic a second
+    later, and the supervisor's callback arrive holding the *old* name. The
+    bare name no longer exists, so the lookup saw no messages at all — not
+    "no note of ours" — and the completion was dropped, which stopped the
+    mission with two tasks never triggered.
+    """
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    client.histories = {
+        ("work-x", f"{RESOLVED_TOPIC_PREFIX}workrun-task2"): [
+            {"id": 5, "sender_id": 15, "content": "[selfnote][rootchat] front/front-a"},
+            {"id": 6, "sender_id": 15, "content": "go ahead"},
+            {"id": 7, "sender_id": 11, "content": "@**Front** task complete"},
+        ],
+    }
+    # The name the mention carried is the one it had when the post was made.
+    assert rootchat_home(client, "work-x", "workrun-task2", 15) == Conversation(
+        "front", "front-a"
+    )
+
+
+def test_an_unresolved_topic_is_read_under_its_own_name_only():
+    """One call in the ordinary case; the second is the rename fallback."""
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    client.histories = {("work-x", "workrun-task2"): [{"id": 1, "sender_id": 11, "content": "hi"}]}
+    assert topic_history_across_resolve(client, "work-x", "workrun-task2", 10)
+    assert client.history_calls == [("work-x", "workrun-task2", 10)]
+
+
+def test_a_topic_that_exists_under_neither_name_is_empty_not_an_error():
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    assert topic_history_across_resolve(client, "work-x", "gone", 10) == []
+    assert rootchat_home(client, "work-x", "gone", 15) is None
+
+
+def test_the_mark_goes_to_homes_live_name_when_the_serving_resolved_it():
+    """A task that closes renames its own topic on the way out. Posting the
+    mark under the old name would open a second topic beside the real one,
+    holding nothing but a selfnote — which p9 did, twice, before this."""
+    client = SweepClient(
+        whoami_results=[], poll_results=[],
+        topics_by_channel={"work-x": [f"{RESOLVED_TOPIC_PREFIX}workrun-task2"]},
+        last_sender={},
+    )
+    client.histories = {
+        ("agforge-x", "assetplan-a"): [
+            {"id": 40, "sender_id": 13, "content": "@**Autolab** here it is"},
+        ],
+    }
+    note_served(client, Conversation("work-x", "workrun-task2"), "agforge-x", "assetplan-a")
+    assert client.posted == [
+        ("work-x", f"{RESOLVED_TOPIC_PREFIX}workrun-task2",
+         "[selfnote][served] agforge-x/assetplan-a 40"),
+    ]
+
+
+def test_live_topic_name_prefers_the_plain_name_while_it_exists():
+    client = SweepClient(
+        whoami_results=[], poll_results=[],
+        topics_by_channel={"work-x": ["workrun-task2", f"{RESOLVED_TOPIC_PREFIX}workrun-task2"]},
+        last_sender={},
+    )
+    assert live_topic_name(client, "work-x", "workrun-task2") == "workrun-task2"
 
 
 def test_a_topic_with_nothing_real_in_it_is_not_marked():

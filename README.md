@@ -134,6 +134,10 @@ conversation in front of it. Three pieces carry that:
 
       [selfnote][served] <channel>/<topic> <message id>
 
+  Both sides of that follow Zulip's resolve rename — the post that names an
+  agent is very often the post that ends the conversation, and a lookup that
+  cannot see past the `✔ ` reads an empty topic and drops the callback.
+
   Recovery needs it because the reply goes home: this agent never becomes the
   last poster in the topic that named it, so "somebody else spoke there and
   named me" is true forever and every restart would re-serve every exchange

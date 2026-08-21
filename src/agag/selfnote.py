@@ -26,7 +26,8 @@ The second note this module names is the **served note**:
 
     [selfnote][served] <channel>/<topic> <message id>
 
-written **into home** after a callback from that topic has been answered. It
+written **into home** after a callback from that topic has been answered
+(under home's `\u2714 ` name when the serving resolved it on the way out). It
 is the answer to "have I already dealt with this?", which the chat could not
 be asked before: a called-back run replies at home, so the agent never
 becomes the last poster in the topic that named it, and "the last real post

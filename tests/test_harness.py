@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from agag.agent_config import ResolvedAgent
+from agag import harness
 from agag.harness import _extract_agcode, _extract_claude, build_argv, run_harness, write_run_record
 
 
@@ -397,3 +398,30 @@ def test_extractors_read_the_stream_result_line():
         json.dumps({"type": "assistant", "message": {}}),
     ])
     assert _extract_claude(headless) == (headless, {})
+
+
+def test_stream_records_the_run_without_a_watcher(monkeypatch, tmp_path):
+    """`stream=True` is how a caller asks for a transcript worth reading.
+
+    Without it, `-p` answers with one result document, and a transcript kept
+    to answer "what did this run actually look at" holds a cost report
+    instead — which is what `agent_standardize` p10 discovered by needing
+    the answer and not having it.
+    """
+    seen = {}
+
+    def fake_streaming(argv, prompt, *, cwd, timeout, env, on_event):
+        seen["argv"] = argv
+        on_event({"type": "assistant"})
+        return 0, '{"type": "result", "result": "done", "is_error": false}\n', "", []
+
+    monkeypatch.setattr(harness, "_run_streaming", fake_streaming)
+    resolved = agent(Path("claude"), "claude_code")
+    transcript = tmp_path / "transcript.jsonl"
+    result = harness.run_harness(
+        resolved, "hello", cwd=tmp_path, timeout=60, stream=True,
+        transcript_path=transcript,
+    )
+    assert "stream-json" in seen["argv"]
+    assert result.output == "done"
+    assert '"type": "result"' in transcript.read_text(encoding="utf-8")

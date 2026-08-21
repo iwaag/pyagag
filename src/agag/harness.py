@@ -235,6 +235,7 @@ def run_harness(
     extra_args: list[str] | None = None,
     skip_permissions: bool = False,
     on_event: Callable[[dict], None] | None = None,
+    stream: bool = False,
     transcript_path: Path | None = None,
     output_tail_chars: int = DEFAULT_OUTPUT_TAIL_CHARS,
 ) -> HarnessResult:
@@ -245,6 +246,13 @@ def run_harness(
     seam. The extracted result is identical either way (the stream's final
     ``"type": "result"`` line carries the single-document fields), and the
     ``fake`` harness, which has no stream mode, simply runs without events.
+
+    ``stream`` asks for that same mode with nobody watching, which is what a
+    caller wants when the *record* is the point: without it ``-p`` answers
+    with one result document and ``transcript_path`` captures a cost report
+    rather than a run. `agent_standardize` p10 found that out the hard way —
+    an entrance answered without looking at a whole project, and the
+    transcript kept for exactly that question could not say so.
     """
     meta = identity(agent)
     if timeout <= 0:
@@ -252,7 +260,9 @@ def run_harness(
             "agent run timed out (no budget left)", -1,
             {**meta, "outcome": "aborted", "failure": "timeout"},
         )
-    stream = on_event is not None and agent.harness in ("claude_code", "agcode")
+    stream = (
+        (on_event is not None or stream) and agent.harness in ("claude_code", "agcode")
+    )
     try:
         argv = build_argv(
             agent,
@@ -277,7 +287,8 @@ def run_harness(
     try:
         if stream:
             returncode, stdout, stderr, consumer_errors = _run_streaming(
-                argv, prompt, cwd=cwd, timeout=timeout, env=env, on_event=on_event
+                argv, prompt, cwd=cwd, timeout=timeout, env=env,
+                on_event=on_event if on_event is not None else lambda event: None,
             )
         else:
             proc = subprocess.run(

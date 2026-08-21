@@ -104,6 +104,11 @@ the whole topic through its last message. A bot may resolve a topic another
 bot opened on this realm (checked live in `agent_standardize` p10); unlike
 archiving, it needs no creator or admin right.
 
+`run_harness(stream=True)` asks for the stream-json mode with nobody
+watching, which is what a caller wants when the *record* is the point:
+without it `-p` answers with one result document, and `transcript_path`
+captures a cost report rather than a run. `on_event` still implies it.
+
 ### A run is one reply; waiting is just not being your turn
 
 There is no `wait`. An agent does one piece of work, says something, and its

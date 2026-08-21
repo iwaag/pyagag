@@ -48,6 +48,7 @@ __all__ = [
     "next_generation",
     "next_record_path",
     "prompt_with_guide",
+    "threads_placement",
     "serve_topic",
     "threads_dir",
     "topic_workspace",
@@ -231,6 +232,25 @@ def chatlog_placement(bot_name: str) -> str:
     return (
         "The chatlog is placed in the working directory. "
         f"You are {bot_name!r} in the chatlog."
+    )
+
+
+def threads_placement(written, directory: Path) -> str:
+    """One line naming the other conversations placed in this workspace.
+
+    Placement, not instruction: it says where the files are, the way the
+    chatlog line does. Empty when this run is party to nothing else, so a
+    prompt never carries a sentence about files that are not there.
+    """
+    written = list(written)
+    if not written:
+        return ""
+    names = ", ".join(
+        f'"{path.relative_to(directory).as_posix()}"' for path in written
+    )
+    return (
+        "Other conversations you have taken part in are placed beside it: "
+        f"{names}. One of them is why you are running."
     )
 
 

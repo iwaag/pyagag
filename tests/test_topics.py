@@ -426,3 +426,10 @@ def test_a_thread_that_cannot_be_read_is_skipped_not_fatal(tmp_path):
     )
     assert [path.name for path in written] == ["here.md"]
     assert logged and "gone" in logged[0]
+
+
+def test_threads_placement_names_the_files_and_nothing_else(tmp_path):
+    written = [tmp_path / "threads" / "agforge-x" / "assetplan-a.md"]
+    line = topics.threads_placement(written, tmp_path)
+    assert '"threads/agforge-x/assetplan-a.md"' in line
+    assert topics.threads_placement([], tmp_path) == ""

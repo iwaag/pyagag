@@ -141,8 +141,11 @@ conversation in front of it. Three pieces carry that:
   Recovery needs it because the reply goes home: this agent never becomes the
   last poster in the topic that named it, so "somebody else spoke there and
   named me" is true forever and every restart would re-serve every exchange
-  the agent ever had. `sweep_rootchats` skips a topic whose newest naming
-  post is at or below its mark, and serves it the moment a newer one arrives.
+  the agent ever had. **Both recovery routes** consult it —
+  `sweep_rootchats` and `sweep_mentions` alike — skipping a topic whose newest
+  naming post is at or below its mark and serving it the moment a newer one
+  arrives. The mention route needs it for the same reason: it used to silence
+  itself, because answering a mention meant posting where it was made.
 - **The turn is handed over mechanically.** `serve_topic` prefixes every
   reply with `@**<name>**` of the last other speaker in the topic it is
   replying into, and `reply_to` lets a run brought back by a mention work on

@@ -513,6 +513,20 @@ def test_the_reply_never_hands_the_turn_to_a_selfnote():
     assert topics.handoff_mention(client, CHANNEL, TOPIC, BOT_ID) == "@**Forge**"
 
 
+def test_handoff_false_posts_the_reply_without_naming_anybody():
+    """A serving that is a record, not an answer: the requester's turn is
+    handed back somewhere else, and naming them twice starts two runs."""
+    calls = []
+    serve(Client(calls), lambda ctx: topics.TopicResult(["done"]), handoff=False)
+    posted = [call[2] for call in calls if call[0] == "post"]
+    assert posted == ["ack", "done"]
+    # and the lookup it would have needed was not even made
+    assert [call for call in calls if call[0] == "history"] == [
+        ("history", topics.HISTORY_MESSAGES),
+        ("history", topics.HISTORY_MESSAGES),
+    ]
+
+
 def test_a_topic_holding_only_selfnotes_counts_as_empty():
     calls = []
     client = Client(calls, [message(13, "Forge", NOTE, 1)])

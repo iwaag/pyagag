@@ -345,6 +345,7 @@ def serve_topic(
     ack_text: str,
     empty_reply: str | None = None,
     reply_to: tuple[str, str] | None = None,
+    handoff: bool = True,
     history_messages: int = HISTORY_MESSAGES,
     log=default_log,
 ) -> None:
@@ -383,6 +384,12 @@ def serve_topic(
     Every reply is prefixed with a mention of the last other speaker in the
     topic being replied into. That is the turn-taking rule as code: whoever is
     named is served next, and a reply that names nobody ends the exchange.
+
+    `handoff=False` posts the reply without that mention, for the serving
+    that is a *record* rather than an answer — one whose requester is being
+    given their turn back somewhere else. Naming them in both places starts
+    two runs for one piece of work, which is `agent_standardize` p8's second
+    open item; the caller decides which post is the one that counts.
     """
     self_user = client.whoami()
     self_id = int(self_user["user_id"])
@@ -421,7 +428,10 @@ def serve_topic(
 
         body = "\n\n".join(section for section in result.sections if section)
         if body:
-            mention = handoff_mention(client, reply_channel, reply_topic, self_id)
+            mention = (
+                handoff_mention(client, reply_channel, reply_topic, self_id)
+                if handoff else ""
+            )
             topic_write(
                 reply_topic,
                 f"{mention}\n\n{body}" if mention else body,

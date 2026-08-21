@@ -32,6 +32,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from agag.selfnote import (
+    ROOTCHAT_TAG,
+    Conversation,
+    is_selfnote,
+    last_real_sender,
+    own_rootchat,
+    parse_rootchat,
+)
 from agag.status import StatusWriter, default_status_path
 
 # Long-poll socket timeout. Zulip holds the connection open until an event or
@@ -55,6 +63,12 @@ RATE_LIMIT_JITTER_FRACTION = 0.1
 SWEEP_BUDGET_RESERVE = 40
 #: How far back a startup mention recovery looks.
 MENTION_HISTORY = 50
+#: How far back a startup root-note recovery looks.
+ROOTCHAT_HISTORY = 200
+#: How many messages a "who spoke last" check reads. More than one,
+#: because the newest messages may be selfnotes and a selfnote is not
+#: somebody speaking — see `agag.selfnote`.
+LAST_SPEAKER_LOOKBACK = 10
 
 # Zulip's resolved-topic marker: the topic is renamed to "✔ <topic>".
 RESOLVED_TOPIC_PREFIX = "✔ "
@@ -483,6 +497,31 @@ class ZulipClient:
         )
         return result.get("messages", [])
 
+    def own_rootchat_notes(self, num_before: int = ROOTCHAT_HISTORY) -> list[dict]:
+        """Recent root notes written by this bot, oldest first.
+
+        `sender:<me>` narrowed by a full-text `search` for the tag word. This
+        one call lists every conversation this agent is party to on somebody
+        else's behalf — the question the participation ledger existed to
+        answer, asked of the chat instead. Messages that are not actually
+        root notes (a human quoting the word) are filtered by the caller,
+        because parsing is what decides, not the search.
+        """
+        result = self.call(
+            "GET", "messages",
+            {
+                "anchor": "newest",
+                "num_before": str(num_before),
+                "num_after": "0",
+                "apply_markdown": "false",
+                "narrow": [
+                    {"operator": "sender", "operand": self.email},
+                    {"operator": "search", "operand": ROOTCHAT_TAG},
+                ],
+            },
+        )
+        return result.get("messages", [])
+
     def stream_id(self, name: str) -> int:
         """Resolve a channel name to Zulip's numeric stream id."""
         return int(self.call("GET", "get_stream_id", {"stream": name})["stream_id"])
@@ -622,6 +661,8 @@ def topic_from_event(
     """
     if not is_channel_message_for_us(message, self_id):
         return None
+    if is_selfnote(message.get("content")):
+        return None  # a note an agent wrote to itself is not a turn
     topic = str(message.get("subject") or "")
     channel = channel_name(message)
     if not topic or not channel or not topic_matches(channel, topic, topic_filter):
@@ -642,6 +683,8 @@ def is_mention_for_us(
     """
     if not is_channel_message_for_us(message, self_id):
         return False
+    if is_selfnote(message.get("content")):
+        return False  # a note an agent wrote to itself is not a turn
     carried = list(flags or []) + list(message.get("flags") or [])
     if "mentioned" in carried:
         return True
@@ -685,6 +728,8 @@ def sweep_mentions(
     for message in client.mentions(num_before):
         if message.get("type") != "stream" or message.get("sender_id") == self_id:
             continue
+        if is_selfnote(message.get("content")):
+            continue
         topic = str(message.get("subject") or "")
         channel = channel_name(message)
         if not topic or not channel or topic.startswith(RESOLVED_TOPIC_PREFIX):
@@ -692,6 +737,109 @@ def sweep_mentions(
         if (channel, topic) not in found:
             found.append((channel, topic))
     return found
+
+
+def rootchat_notes(
+    client: ZulipClient, num_before: int = ROOTCHAT_HISTORY
+) -> list[tuple[tuple[str, str], Conversation]]:
+    """`((channel, topic), home)` for every root note this bot has written.
+
+    The chat-side replacement for the participation ledger: where this agent
+    has spoken on somebody else's behalf, and on whose behalf. Resolved
+    topics are dropped — a finished conversation is not one to be called back
+    into — and so is anything the search matched that does not parse as a
+    root note.
+    """
+    anchored: list[tuple[tuple[str, str], Conversation]] = []
+    seen: set[tuple[str, str]] = set()
+    for message in client.own_rootchat_notes(num_before):
+        home = parse_rootchat(message.get("content"))
+        if home is None or message.get("type") != "stream":
+            continue
+        topic = str(message.get("subject") or "")
+        channel = channel_name(message)
+        if not topic or not channel or topic.startswith(RESOLVED_TOPIC_PREFIX):
+            continue
+        if (channel, topic) in seen:
+            continue  # the earliest note anchors the topic; later ones repeat
+        seen.add((channel, topic))
+        anchored.append(((channel, topic), home))
+    return anchored
+
+
+def remotes_for_home(
+    client: ZulipClient, channel: str, topic: str, num_before: int = ROOTCHAT_HISTORY
+) -> list[Conversation]:
+    """Every conversation this one has reached out to, oldest note first.
+
+    The list of threads a run serving `<channel>/<topic>` is party to, which
+    is what decides the `threads/` folder it gets.
+    """
+    home = Conversation(channel, topic)
+    found: list[Conversation] = []
+    for (remote_channel, remote_topic), anchored in rootchat_notes(
+        client, num_before
+    ):
+        if anchored != home:
+            continue
+        remote = Conversation(remote_channel, remote_topic)
+        if remote not in found:
+            found.append(remote)
+    return found
+
+
+def rootchat_home(
+    client: ZulipClient,
+    channel: str,
+    topic: str,
+    self_id: int,
+    num_before: int = ROOTCHAT_HISTORY,
+) -> Conversation | None:
+    """Which of this bot's own conversations it is speaking in this one for.
+
+    The callback's whole lookup: a run that was named in somebody else's
+    topic reads that topic, finds the root note it wrote there itself, and
+    that note is the conversation to serve. `None` for a topic this bot never
+    anchored — a mention that is somebody else's business.
+    """
+    try:
+        history = client.topic_history(channel, topic, num_before=num_before)
+    except ZulipError:
+        return None
+    return own_rootchat(history, self_id)
+
+
+def sweep_rootchats(
+    client: ZulipClient,
+    self_id: int,
+    bot_name: str | None = None,
+    num_before: int = ROOTCHAT_HISTORY,
+) -> list[tuple[str, str]]:
+    """Every topic this bot anchored that is now waiting on it.
+
+    Startup and queue-expiry recovery for the callback route, and the thing
+    that made the ledger walk unnecessary: the topics this agent is party to
+    are the topics carrying its own root notes. A topic qualifies when its
+    last real speaker is somebody else and that message names this bot —
+    the same two conditions the live mention route applies, asked of history.
+    """
+    waiting: list[tuple[str, str]] = []
+    for (channel, topic), _home in rootchat_notes(client, num_before):
+        history = client.topic_history(
+            channel, topic, num_before=LAST_SPEAKER_LOOKBACK
+        )
+        last = None
+        for message in reversed(history):
+            if not is_selfnote(message.get("content")):
+                last = message
+                break
+        if last is None or last.get("sender_id") == self_id:
+            continue
+        if bot_name and f"@**{bot_name}**" not in str(last.get("content", "")):
+            continue
+        if (channel, topic) not in waiting:
+            waiting.append((channel, topic))
+    return waiting
 
 
 def log(message: str) -> None:
@@ -774,10 +922,14 @@ def sweep_topics(
 
     A topic qualifies when it is in a channel this bot is subscribed to, its
     name passes `topic_filter` (a prefix, tuple of prefixes, or callable), it
-    is not resolved, and its
-    last poster is somebody else. The last-poster rule is what makes the pull
-    loop self-stabilizing: the bot's own ack or reply silences a topic until
-    a human speaks again.
+    is not resolved, and the last person to *really* speak in it is somebody
+    else. The last-poster rule is what makes the pull loop self-stabilizing:
+    the bot's own ack or reply silences a topic until a human speaks again.
+
+    "Really" is `agag.selfnote`: a `[selfnote]` line is machine-to-machine
+    and buys nobody a run. Miss that here and the root note an agent writes
+    in another agent's topic is itself a post by somebody else — an ack loop
+    with no ack in it.
     """
     matches: list[tuple[str, str]] = []
     for subscription in client.subscriptions():
@@ -790,8 +942,13 @@ def sweep_topics(
                 continue
             if topic.startswith(RESOLVED_TOPIC_PREFIX):
                 continue
-            history = client.topic_history(channel, topic, num_before=1)
-            if history and history[-1].get("sender_id") == self_id:
+            history = client.topic_history(
+                channel, topic, num_before=LAST_SPEAKER_LOOKBACK
+            )
+            # An *empty* topic still matches — `serve_topic`'s `empty_reply`
+            # is what silences it. A topic holding only selfnotes does not:
+            # nobody has spoken in it.
+            if history and last_real_sender(history) in (None, self_id):
                 continue
             matches.append((channel, topic))
     return matches
@@ -832,8 +989,11 @@ def sweep_serve(
     named. It is what replaces waiting inside a run — an agent posts
     somewhere, finishes, and is called again when the answer names it.
     Mentions have their own pending set, drained after the owner set, and
-    recovered on every queue registration through `sweep_mentions`, so a
-    mention that arrived while this was down is not lost either. A topic that
+    recovered on every queue registration through `sweep_mentions` **and**
+    `sweep_rootchats` — the second asks the chat which topics this bot
+    anchored with a root note and which of them are waiting on it, which is
+    what made the participation ledger unnecessary. So a mention that arrived
+    while this was down is not lost either. A topic that
     `topic_filter` already matches is served as an owner topic and never as a
     mention.
 
@@ -876,9 +1036,13 @@ def sweep_serve(
                     pending.update(matched)
                     mentioned: list[tuple[str, str]] = []
                     if on_mention is not None:
+                        recovered = list(sweep_mentions(client, self_id, mention_messages))
+                        for match in sweep_rootchats(client, self_id, bot_name):
+                            if match not in recovered:
+                                recovered.append(match)
                         mentioned = [
                             match
-                            for match in sweep_mentions(client, self_id, mention_messages)
+                            for match in recovered
                             if not topic_matches(match[0], match[1], topic_filter)
                         ]
                         pending_mentions.update(match for match in mentioned if match not in pending)
@@ -899,9 +1063,11 @@ def sweep_serve(
                 else:
                     queue, serve_one, kind = pending_mentions, on_mention, "serving mention in"
                 channel, topic = min(queue)
-                history = client.topic_history(channel, topic, num_before=1)
+                history = client.topic_history(
+                    channel, topic, num_before=LAST_SPEAKER_LOOKBACK
+                )
                 queue.discard((channel, topic))
-                if history and history[-1].get("sender_id") == self_id:
+                if history and last_real_sender(history) in (None, self_id):
                     continue  # we already answered; the event was stale
                 log(f"{kind} {channel!r}/{topic!r}")
                 try:

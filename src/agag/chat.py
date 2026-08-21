@@ -15,9 +15,15 @@ Two properties are the whole design:
 - **Posting is participating.** Zulip lets a bot read any public channel
   unsubscribed, and `read`/`topics` keep doing exactly that. `send` is
   different: posting somewhere is the decision to be part of that
-  conversation, so it subscribes the sender to that channel and writes the
-  post into the participation ledger. That is what lets the answer find this
-  agent later — the run that posted is long over by then.
+  conversation, so it subscribes the sender to that channel and — once per
+  topic, before the first real post — writes a `[selfnote][rootchat]` note
+  saying which of this agent's own conversations it is here on behalf of.
+  That note is what lets the answer find this agent later: the run that
+  posted is long over by then, and the memory of it lives in the chat rather
+  than in any file this agent keeps.
+
+Selfnotes are `agag.selfnote`'s convention and are hidden from `read` unless
+`--all` is given, this agent's own included.
 
 `--help` is this tool's documentation — it is written as a usage document
 with examples, because a powerful command handed over with a bare argparse
@@ -32,11 +38,24 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import participation
-from .zulip import RESOLVED_TOPIC_PREFIX, ZulipClient, ZulipError
+from .selfnote import (
+    Conversation,
+    home_from_environment,
+    is_selfnote,
+    own_rootchat,
+    rootchat_note,
+)
+from .zulip import (
+    LAST_SPEAKER_LOOKBACK,
+    RESOLVED_TOPIC_PREFIX,
+    ZulipClient,
+    ZulipError,
+)
 
 ENV_VARIABLE = "AGENTCHAT_ZULIP_ENV"
 DEFAULT_READ_COUNT = 30
+#: How far back `send` looks for a root note of ours before writing one.
+ROOTCHAT_LOOKBACK = 200
 
 __all__ = [
     "DEFAULT_READ_COUNT",
@@ -45,8 +64,8 @@ __all__ = [
     "build_parser",
     "client_from_environment",
     "format_messages",
+    "ensure_rootchat",
     "join_and_record",
-    "note_participation",
     "last_id",
     "main",
     "messages_since",
@@ -177,6 +196,19 @@ def format_messages(messages: list[dict]) -> str:
 
 
 
+def _visible(messages: list[dict], show_all: bool) -> list[dict]:
+    """The conversation as a reader should see it.
+
+    Selfnotes are the agents' own bookkeeping (`agag.selfnote`) and are left
+    out unless `--all` asks for them — including from the agent that wrote
+    them, which is the point: a note is a record, and an agent that reads its
+    own records starts composing them.
+    """
+    if show_all:
+        return list(messages)
+    return [m for m in messages if not is_selfnote(m.get("content"))]
+
+
 def join_and_record(client: ZulipClient, channel: str, topic: str, out) -> bool:
     """Subscribe to the channel being posted into, if not already there.
 
@@ -192,26 +224,44 @@ def join_and_record(client: ZulipClient, channel: str, topic: str, out) -> bool:
         return False
 
 
-def note_participation(channel: str, topic: str, message_id: int, out) -> None:
-    """Write this post into the participation ledger.
+#: Topics this process has already anchored, so a run that posts twice pays
+#: the history read once. One process is one run, so the cache lives exactly
+#: as long as the fact it caches.
+_ANCHORED: set[tuple[str, str]] = set()
 
-    `AGENTCHAT_HOME` is the conversation this run is serving. Without it
-    there is nothing to come back *to*, so the post is simply not recorded —
-    which is the right answer for a run nobody is going to call again.
+
+def ensure_rootchat(client: ZulipClient, channel: str, topic: str, out) -> None:
+    """Write this run's root note into the topic, unless it is already there.
+
+    `[selfnote][rootchat] <home>` says which of this agent's own
+    conversations the post that follows is being made for. It goes in
+    **before** the real message, once per topic, so that when the answer
+    comes back the topic itself says where the reply belongs — no ledger, no
+    file, nothing to lose.
+
+    `AGENTCHAT_HOME` is that conversation. Without it there is nothing to
+    come back *to*, so no note is written — the right answer for a run nobody
+    is going to call again. Posting into the home topic itself needs no note
+    either: it is not somewhere else.
+
+    A note that cannot be written is printed and not fatal. The message still
+    matters more than the callback, exactly as the subscription does.
     """
-    home = participation.home_from_environment()
-    if home is None:
+    home = home_from_environment()
+    if home is None or (channel, topic) in _ANCHORED:
         return
-    path = participation.ledger_from_environment()
+    if home.as_pair() == (channel, topic):
+        _ANCHORED.add((channel, topic))
+        return
     try:
-        participation.record(
-            path,
-            remote=participation.Conversation(channel, topic),
-            home=home,
-            message_id=message_id,
-        )
-    except OSError as error:
-        print(f"agentchat: could not record the participation: {error}", file=out)
+        self_id = int(client.whoami()["user_id"])
+        history = client.topic_history(channel, topic, num_before=ROOTCHAT_LOOKBACK)
+        if own_rootchat(history, self_id) is None:
+            client.send_to_channel(channel, topic, rootchat_note(home))
+    except (ZulipError, KeyError, TypeError, ValueError) as error:
+        print(f"agentchat: could not anchor this topic to {home}: {error}", file=out)
+        return
+    _ANCHORED.add((channel, topic))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -252,6 +302,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"how many recent messages to show (default {DEFAULT_READ_COUNT})",
     )
     read.add_argument(
+        "--all", action="store_true",
+        help=(
+            "include the agents' own bookkeeping lines, which are hidden by "
+            "default because they are not part of the conversation"
+        ),
+    )
+    read.add_argument(
         "--since", type=int, default=None, metavar="MESSAGE_ID",
         help=(
             "show only what is newer than this message id, instead of the "
@@ -280,12 +337,12 @@ def _run(args, client: ZulipClient, out) -> int:
         if not text:
             raise AgentChatError("refusing to send an empty message")
         joined = join_and_record(client, args.channel, args.topic, out)
+        ensure_rootchat(client, args.channel, args.topic, out)
         message_id = client.send_to_channel(args.channel, args.topic, text)
         print(
             f"sent message {message_id} to #{args.channel} > {args.topic}",
             file=out,
         )
-        note_participation(args.channel, args.topic, message_id, out)
         if joined:
             print(f"joined #{args.channel}", file=out)
         return 0
@@ -293,7 +350,9 @@ def _run(args, client: ZulipClient, out) -> int:
         if args.count < 1:
             raise AgentChatError("--count must be at least 1")
         if args.since is not None:
-            messages = messages_since(client, args.channel, args.topic, args.since)
+            messages = _visible(
+                messages_since(client, args.channel, args.topic, args.since), args.all
+            )
             if not messages:
                 print(
                     f"nothing newer than message {args.since} in "
@@ -302,8 +361,9 @@ def _run(args, client: ZulipClient, out) -> int:
                 )
                 return 0
         else:
-            messages = client.topic_history(
-                args.channel, args.topic, num_before=args.count
+            messages = _visible(
+                client.topic_history(args.channel, args.topic, num_before=args.count),
+                args.all,
             )
             if not messages:
                 print(f"no messages in #{args.channel} > {args.topic}", file=out)

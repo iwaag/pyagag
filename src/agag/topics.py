@@ -31,6 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .selfnote import is_selfnote
 from .zulip import ZulipClient, ZulipError, _safe_topic_component, log as default_log, topic_write
 
 HISTORY_MESSAGES = 1000
@@ -115,10 +116,17 @@ def format_chatlog(messages: list[dict], self_id: int, *, drop=None) -> str:
     `drop(content)` filters out this bot's own transport noise — acks and the
     like. It is only consulted for our own messages: a human quoting an ack
     is conversation.
+
+    Selfnotes are dropped whoever wrote them, this bot included. They are
+    machine-to-machine (`agag.selfnote`), and an agent that reads its own
+    notes starts writing them by hand — at which point they are prose, and
+    the deterministic record they were is gone.
     """
     lines = []
     for message in messages:
         content = str(message.get("content", "")).strip()
+        if is_selfnote(content):
+            continue
         own = message.get("sender_id") == self_id
         if own and drop is not None and drop(content):
             continue
@@ -195,7 +203,7 @@ def handoff_mention(
     except Exception:  # noqa: BLE001 - a lost mention must not cost the reply
         return ""
     for message in reversed(history):
-        if message.get("sender_id") == self_id:
+        if message.get("sender_id") == self_id or is_selfnote(message.get("content")):
             continue
         name = str(message.get("sender_full_name") or "").strip()
         if name:
@@ -309,7 +317,15 @@ class TopicContext:
         topic_write(self.topic, text, channel=self.channel, client=self.client)
 
     def humans_spoke(self) -> bool:
-        return any(m.get("sender_id") != self.self_id for m in self.history)
+        """Whether anybody but this bot has really said something here.
+
+        Selfnotes do not count: a topic holding nothing but this bot's own
+        machine-to-machine notes has nothing in it to answer.
+        """
+        return any(
+            m.get("sender_id") != self.self_id and not is_selfnote(m.get("content"))
+            for m in self.history
+        )
 
 
 @dataclass
@@ -434,7 +450,9 @@ def serve_topic(
             log(f"post-run re-check failed for {channel!r}/{topic!r}: {error!r}")
             return
         if not any(
-            m.get("sender_id") != self_id and int(m.get("id", 0)) > context.processed_up_to
+            m.get("sender_id") != self_id
+            and not is_selfnote(m.get("content"))
+            and int(m.get("id", 0)) > context.processed_up_to
             for m in tail
         ):
             return

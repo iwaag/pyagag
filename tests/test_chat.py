@@ -2,17 +2,17 @@
 
 What is pinned here is the contract an agent's run depends on — which
 credentials file speaks, that reading makes exactly the Zulip calls it needs
-and never touches subscriptions, that *posting* joins the channel and records
-the participation so the answer can find this agent after the run is over,
-and that a misconfigured environment fails with a message that names what was
-missing rather than a traceback.
+and never touches subscriptions, that *posting* joins the channel and anchors
+the topic with a root note so the answer can find this agent after the run is
+over, and that a misconfigured environment fails with a message that names
+what was missing rather than a traceback.
 """
 
 import io
 
 import pytest
 
-from agag import chat, participation
+from agag import chat, selfnote
 from agag.zulip import ZulipError
 
 CHANNEL = "agforge-agstudio1"
@@ -28,6 +28,12 @@ class Client:
         self.calls = calls
         self.messages = [] if messages is None else messages
         self.topics = [] if topics is None else topics
+
+    self_id = 15
+
+    def whoami(self):
+        self.calls.append(("whoami",))
+        return {"user_id": self.self_id, "full_name": "Front"}
 
     def send_to_channel(self, channel, topic, content):
         self.calls.append(("send", channel, topic, content))
@@ -80,6 +86,13 @@ class Client:
                 return False
         self.subscribe_channels([channel])
         return True
+
+
+@pytest.fixture(autouse=True)
+def _fresh_process(monkeypatch):
+    """One `agentchat` invocation is one process, so its caches start empty."""
+    chat._ANCHORED.clear()
+    monkeypatch.delenv(selfnote.HOME_VARIABLE, raising=False)
 
 
 def run(monkeypatch, argv, client):
@@ -166,32 +179,74 @@ def test_send_into_a_channel_already_joined_subscribes_nothing(monkeypatch):
     assert "joined" not in out
 
 
-def test_send_records_the_participation_against_the_home_conversation(
-    monkeypatch, tmp_path
-):
-    ledger = tmp_path / "participations.jsonl"
-    monkeypatch.setenv(participation.HOME_VARIABLE, "work-s2-10/workrun-task1-s2-10")
-    monkeypatch.setenv(participation.LEDGER_VARIABLE, str(ledger))
-    code, _, _ = run(monkeypatch, ["send", CHANNEL, TOPIC, "please draw"], Client([]))
+def test_send_anchors_the_topic_to_the_home_conversation(monkeypatch):
+    """The root note goes in first, and the real message follows it."""
+    calls = []
+    monkeypatch.setenv(selfnote.HOME_VARIABLE, "front/front-title-image")
+    code, _, _ = run(monkeypatch, ["send", CHANNEL, TOPIC, "please draw"], Client(calls))
     assert code == 0
-    rows = participation.entries(ledger)
-    assert rows == [
-        {
-            "remote": f"{CHANNEL}/{TOPIC}",
-            "home": "work-s2-10/workrun-task1-s2-10",
-            "message_id": 901,
-            "at": rows[0]["at"],
-        }
+    posts = [call for call in calls if call[0] == "send"]
+    assert posts == [
+        ("send", CHANNEL, TOPIC, "[selfnote][rootchat] front/front-title-image"),
+        ("send", CHANNEL, TOPIC, "please draw"),
     ]
 
 
-def test_send_without_a_home_records_nothing(monkeypatch, tmp_path):
+def test_send_anchors_a_topic_once(monkeypatch):
+    """A topic this bot already anchored is not anchored again."""
+    calls = []
+    monkeypatch.setenv(selfnote.HOME_VARIABLE, "front/front-title-image")
+    existing = [
+        message(
+            sender="Front", sender_id=15, id=3,
+            content="[selfnote][rootchat] front/front-title-image",
+        )
+    ]
+    code, _, _ = run(
+        monkeypatch, ["send", CHANNEL, TOPIC, "and one more thing"],
+        Client(calls, existing),
+    )
+    assert code == 0
+    assert [call for call in calls if call[0] == "send"] == [
+        ("send", CHANNEL, TOPIC, "and one more thing")
+    ]
+
+
+def test_send_without_a_home_writes_no_note(monkeypatch):
     """A run nobody will call back has nothing to be called back *to*."""
-    ledger = tmp_path / "participations.jsonl"
-    monkeypatch.delenv(participation.HOME_VARIABLE, raising=False)
-    monkeypatch.setenv(participation.LEDGER_VARIABLE, str(ledger))
-    code, _, _ = run(monkeypatch, ["send", CHANNEL, TOPIC, "hi"], Client([]))
-    assert code == 0 and not ledger.exists()
+    calls = []
+    monkeypatch.delenv(selfnote.HOME_VARIABLE, raising=False)
+    code, _, _ = run(monkeypatch, ["send", CHANNEL, TOPIC, "hi"], Client(calls))
+    assert code == 0
+    assert [call for call in calls if call[0] == "send"] == [
+        ("send", CHANNEL, TOPIC, "hi")
+    ]
+    assert [call for call in calls if call[0] == "history"] == []
+
+
+def test_send_into_the_home_topic_writes_no_note(monkeypatch):
+    """The home conversation is not somewhere else."""
+    calls = []
+    monkeypatch.setenv(selfnote.HOME_VARIABLE, f"{CHANNEL}/{TOPIC}")
+    code, _, _ = run(monkeypatch, ["send", CHANNEL, TOPIC, "hi"], Client(calls))
+    assert code == 0
+    assert [call for call in calls if call[0] == "send"] == [
+        ("send", CHANNEL, TOPIC, "hi")
+    ]
+
+
+def test_read_hides_selfnotes_and_all_shows_them(monkeypatch):
+    """A note an agent wrote to itself is not part of the conversation."""
+    monkeypatch.delenv(selfnote.HOME_VARIABLE, raising=False)
+    messages = [
+        message(sender="Front", sender_id=15, id=3,
+                content="[selfnote][rootchat] front/front-title-image"),
+        message(sender="Forge", sender_id=13, id=4, content="on it"),
+    ]
+    _, out, _ = run(monkeypatch, ["read", CHANNEL, TOPIC], Client([], messages))
+    assert "selfnote" not in out and "on it" in out
+    _, out_all, _ = run(monkeypatch, ["read", CHANNEL, TOPIC, "--all"], Client([], messages))
+    assert "[selfnote][rootchat] front/front-title-image" in out_all
 
 
 def test_send_refuses_an_empty_message(monkeypatch):

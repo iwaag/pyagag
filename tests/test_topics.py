@@ -480,3 +480,63 @@ def test_threads_placement_without_a_root_names_the_paths_as_given(tmp_path):
     absolute path, and so must reach these."""
     absolute = tmp_path / "threads" / "c" / "t.md"
     assert f'"{absolute.as_posix()}"' in topics.threads_placement([absolute])
+
+
+# --- selfnotes are not the conversation ------------------------------------
+
+
+NOTE = "[selfnote][rootchat] front/front-title-image"
+
+
+def test_the_chatlog_drops_selfnotes_whoever_wrote_them():
+    """Including this bot's own: an agent that reads its notes writes them."""
+    rendered = topics.format_chatlog(
+        [
+            message(HUMAN_ID, "Developer", "Build it", 1),
+            message(BOT_ID, "Autolab", NOTE, 2),
+            message(13, "Forge", "[selfnote][work] p/i", 3),
+            message(13, "Forge", "on it", 4),
+        ],
+        BOT_ID,
+    )
+    assert "selfnote" not in rendered
+    assert rendered == "[Developer] Build it\n[Forge] on it\n"
+
+
+def test_the_reply_never_hands_the_turn_to_a_selfnote():
+    """The note's author is not the last speaker; the last speaker is."""
+    calls = []
+    client = Client(calls, [
+        message(13, "Forge", "what size?", 1),
+        message(BOT_ID, "Autolab", NOTE, 2),
+    ])
+    assert topics.handoff_mention(client, CHANNEL, TOPIC, BOT_ID) == "@**Forge**"
+
+
+def test_a_topic_holding_only_selfnotes_counts_as_empty():
+    calls = []
+    client = Client(calls, [message(13, "Forge", NOTE, 1)])
+    topics.serve_topic(
+        client, CHANNEL, TOPIC, lambda context: topics.TopicResult(["ran"]),
+        ack_text="ack", empty_reply="nothing here",
+    )
+    assert ("post", TOPIC, "nothing here") in calls
+    assert not any(call[2] == "ran" for call in calls if call[0] == "post")
+
+
+def test_a_selfnote_during_the_run_does_not_re_arm_the_topic():
+    """p7's ack loop, in its p8 coat: the note must not buy another serving."""
+    calls = []
+    client = Client(calls, [message(id=1)])
+    servings = []
+
+    def handler(context):
+        servings.append(context.processed_up_to)
+        client.history = [
+            message(id=1),
+            message(13, "Forge", NOTE, 2),
+        ]
+        return topics.TopicResult(["done"])
+
+    topics.serve_topic(client, CHANNEL, TOPIC, handler, ack_text="ack")
+    assert servings == [1]

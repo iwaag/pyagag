@@ -11,7 +11,9 @@ import urllib.error
 import pytest
 
 from agag.status import StatusWriter
+from agag.selfnote import Conversation
 from agag.zulip import (
+    LAST_SPEAKER_LOOKBACK,
     RATE_LIMIT_MAX_SECONDS,
     RESOLVED_TOPIC_PREFIX,
     RETRY_SECONDS,
@@ -29,8 +31,11 @@ from agag.zulip import (
     is_dm_for_us,
     mention_from_event,
     read_env,
+    remotes_for_home,
+    rootchat_home,
     serve,
     sweep_mentions,
+    sweep_rootchats,
     sweep_serve,
     sweep_topics,
     topic_dump,
@@ -408,11 +413,20 @@ class SweepClient(FakeClient):
         #: What `is:mentioned` answers with — the startup mention recovery.
         self.mention_messages = []
         self.mention_calls = 0
+        #: What the `sender:me search:rootchat` narrow answers with — the
+        #: startup recovery for topics this bot anchored.
+        self.rootchat_messages = []
+        #: {(channel, topic): content of its last post}, when it matters.
+        self.last_content = {}
 
     def mentions(self, num_before=50):
         self.calls += 1
         self.mention_calls += 1
         return list(self.mention_messages)
+
+    def own_rootchat_notes(self, num_before=200):
+        self.calls += 1
+        return list(self.rootchat_messages)
 
     def subscriptions(self):
         self.calls += 1
@@ -430,8 +444,20 @@ class SweepClient(FakeClient):
     def topic_history(self, channel, topic, num_before=50):
         self.calls += 1
         self.history_calls.append((channel, topic, num_before))
+        history = self.histories.get((channel, topic))
+        if history is not None:
+            return list(history)
         sender = self.last_sender.get((channel, topic))
-        return [] if sender is None else [{"sender_id": sender}]
+        if sender is None:
+            return []
+        return [{
+            "sender_id": sender,
+            "content": self.last_content.get((channel, topic), "your turn"),
+        }]
+
+    #: {(channel, topic): [message, ...]} for the tests that care about what
+    #: the messages *are* — a selfnote is not somebody speaking.
+    histories: dict = {}
 
 
 def mention_event(event_id, sender_id, channel, topic, message_id=1, flags=("mentioned",)):
@@ -505,8 +531,9 @@ def test_sweep_topics_applies_prefix_resolved_and_last_poster_rules():
     )
     matches = sweep_topics(client, self_id=7, topic_filter="workplan-")
     assert matches == [("pj-demo", "workplan-open"), ("pj-demo", "workplan-empty")]
-    # The last-poster check reads exactly one message per candidate topic.
-    assert all(call[2] == 1 for call in client.history_calls)
+    # The last-poster check reads one small window per candidate topic —
+    # more than one message, because the newest ones may be selfnotes.
+    assert all(call[2] == LAST_SPEAKER_LOOKBACK for call in client.history_calls)
 
 
 def test_sweep_topics_accepts_several_prefixes():
@@ -573,7 +600,7 @@ def test_sweep_serve_turns_an_event_into_one_targeted_check():
     )
     assert sweep_run(client) == [("pj-demo", "workplan-new")]
     # The topic the event named was checked; no channel listing was re-read.
-    assert client.history_calls == [("pj-demo", "workplan-new", 1)]
+    assert client.history_calls == [("pj-demo", "workplan-new", LAST_SPEAKER_LOOKBACK)]
 
 
 def test_sweep_serve_coalesces_a_burst_on_one_topic_into_one_check():
@@ -1240,3 +1267,203 @@ def test_without_a_mention_handler_nothing_mention_shaped_costs_a_call():
     )
     assert sweep_run(client) == []
     assert client.mention_calls == 0
+
+
+# --- selfnotes must not buy anybody a run ---------------------------------
+#
+# The p7 trail this comes from: `pj-simpleshooter/workplan-shield-pickup-icon`,
+# where a post that was pure transport ("Message received") counted as
+# somebody speaking and bought the topic's owner a whole run, three times
+# over. The root note is the same shape of post, written into somebody else's
+# topic by design — so every place a listener asks "who spoke last" has to
+# skip it, and each of those places is pinned here. Miss one and p8's own
+# machinery re-creates p7's loop.
+
+
+def rootchat_note_message(sender_id, channel, topic, home, message_id=1):
+    return {
+        "id": message_id,
+        "type": "stream",
+        "sender_id": sender_id,
+        "content": f"[selfnote][rootchat] {home}",
+        "display_recipient": channel,
+        "subject": topic,
+    }
+
+
+def test_a_topic_whose_last_post_is_a_selfnote_does_not_await_us():
+    """`sweep_topics`: forge anchoring its own topic is not a turn for forge."""
+    client = SweepClient(
+        whoami_results=[],
+        poll_results=[],
+        topics_by_channel={"agforge-x": ["assetrun-a", "assetrun-b"]},
+        last_sender={},
+    )
+    client.histories = {
+        # Front spoke, then Front anchored the topic: Front, not the note.
+        ("agforge-x", "assetrun-a"): [
+            {"sender_id": 99, "content": "go"},
+            {"sender_id": 99, "content": "[selfnote][rootchat] front/front-a"},
+        ],
+        # Nothing but notes: nobody has spoken here at all.
+        ("agforge-x", "assetrun-b"): [
+            {"sender_id": 7, "content": "[selfnote][rootchat] agforge-x/assetplan-b"},
+        ],
+    }
+    assert sweep_topics(client, self_id=7, topic_filter="assetrun-") == [
+        ("agforge-x", "assetrun-a")
+    ]
+
+
+def test_a_selfnote_event_is_not_a_pending_topic():
+    """The event path: the note's own arrival must not schedule a serving."""
+    event = channel_event(1, sender_id=99, channel="pj-demo", topic="workplan-a")
+    event["message"]["content"] = "[selfnote][rootchat] front/front-a"
+    client = SweepClient(
+        whoami_results=[{"user_id": 7, "full_name": "Autolab"}],
+        poll_results=[[event], _Stop()],
+        topics_by_channel={"pj-demo": []},
+        last_sender={("pj-demo", "workplan-a"): 99},
+    )
+    assert sweep_run(client, topic_filter="workplan-") == []
+
+
+def test_a_selfnote_is_never_a_mention():
+    """A note that happens to carry a name is still not somebody asking."""
+    event = mention_event(1, sender_id=99, channel="agforge-x", topic="assetplan-a")
+    event["message"]["content"] = "[selfnote][rootchat] front/front-a @**Autolab**"
+    client = SweepClient(
+        whoami_results=[{"user_id": 7, "full_name": "Autolab"}],
+        poll_results=[[event], _Stop()],
+        topics_by_channel={"agforge-x": []},
+        last_sender={("agforge-x", "assetplan-a"): 99},
+    )
+    mentioned = []
+    with pytest.raises(_Stop):
+        sweep_serve(
+            client,
+            lambda channel, topic: None,
+            topic_filter="workplan-",
+            on_mention=lambda channel, topic: mentioned.append((channel, topic)),
+            log=lambda _: None,
+            status=no_status(),
+        )
+    assert mentioned == []
+    assert mention_from_event(event, self_id=7, bot_name="Autolab") is None
+
+
+def test_a_pending_topic_whose_newest_post_is_our_note_is_stale():
+    """The re-check before serving: the event was real, the note came after."""
+    client = SweepClient(
+        whoami_results=[{"user_id": 7, "full_name": "Autolab"}],
+        poll_results=[
+            [channel_event(1, sender_id=99, channel="pj-demo", topic="workplan-a")],
+            _Stop(),
+        ],
+        topics_by_channel={"pj-demo": []},
+        last_sender={},
+    )
+    client.histories = {
+        ("pj-demo", "workplan-a"): [
+            {"sender_id": 99, "content": "go"},
+            {"sender_id": 7, "content": "on it"},
+            {"sender_id": 7, "content": "[selfnote][rootchat] pj-demo/workplan-a"},
+        ]
+    }
+    assert sweep_run(client, topic_filter="workplan-") == []
+
+
+def test_startup_recovers_the_topics_this_bot_anchored():
+    """The narrow that replaced the ledger walk.
+
+    `sender:me search:rootchat` lists every topic this bot is party to; the
+    ones whose last real post is somebody else naming it are the ones still
+    owed an answer.
+    """
+    client = SweepClient(
+        whoami_results=[{"user_id": 7, "full_name": "Autolab"}],
+        poll_results=[_Stop()],
+        topics_by_channel={"pj-demo": []},
+        last_sender={},
+    )
+    client.rootchat_messages = [
+        rootchat_note_message(7, "agforge-x", "assetplan-a", "pj-demo/workplan-a", 1),
+        rootchat_note_message(7, "agforge-x", "assetplan-b", "pj-demo/workplan-b", 2),
+        rootchat_note_message(7, "agforge-x", "assetplan-c", "pj-demo/workplan-c", 3),
+    ]
+    client.histories = {
+        # answered, and we are named: still owed a turn
+        ("agforge-x", "assetplan-a"): [{"sender_id": 13, "content": "@**Autolab** ok"}],
+        # answered, but not named: a participant is served only when named
+        ("agforge-x", "assetplan-b"): [{"sender_id": 13, "content": "done, thanks"}],
+        # our own last word: nothing owed
+        ("agforge-x", "assetplan-c"): [{"sender_id": 7, "content": "thanks"}],
+    }
+    mentioned = []
+    with pytest.raises(_Stop):
+        sweep_serve(
+            client,
+            lambda channel, topic: None,
+            topic_filter="workplan-",
+            on_mention=lambda channel, topic: mentioned.append((channel, topic)),
+            log=lambda _: None,
+            status=no_status(),
+        )
+    assert mentioned == [("agforge-x", "assetplan-a")]
+
+
+def test_the_rootchat_sweep_skips_resolved_topics_and_foreign_matches():
+    client = SweepClient(
+        whoami_results=[],
+        poll_results=[],
+        topics_by_channel={},
+        last_sender={},
+    )
+    client.rootchat_messages = [
+        rootchat_note_message(
+            7, "agforge-x", f"{RESOLVED_TOPIC_PREFIX}assetplan-a",
+            "pj-demo/workplan-a", 1,
+        ),
+        # matched the search word, but is not a root note
+        {
+            "id": 2, "type": "stream", "sender_id": 7,
+            "content": "the rootchat is over there",
+            "display_recipient": "agforge-x", "subject": "assetplan-b",
+        },
+    ]
+    assert sweep_rootchats(client, self_id=7, bot_name="Autolab") == []
+
+
+def test_the_callback_reads_its_home_off_the_topic_that_named_it():
+    """No ledger: the topic itself says whose behalf this bot is here on."""
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    client.histories = {
+        ("agforge-x", "assetplan-a"): [
+            {"sender_id": 7, "content": "[selfnote][rootchat] front/front-title"},
+            {"sender_id": 7, "content": "please draw a title image"},
+            {"sender_id": 13, "content": "@**Front** what size?"},
+        ],
+        ("agforge-x", "assetplan-b"): [{"sender_id": 13, "content": "@**Front** hi"}],
+    }
+    assert rootchat_home(client, "agforge-x", "assetplan-a", 7) == Conversation(
+        "front", "front-title"
+    )
+    assert rootchat_home(client, "agforge-x", "assetplan-b", 7) is None
+
+
+def test_the_threads_of_a_home_are_the_topics_it_anchored():
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    client.rootchat_messages = [
+        rootchat_note_message(7, "agforge-x", "assetplan-a", "front/front-title", 1),
+        rootchat_note_message(7, "agforge-x", "assetrun-a", "front/front-title", 2),
+        rootchat_note_message(7, "pj-demo", "workplan-z", "front/front-other", 3),
+    ]
+    assert remotes_for_home(client, "front", "front-title") == [
+        Conversation("agforge-x", "assetplan-a"),
+        Conversation("agforge-x", "assetrun-a"),
+    ]
+    assert remotes_for_home(client, "front", "front-nothing") == []

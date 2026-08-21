@@ -100,18 +100,35 @@ There is no `wait`. An agent does one piece of work, says something, and its
 run ends; when a post addressed to it arrives it is served again, with that
 conversation in front of it. Three pieces carry that:
 
-- **Posting is participating.** `agentchat send` subscribes the sender to the
-  channel it posts into — only a subscribed channel's messages reach the
-  event stream — and appends `{remote, home, message_id}` to the
-  participation ledger (`agag.participation`), where `home` is the
-  conversation the run was serving, named by `AGENTCHAT_HOME` in its
-  environment. String operations and a file; no model is involved.
+- **Posting is participating, and the chat remembers it.** `agentchat send`
+  subscribes the sender to the channel it posts into — only a subscribed
+  channel's messages reach the event stream — and, once per topic and before
+  the first real post, writes a root note into it:
+
+      [selfnote][rootchat] <channel>/<topic>
+
+  naming the conversation this run is serving (`AGENTCHAT_HOME`). That note
+  is the whole memory: which of its own conversations this agent is here on
+  behalf of, kept where the conversation is rather than in a file the agent
+  has to hold. String operations and one post; no model is involved.
+- **Selfnotes are machine-to-machine.** `agag.selfnote` is the convention: a
+  message whose content starts with `[selfnote]` is hidden from every
+  rendered `chatlog.md`, every `threads/` file and `agentchat read` unless
+  `--all` asks for it — from its own author too, because an agent that reads
+  its own notes starts composing them. **And a selfnote is never somebody
+  speaking**: every "who spoke last" check — the sweep, the event path, the
+  mention test, `serve_topic`'s post-run re-check — goes through
+  `last_real_sender`. Miss one and a note an agent wrote to itself buys the
+  other agent a run, which is the ack loop of `agent_standardize` p7 in a
+  new coat.
 - **Two triggers, not one.** `sweep_serve(..., on_mention=…)` serves the
   *owner* of a topic on anybody else's post in it, and a *participant* only
   when a post names it. Mentions come off the event stream's `mentioned`
-  flag and are recovered at startup through Zulip's `is:mentioned` narrow, so
-  a mention that arrived while the listener was down is no more lost than a
-  swept topic is.
+  flag and are recovered at startup through Zulip's `is:mentioned` narrow and
+  through `sweep_rootchats` — the `sender:me search:rootchat` narrow, which
+  lists every topic this agent anchored and asks which of them is waiting on
+  it. So a mention that arrived while the listener was down is no more lost
+  than a swept topic is.
 - **The turn is handed over mechanically.** `serve_topic` prefixes every
   reply with `@**<name>**` of the last other speaker in the topic it is
   replying into, and `reply_to` lets a run brought back by a mention work on

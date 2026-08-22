@@ -39,7 +39,9 @@ TITLE_LIMIT = 255
 HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(?P<title>.+?)\s*#*\s*$")
 
 __all__ = [
+    "PLANE_ENV_VARIABLE",
     "PlaneConfig",
+    "credentials_path",
     "PlaneError",
     "add_comment",
     "compose_document",
@@ -92,6 +94,25 @@ def read_env(path: Path) -> dict[str, str]:
             key, value = tokens[0].split("=", 1)
             values[key] = value
     return values
+
+
+#: Names the credentials file when it is not beside the agent.
+PLANE_ENV_VARIABLE = "AGAG_PLANE_ENV"
+PLANE_ENV_FILENAME = "plane-credentials.env"
+
+
+def credentials_path(root: Path) -> Path:
+    """Where an agent rooted at `root` finds its Plane credentials.
+
+    `AGAG_PLANE_ENV` when set, else `<root>/.local/plane-credentials.env`.
+    Nothing parent-relative: forge used to look in `root.parent/.local/`,
+    which only works for a checkout inside `pj-agdev/`. A shared file is
+    pointed at with the variable, or symlinked into `.local/`.
+    """
+    configured = os.environ.get(PLANE_ENV_VARIABLE, "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return root / ".local" / PLANE_ENV_FILENAME
 
 
 def load_plane_config(path: Path) -> PlaneConfig:

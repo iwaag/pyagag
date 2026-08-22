@@ -243,6 +243,33 @@ It is what another agent reads to learn this one's entrance, which is why that
 knowledge travels as posted content rather than as vocabulary compiled into
 someone else's guide.
 
+### The agent skeleton and `agag init`
+
+`agag.agent` is what every standardized agent used to carry as five copied
+modules: the instance name, the introduction, the role run with its
+`agentchat` handover, the pull-sweep listener and the entrance serving. An
+agent is now an `AgentSpec` plus its `agents.toml`, its guides and its own
+topic handlers:
+
+```python
+from agag.agent import AgentSpec, listener_main
+
+SPEC = AgentSpec("agecho", ROOT, plan_prefix="agechoplan-", run_prefix="agechorun-")
+listener_main(SPEC, {"agechoplan-": handle_plan})   # anything else → agag.entrance
+```
+
+`run_role(SPEC, role, prompt, …)` resolves the role against
+`<root>/agents.toml` (+ `.local/agents.local.toml`), puts `agentchat` on PATH
+with `AGENTCHAT_ZULIP_ENV` = `<root>/.local/zulip.env` and `AGENTCHAT_HOME` =
+the conversation served, and passes the role's own `allowed_tools` grant
+(`ag.agent-config.v2`). `agag.entrance.handle_entrance(SPEC, …)` answers a
+plain topic in the instance's own channel with a `front` run; the guide is the
+agent's `agent/guides/entrance_front/guide.md` when it has one, else a built-in
+default naming its `plan_prefix`/`run_prefix`. `intro_main(SPEC)` posts
+`params/intro.md`.
+
+`agag init <agent>` generates a project on that skeleton — see `agag init --help`.
+
 ## Development
 
 ```sh

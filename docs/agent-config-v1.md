@@ -58,6 +58,34 @@ provides = []
 
 The optional `project` value is descriptive.
 
+### v2: the role carries its tool grant
+
+`schema = "ag.agent-config.v2"` is v1 plus one required key per role:
+
+```toml
+schema = "ag.agent-config.v2"
+
+[roles.front]
+profile = "hosted"
+requires = []
+allowed_tools = "Read,Glob,Grep,Bash(agentchat:*)"
+
+[roles.generator]
+profile = "hosted"
+allowed_tools = ["Read", "Write", "Bash(ffmpeg:*)"]   # the same thing, as a list
+```
+
+`allowed_tools` is the harness's tool grant for that role — claude_code's
+`--allowedTools` — written as the comma-separated string the harness takes or
+as an array of patterns. It reaches the application as
+`ResolvedAgent.allowed_tools` (joined with commas). A v2 role without it is
+`E_SCHEMA`: every consumer of v1 kept a separate `ROLE_ALLOWED_TOOLS` table
+with the same warning beside it — a role missing from the table gets no grant,
+and claude_code then waits for an interactive permission answer until the
+timeout — and v2 makes the table and the role list one thing. Under v1
+`allowed_tools` is accepted when present and `ResolvedAgent.allowed_tools` is
+`None` otherwise. The overlay cannot set it.
+
 ### Local overlay shape
 
 ```toml

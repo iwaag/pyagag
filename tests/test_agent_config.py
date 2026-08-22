@@ -199,3 +199,30 @@ profile = "agcode"
 ''')
     config, overlay = load_config(main, local)
     assert resolve_role(config, overlay, "generator").command == str(interpreter)
+
+
+V2 = BASE.replace('schema = "ag.agent-config.v1"', 'schema = "ag.agent-config.v2"')
+
+
+def test_v2_requires_a_grant_per_role(tmp_path):
+    main, local = files(tmp_path, V2)
+    with pytest.raises(AgentConfigError) as caught:
+        load_config(main, local)
+    assert caught.value.code == "E_SCHEMA"
+    assert "allowed_tools" in str(caught.value)
+
+
+def test_v2_grant_reaches_the_resolved_agent_in_either_spelling(tmp_path):
+    body = V2.replace("requires = []", 'requires = []\nallowed_tools = "Read,Write"') + (
+        '[roles.reader]\nprofile = "local"\nallowed_tools = ["Read", "Grep"]\n'
+    )
+    main, local = files(tmp_path, body)
+    config, overlay = load_config(main, local)
+    assert resolve_role(config, overlay, "generator", check_available=False).allowed_tools == "Read,Write"
+    assert resolve_role(config, overlay, "reader", check_available=False).allowed_tools == "Read,Grep"
+
+
+def test_v1_roles_carry_no_grant(tmp_path):
+    main, local = files(tmp_path)
+    config, overlay = load_config(main, local)
+    assert resolve_role(config, overlay, "generator", check_available=False).allowed_tools is None

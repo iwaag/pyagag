@@ -13,6 +13,13 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "ag.agent-config.v1"
+#: v2 adds one thing: every role carries its own `allowed_tools` grant. The
+#: per-agent `ROLE_ALLOWED_TOOLS` tables that preceded it all repeated the
+#: same warning — a role without a grant makes claude_code wait on an
+#: interactive permission prompt until the timeout — so in v2 the grant is
+#: part of the role and a role without one is `E_SCHEMA`.
+SCHEMA_V2 = "ag.agent-config.v2"
+SCHEMAS = frozenset({SCHEMA, SCHEMA_V2})
 CANONICAL_HARNESSES = {"claude_code", "agcode", "fake"}
 INTRINSIC_CAPABILITIES = {
     "claude_code": {"agentic_tools", "workspace_fs"},
@@ -44,6 +51,9 @@ class ResolvedAgent:
     command: str
     provider_base_url: str | None
     environment: dict[str, str] = field(default_factory=dict)
+    #: The role's tool grant (`--allowedTools` for claude_code), from a v2
+    #: config. `None` under v1, where the application keeps its own table.
+    allowed_tools: str | None = None
 
     @property
     def native_model(self) -> str:
@@ -63,9 +73,22 @@ def _read_toml(path: Path, *, required: bool) -> dict[str, Any]:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise AgentConfigError("E_SCHEMA", f"cannot read {path}: {error}") from error
-    if data.get("schema") != SCHEMA:
-        raise AgentConfigError("E_SCHEMA", f"{path} must declare schema = {SCHEMA!r}")
+    if data.get("schema") not in SCHEMAS:
+        raise AgentConfigError("E_SCHEMA", f"{path} must declare schema = {SCHEMA!r} or {SCHEMA_V2!r}")
     return data
+
+
+def _allowed_tools(value: Any, key: str) -> str | None:
+    """One grant as the harness wants it: a comma-separated string.
+
+    Written either as that string or as an array of tool patterns; the array
+    form reads better for a long grant, and both mean the same thing.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return ",".join(_string_list(value, key))
 
 
 def _table(data: dict[str, Any], key: str) -> dict[str, Any]:
@@ -145,6 +168,9 @@ def _validate_committed(config: dict[str, Any]) -> None:
         if settings.get("profile") not in profiles:
             raise AgentConfigError("E_UNKNOWN_PROFILE", f"role {role!r}: unknown profile {settings.get('profile')!r}")
         _string_list(settings.get("requires"), f"roles.{role}.requires")
+        grant = _allowed_tools(settings.get("allowed_tools"), f"roles.{role}.allowed_tools")
+        if config.get("schema") == SCHEMA_V2 and grant is None:
+            raise AgentConfigError("E_SCHEMA", f"role {role!r}: {SCHEMA_V2} requires allowed_tools")
     _string_list(_table(config, "capabilities").get("provides"), "capabilities.provides")
 
 
@@ -238,4 +264,5 @@ def resolve_role(
         _resolve_command(harness, overlay, check_available=check_available),
         provider_base_url,
         _resolve_secret_environment(provider, overlay, check_available=check_available),
+        _allowed_tools(roles[role].get("allowed_tools"), f"roles.{role}.allowed_tools"),
     )

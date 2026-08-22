@@ -36,6 +36,13 @@ def test_paths_and_names_follow_the_root(tmp_path):
     assert s.sweep_prefixes == ("testrun-", "testplan-")
 
 
+def test_extra_prefixes_are_swept_too(tmp_path):
+    s = spec(tmp_path, plan_prefix="testplan-", extra_prefixes=("mining-",))
+    assert s.sweep_prefixes == ("testplan-", "mining-")
+    matches = agent.topic_filter(s)
+    assert matches("pj-x", "mining-ideas") and not matches("pj-x", "other")
+
+
 def test_instance_name_reads_the_local_file_then_falls_back(tmp_path, monkeypatch):
     s = spec(tmp_path)
     monkeypatch.delenv("AGTEST_INSTANCE_NAME", raising=False)
@@ -95,10 +102,12 @@ def test_run_role_passes_the_grant_and_writes_its_record(tmp_path, monkeypatch):
     )
     record = tmp_path / "records" / "run-0001.json"
     output, run_record, code = agent.run_role(
-        s, "front", "question", cwd=tmp_path, timeout=30, record=record
+        s, "front", "question", cwd=tmp_path, timeout=30, record=record,
+        extra_meta={"project": "demo"},
     )
     assert (output, code) == ("answer", 0)
     assert run_record["schema"] == "ag.agent-run.v1"
+    assert run_record["project"] == "demo"
     assert record.exists()
     assert calls[0][2]["allowed_tools"] == "Read"
     assert calls[0][2]["cwd"] == tmp_path

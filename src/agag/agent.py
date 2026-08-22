@@ -92,12 +92,17 @@ class AgentSpec:
     forge puts its tool directories on PATH there. It is called per run, after
     the role is resolved, and may read `PATH` from the environment it is
     handed.
+
+    `extra_prefixes` are further topic prefixes swept elsewhere, for an agent
+    whose vocabulary has more than a plan and a run (autolab's `bmining-`).
+    They are swept like the other two; the default guide does not name them.
     """
 
     agent: str
     root: Path
     plan_prefix: str = ""
     run_prefix: str = ""
+    extra_prefixes: tuple[str, ...] = ()
     extra_environment: Callable[[Mapping[str, str]], Mapping[str, str]] | None = field(
         default=None, compare=False
     )
@@ -154,7 +159,9 @@ class AgentSpec:
 
     @property
     def sweep_prefixes(self) -> tuple[str, ...]:
-        return tuple(p for p in (self.run_prefix, self.plan_prefix) if p)
+        return tuple(
+            p for p in (self.run_prefix, self.plan_prefix, *self.extra_prefixes) if p
+        )
 
     def instance_name(self) -> str:
         """This instance's name, from the env var or `.local/instance.toml`."""
@@ -243,12 +250,15 @@ def run_role(
     skip_permissions: bool = False,
     extra_args: list[str] | None = None,
     on_event=None,
+    extra_meta: Mapping[str, object] | None = None,
 ) -> tuple[str, dict, int]:
     """Resolve `role`, run it once, and return output, record, and exit code.
 
     The tool grant is the role's own (`allowed_tools` in `agents.toml`). The
     remaining keyword arguments pass straight to `run_harness` for the agent
     that needs them (autolab's agcode budget, its permission bypass).
+    `extra_meta` is stamped into the run record beside the harness's own
+    facts (autolab records the project a run was for).
     """
     agent = resolve_spec_role(spec, role, profile_override=profile, home=home)
     result = run_harness(
@@ -263,6 +273,8 @@ def run_role(
         extra_args=extra_args,
         on_event=on_event,
     )
+    if extra_meta:
+        result.meta.update(extra_meta)
     run_record = {"schema": "ag.agent-run.v1", **result.meta}
     if record:
         write_run_record(record, request_id=record.stem, meta=result.meta)

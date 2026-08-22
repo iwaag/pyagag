@@ -5,7 +5,9 @@ here is a listener, an entrance or a role run — those are `agag.agent` and
 arrive with a pyagag push. What is generated is what is the agent's own:
 its name and prefixes (`src/<agent>/listener.py`, ~20 lines), its roles and
 their grants (`agents.toml`), its introduction (`params/intro.md`), one
-guide stub, and the files that make it a `uv` project with `git init`.
+guide stub, and the files that make it a `uv` project. Version control is
+the caller's: the project may be a new repo, a folder in an existing one, or
+nothing yet — `agag init` only writes files.
 
     agag init agecho                  # asks four questions, defaults shown
     agag init agecho --yes            # all defaults
@@ -24,7 +26,6 @@ import argparse
 import re
 import socket
 import string
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from importlib import resources
@@ -147,8 +148,8 @@ def files(plan: Plan) -> dict[str, str]:
     }
 
 
-def generate(plan: Plan, *, git: bool = True) -> Path:
-    """Write the project and `git init` it. Refuses to touch an existing root."""
+def generate(plan: Plan) -> Path:
+    """Write the project. Refuses to touch an existing root."""
     root = plan.root
     if root.exists():
         raise InitError(f"{root} already exists; choose another --dest or remove it")
@@ -157,9 +158,6 @@ def generate(plan: Plan, *, git: bool = True) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
     (root / "service" / "listen.sh").chmod(0o755)
-    if git:
-        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     return root
 
 
@@ -212,15 +210,14 @@ def add_init_parser(subparsers) -> None:
     parser.add_argument("--profile", help=f"profile for every role (default {DEFAULT_PROFILE})")
     parser.add_argument("--dest", help="directory to create <agent>/ in (default .)")
     parser.add_argument("--yes", "-y", action="store_true", help="take every default without asking")
-    parser.add_argument("--no-git", action="store_true", help="do not git init the project")
     parser.set_defaults(func=run_init)
 
 
 def run_init(args: argparse.Namespace) -> int:
     try:
         plan = plan_from_args(args)
-        generate(plan, git=not args.no_git)
-    except (InitError, subprocess.CalledProcessError) as error:
+        generate(plan)
+    except InitError as error:
         print(f"agag init: {error}", file=sys.stderr)
         return 2
     print(checklist(plan))

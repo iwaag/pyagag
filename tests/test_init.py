@@ -2,7 +2,6 @@
 
 import argparse
 import importlib
-import subprocess
 import sys
 from pathlib import Path
 
@@ -38,7 +37,7 @@ def test_a_bad_name_or_a_missing_front_is_refused(tmp_path):
 
 def test_generated_project_is_small_and_loads(tmp_path, monkeypatch):
     plan = init.plan_from_args(args(dest=str(tmp_path), instance="agecho-lab1", roles="front,worker"))
-    root = init.generate(plan, git=False)
+    root = init.generate(plan)
     written = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
     assert written == [
         ".gitignore", ".local/instance.toml", "agent/guides/agechoplan_front/guide.md",
@@ -71,16 +70,15 @@ def test_generate_refuses_an_existing_root(tmp_path):
     plan = init.plan_from_args(args(dest=str(tmp_path)))
     (tmp_path / "agecho").mkdir()
     with pytest.raises(init.InitError):
-        init.generate(plan, git=False)
+        init.generate(plan)
 
 
-def test_cli_generates_git_inits_and_prints_the_checklist(tmp_path, capsys):
+def test_cli_generates_and_prints_the_checklist_without_touching_git(tmp_path, capsys):
     code = main(["init", "agecho", "--yes", "--dest", str(tmp_path)])
     assert code == 0
     out = capsys.readouterr().out
     assert "Human checklist" in out and ".local/zulip.env" in out and "#agents" in out
-    assert (tmp_path / "agecho" / ".git").is_dir()
-    status = subprocess.run(["git", "status", "--short"], cwd=tmp_path / "agecho",
-                            capture_output=True, text=True).stdout
-    assert ".local" not in status  # ignored, never staged
-    assert "A  agents.toml" in status
+    root = tmp_path / "agecho"
+    assert not (root / ".git").exists()  # version control is the caller's
+    assert (root / "agents.toml").is_file()
+    assert ".local/" in (root / ".gitignore").read_text()

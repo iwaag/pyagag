@@ -272,7 +272,8 @@ default naming its `plan_prefix`/`run_prefix`. `intro_main(SPEC)` posts
 (pyagag from GitHub), `agents.toml` (v2, one grant per role),
 `params/intro.md`, one guide stub, `src/<agent>/listener.py` (the spec and
 one `listener_main` call), `src/<agent>/intro.py`, `service/listen.sh`,
-`.gitignore`, `.local/instance.toml`; then `git init`. It asks for the
+`.gitignore`, `.local/instance.toml` — files only, no `git init`; where the
+project lives in version control is the caller's. It asks for the
 instance name, the two prefixes, the roles, the profile and the destination
 (`--yes` takes every default) and ends by printing the human checklist — the
 Zulip bot account and its `.local/zulip.env`, the `#agents` subscription and

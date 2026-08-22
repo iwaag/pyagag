@@ -181,14 +181,18 @@ Human checklist for {plan.instance}:
     it is for. The bot cannot edit that description itself.
  3. Plane (only if this agent will register Work): an account for it, and
     AGAG_PLANE_ENV or {root / '.local' / 'plane-credentials.env'}.
- 4. Fill the TODOs: params/intro.md (the contract others read) and
+ 4. If `claude` is not on PATH, name it in {root / '.local' / 'agents.local.toml'}:
+        schema = "ag.agent-config.v2"
+        [local.harness.claude_code]
+        command_glob = "<path or glob to the claude binary>"
+ 5. Fill the TODOs: params/intro.md (the contract others read) and
     agent/guides/*/guide.md. Widen allowed_tools in agents.toml as needed.
- 5. Run it:
+ 6. Run it:
         cd {root}
         uv sync
         uv run python -m {plan.agent}.intro     # post the introduction
         service/listen.sh                       # or {plan.agent.upper()}_ZULIP_LOG_ONLY=1 first
- 6. To keep it running, copy a plist from pj-agdev/devenv/launchd/*.plist.in.
+ 7. To keep it running, copy a plist from pj-agdev/devenv/launchd/*.plist.in.
 """
 
 

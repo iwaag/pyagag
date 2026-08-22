@@ -268,7 +268,15 @@ agent's `agent/guides/entrance_front/guide.md` when it has one, else a built-in
 default naming its `plan_prefix`/`run_prefix`. `intro_main(SPEC)` posts
 `params/intro.md`.
 
-`agag init <agent>` generates a project on that skeleton — see `agag init --help`.
+`agag init <agent>` generates a project on that skeleton: `pyproject.toml`
+(pyagag from GitHub), `agents.toml` (v2, one grant per role),
+`params/intro.md`, one guide stub, `src/<agent>/listener.py` (the spec and
+one `listener_main` call), `src/<agent>/intro.py`, `service/listen.sh`,
+`.gitignore`, `.local/instance.toml`; then `git init`. It asks for the
+instance name, the two prefixes, the roles, the profile and the destination
+(`--yes` takes every default) and ends by printing the human checklist — the
+Zulip bot account and its `.local/zulip.env`, the `#agents` subscription and
+the instance's own channel, Plane if wanted. `agag init --help` has the flags.
 
 ## Development
 

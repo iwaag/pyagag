@@ -8,6 +8,7 @@ license = { file = "LICENSE" }
 
 [project.scripts]
 agentchat = "agag.chat:main"
+agag = "agag.cli:main"
 
 [dependency-groups]
 dev = [
@@ -20,3 +21,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agag"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/agag/templates" = "agag/templates"

@@ -1,0 +1,8 @@
+"""`python -m $agent.intro`: post params/intro.md to #agents as this instance."""
+
+from agag.agent import intro_main
+
+from .listener import SPEC
+
+if __name__ == "__main__":
+    intro_main(SPEC)

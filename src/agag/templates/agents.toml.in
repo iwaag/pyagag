@@ -1,0 +1,17 @@
+schema = "ag.agent-config.v2"
+project = "$agent"
+
+[models."anthropic/claude-sonnet-5"]
+
+[profiles.sonnet]
+harness = "claude_code"
+model = "anthropic/claude-sonnet-5"
+
+[profiles.stub]
+harness = "fake"
+model = "anthropic/claude-sonnet-5"
+
+# Every role carries its own tool grant (claude_code's --allowedTools).
+# Without one claude_code waits on a permission prompt until the timeout.
+# `agentchat` is how a run reads and writes the chat as this instance.
+$roles

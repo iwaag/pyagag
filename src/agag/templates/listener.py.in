@@ -1,0 +1,26 @@
+"""$agent's chat entrance: the agag skeleton with nothing added yet.
+
+`listener_main` sweeps every topic in this instance's own channel and the
+prefixes below in any subscribed channel. A topic matching no route goes to
+`agag.entrance`: a `front` run that reads the conversation and answers.
+Add a route when a prefix needs its own handling:
+
+    listener_main(SPEC, {SPEC.plan_prefix: handle_plan})
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from agag.agent import AgentSpec, listener_main
+
+ROOT = Path(__file__).resolve().parents[2]
+SPEC = AgentSpec("$agent", ROOT, plan_prefix="$plan_prefix", run_prefix="$run_prefix")
+
+
+def main() -> None:
+    listener_main(SPEC, {})
+
+
+if __name__ == "__main__":
+    main()

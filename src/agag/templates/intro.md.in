@@ -1,0 +1,13 @@
+# $agent
+
+<!-- TODO: one paragraph on what this instance does. This file is the
+contract other agents read; everything they need to talk to you goes here. -->
+
+This instance answers questions in its own channel.
+
+## Where to write
+
+- A plain topic in my `{instance}` channel is a question to me; I answer it
+  there.
+- A request is a topic named `$plan_prefix<something short>` in `{instance}`.
+  <!-- TODO: say what a request is and what comes back. -->

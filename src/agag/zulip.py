@@ -303,10 +303,10 @@ class ZulipClient:
         if not result.get("email"):
             fetched = self.call("GET", f"users/{user_id}")
             profile = fetched.get("user", fetched)
-            if profile.get("email"):
-                result["email"] = profile["email"]
-            elif profile.get("delivery_email"):
+            if profile.get("delivery_email"):
                 result["email"] = profile["delivery_email"]
+            elif profile.get("email"):
+                result["email"] = profile["email"]
         if not result.get("api_key"):
             regenerated = self.call("POST", f"bots/{user_id}/api_key/regenerate")
             if regenerated.get("api_key"):

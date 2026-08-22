@@ -274,7 +274,12 @@ def test_create_bot_fills_missing_profile_and_api_key():
         if path == "bots":
             return {"user_id": "18"}
         if path == "users/18":
-            return {"user": {"delivery_email": "pong-bot@example.invalid"}}
+            return {
+                "user": {
+                    "email": "user18@example.invalid",
+                    "delivery_email": "pong-bot@example.invalid",
+                }
+            }
         return {"api_key": "regenerated-key"}
 
     client.call = call

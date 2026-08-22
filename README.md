@@ -272,12 +272,20 @@ default naming its `plan_prefix`/`run_prefix`. `intro_main(SPEC)` posts
 (pyagag from GitHub), `agents.toml` (v2, one grant per role),
 `params/intro.md`, one guide stub, `src/<agent>/listener.py` (the spec and
 one `listener_main` call), `src/<agent>/intro.py`, `service/listen.sh`,
-`.gitignore`, `.local/instance.toml` — files only, no `git init`; where the
+`params/channel.md`, `.gitignore`, `.local/instance.toml` — files only, no `git init`; where the
 project lives in version control is the caller's. It asks for the
 instance name, the two prefixes, the roles, the profile and the destination
-(`--yes` takes every default) and ends by printing the human checklist — the
-Zulip bot account and its `.local/zulip.env`, the `#agents` subscription and
-the instance's own channel, Plane if wanted. `agag init --help` has the flags.
+(`--yes` takes every default). `--like <sibling-root>` copies that instance's
+local harness overlay, and `--provision` immediately runs the Zulip setup.
+
+`agag provision [root]` uses the owner-class credentials whose **path** is in
+`AGAG_ZULIP_ADMIN_ENV` (or `--admin-env`). It creates a generic bot, writes
+`<root>/.local/zulip.env` with mode 0600, subscribes the bot to `#agents`, and
+creates or updates the instance's own channel from `params/channel.md`. It
+refuses when the bot email already exists rather than regenerating a running
+bot's key. The remaining human checklist is the once-per-realm provisioner
+account, an optional per-agent Plane account, and permanent listener service
+installation. `agag init --help` and `agag provision --help` have the flags.
 
 ## Development
 

@@ -13,17 +13,18 @@ nothing yet — `agag init` only writes files.
     agag init agecho --yes            # all defaults
     agag init agecho --instance agecho-lab1 --roles front,worker --dest ~/agents
 
-What a human still has to do is printed at the end as a checklist: the Zulip
-bot account (its credentials go in `.local/zulip.env`), subscribing it to
-`#agents` and to its own channel, and — if the agent will use Plane — the
-account there. An agent cannot edit its own channel's description over the
-API (HTTP 400), so that stays human too.
+`--provision` immediately creates the Zulip bot, its local credentials and
+channels with the owner-class credential path named by
+`AGAG_ZULIP_ADMIN_ENV`. `--like <root>` carries a sibling's local harness
+overlay into the new instance. The printed human checklist is only the work
+that cannot be automated here.
 """
 
 from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import socket
 import string
 import sys
@@ -138,6 +139,7 @@ def files(plan: Plan) -> dict[str, str]:
         "agents.toml": _template("agents.toml.in").substitute(values),
         "instance.example.toml": _template("instance.example.toml.in").substitute(values),
         "params/intro.md": _template("intro.md.in").substitute(values),
+        "params/channel.md": _template("channel.md.in").substitute(values),
         f"agent/guides/{guide_dir}_front/guide.md": _template("guide.md.in").substitute(values),
         f"src/{plan.agent}/__init__.py": "",
         f"src/{plan.agent}/listener.py": _template("listener.py.in").substitute(values),
@@ -162,35 +164,22 @@ def generate(plan: Plan) -> Path:
 
 
 def checklist(plan: Plan) -> str:
-    """What a human does next, in order. Printed, never automated."""
+    """The intentionally short list of work that still belongs to a human."""
     root = plan.root
     return f"""
 Generated {root}
 
 Human checklist for {plan.instance}:
 
- 1. Zulip bot account: create a generic bot named {plan.instance!r} (Settings →
-    Your bots), then write its credentials to {root / '.local' / 'zulip.env'}:
-        ZULIP_URL=https://<your zulip>
-        ZULIP_EMAIL=<bot email>
-        ZULIP_API_KEY=<api key>
- 2. Zulip channels: subscribe the bot to #agents (the introduction board) and
-    create its own channel #{plan.instance} with a description saying what
-    it is for. The bot cannot edit that description itself.
- 3. Plane (only if this agent will register Work): an account for it, and
+ 1. Once per realm: create the dedicated provisioner account and put its
+    owner-class credentials in the path named by AGAG_ZULIP_ADMIN_ENV.
+ 2. Plane (only if this agent will register Work): create an account for it and
     AGAG_PLANE_ENV or {root / '.local' / 'plane-credentials.env'}.
- 4. If `claude` is not on PATH, name it in {root / '.local' / 'agents.local.toml'}:
-        schema = "ag.agent-config.v2"
-        [local.harness.claude_code]
-        command_glob = "<path or glob to the claude binary>"
- 5. Fill the TODOs: params/intro.md (the contract others read) and
-    agent/guides/*/guide.md. Widen allowed_tools in agents.toml as needed.
- 6. Run it:
-        cd {root}
-        uv sync
-        uv run python -m {plan.agent}.intro     # post the introduction
-        service/listen.sh                       # or {plan.agent.upper()}_ZULIP_LOG_ONLY=1 first
- 7. To keep it running, copy a plist from pj-agdev/devenv/launchd/*.plist.in.
+ 3. To keep the listener running permanently, install it with launchd or
+    Ansible after the foreground/background trial.
+
+Agent-side next step (unless --provision was used):
+    agag provision {root}
 """
 
 
@@ -209,16 +198,46 @@ def add_init_parser(subparsers) -> None:
     parser.add_argument("--roles", help="comma-separated roles, must include front (default front)")
     parser.add_argument("--profile", help=f"profile for every role (default {DEFAULT_PROFILE})")
     parser.add_argument("--dest", help="directory to create <agent>/ in (default .)")
+    parser.add_argument(
+        "--like",
+        help="copy <root>/.local/agents.local.toml into the generated agent",
+    )
+    parser.add_argument(
+        "--provision",
+        action="store_true",
+        help="provision Zulip immediately after generation",
+    )
+    parser.add_argument(
+        "--admin-env",
+        help="owner-class Zulip env for --provision (default $AGAG_ZULIP_ADMIN_ENV)",
+    )
+    parser.add_argument("--description", help="own-channel description for --provision")
     parser.add_argument("--yes", "-y", action="store_true", help="take every default without asking")
     parser.set_defaults(func=run_init)
 
 
 def run_init(args: argparse.Namespace) -> int:
+    overlay_source = None
+    if args.like:
+        overlay_source = Path(args.like).expanduser().resolve() / ".local" / "agents.local.toml"
+        if not overlay_source.is_file():
+            print(f"agag init: --like source is missing {overlay_source}", file=sys.stderr)
+            return 2
     try:
         plan = plan_from_args(args)
-        generate(plan)
+        root = generate(plan)
+        if overlay_source is not None:
+            overlay_target = root / ".local" / "agents.local.toml"
+            shutil.copy2(overlay_source, overlay_target)
     except InitError as error:
         print(f"agag init: {error}", file=sys.stderr)
         return 2
     print(checklist(plan))
+    if args.provision:
+        from agag.provision import run_provision
+
+        provision_args = argparse.Namespace(
+            root=str(root), admin_env=args.admin_env, description=args.description
+        )
+        return run_provision(provision_args)
     return 0

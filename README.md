@@ -276,7 +276,8 @@ one `listener_main` call), `src/<agent>/intro.py`, `service/listen.sh`,
 project lives in version control is the caller's. It asks for the
 instance name, the two prefixes, the roles, the profile and the destination
 (`--yes` takes every default). `--like <sibling-root>` copies that instance's
-local harness overlay, and `--provision` immediately runs the Zulip setup.
+local machine overlay while dropping role overrides the new agent does not
+declare, and `--provision` immediately runs the Zulip setup.
 
 `agag provision [root]` uses the owner-class credentials whose **path** is in
 `AGAG_ZULIP_ADMIN_ENV` (or `--admin-env`). It creates a generic bot, writes

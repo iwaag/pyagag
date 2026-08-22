@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import shutil
 import socket
 import string
 import sys
@@ -163,6 +162,32 @@ def generate(plan: Plan) -> Path:
     return root
 
 
+def copy_compatible_overlay(source: Path, target: Path, roles: tuple[str, ...]) -> None:
+    """Copy sibling machine facts without importing overrides for absent roles.
+
+    A local harness path is portable across sibling agents on one machine;
+    a role override is agent-specific.  Keep overrides only when the new
+    committed config declares that role, otherwise the v2 overlay validator
+    correctly rejects the generated agent at first run.
+    """
+    lines = source.read_text(encoding="utf-8").splitlines(keepends=True)
+    kept: list[str] = []
+    skipping = False
+    section = re.compile(r"^\s*\[([^]]+)]\s*(?:#.*)?$")
+    for line in lines:
+        match = section.match(line.rstrip("\r\n"))
+        if match:
+            name = match.group(1).strip()
+            skipping = False
+            if name.startswith("roles."):
+                role = name.removeprefix("roles.").strip().strip('"').strip("'")
+                skipping = role not in roles
+        if not skipping:
+            kept.append(line)
+    target.write_text("".join(kept), encoding="utf-8")
+    target.chmod(source.stat().st_mode & 0o777)
+
+
 def checklist(plan: Plan) -> str:
     """The intentionally short list of work that still belongs to a human."""
     root = plan.root
@@ -228,7 +253,7 @@ def run_init(args: argparse.Namespace) -> int:
         root = generate(plan)
         if overlay_source is not None:
             overlay_target = root / ".local" / "agents.local.toml"
-            shutil.copy2(overlay_source, overlay_target)
+            copy_compatible_overlay(overlay_source, overlay_target, plan.roles)
     except InitError as error:
         print(f"agag init: {error}", file=sys.stderr)
         return 2

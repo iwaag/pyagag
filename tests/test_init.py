@@ -91,14 +91,31 @@ def test_cli_like_copies_the_sibling_harness_overlay(tmp_path):
     sibling = tmp_path / "sibling"
     source = sibling / ".local" / "agents.local.toml"
     source.parent.mkdir(parents=True)
-    source.write_text('schema = "ag.agent-config.v2"\n', encoding="utf-8")
+    source.write_text(
+        'schema = "ag.agent-config.v2"\n'
+        '[local.harness.claude_code]\n'
+        'command_glob = "/machine/claude"\n'
+        '[roles.coding]\n'
+        'profile = "sonnet"\n'
+        '[roles.front]\n'
+        'profile = "stub"\n',
+        encoding="utf-8",
+    )
 
     code = main([
         "init", "agecho", "--yes", "--dest", str(tmp_path), "--like", str(sibling)
     ])
 
     assert code == 0
-    assert (tmp_path / "agecho" / ".local" / "agents.local.toml").read_text() == source.read_text()
+    copied = (tmp_path / "agecho" / ".local" / "agents.local.toml").read_text()
+    assert 'command_glob = "/machine/claude"' in copied
+    assert "[roles.coding]" not in copied
+    assert '[roles.front]\nprofile = "stub"' in copied
+    # The copied overlay is valid against the generated role set.
+    load_config(
+        tmp_path / "agecho" / "agents.toml",
+        tmp_path / "agecho" / ".local" / "agents.local.toml",
+    )
 
 
 def test_cli_like_refuses_a_missing_overlay_before_generation(tmp_path, capsys):

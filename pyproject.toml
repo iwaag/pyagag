@@ -21,6 +21,3 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agag"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"src/agag/templates" = "agag/templates"

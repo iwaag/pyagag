@@ -262,7 +262,11 @@ def run_init(args: argparse.Namespace) -> int:
         from agag.provision import run_provision
 
         provision_args = argparse.Namespace(
-            root=str(root), admin_env=args.admin_env, description=args.description
+            root=str(root),
+            admin_env=args.admin_env,
+            instance=None,
+            out=None,
+            description=args.description,
         )
         return run_provision(provision_args)
     return 0

@@ -109,6 +109,33 @@ def test_provision_updates_an_existing_channel_description(tmp_path):
     assert ("update_channel_description", 33, "Updated for agecho-lab1") in client.calls
 
 
+def test_provision_accepts_remote_instance_and_output_path(tmp_path):
+    root = project(tmp_path)
+    (root / ".local" / "instance.toml").unlink()
+    credential = tmp_path / "controller" / "agecho-remote.env"
+    client = FakeClient()
+
+    result = provision(
+        root,
+        admin_env=admin_env(tmp_path),
+        instance="agecho-remote",
+        out=credential,
+        client_factory=lambda path: client,
+    )
+
+    assert result.instance == "agecho-remote"
+    assert result.credential_path == credential.resolve()
+    assert credential.stat().st_mode & 0o777 == 0o600
+    assert ("user_by_email", "agecho-remote-bot@zulip.example.invalid") in client.calls
+    assert (
+        "create_channel",
+        "agecho-remote",
+        "The conversational entrance for `agecho-remote`: plain topics ask this instance a "
+        "question, and `agechoplan-…` topics request its work.",
+        [21, 7],
+    ) in client.calls
+
+
 def test_provision_refuses_an_existing_bot_before_any_write(tmp_path):
     root = project(tmp_path)
     client = FakeClient(existing_user={"user_id": 22})

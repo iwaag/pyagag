@@ -35,23 +35,28 @@ class ProvisionResult:
     instance: str
     bot_user_id: int
     bot_email: str
+    credential_path: Path
     channel_created: bool
 
 
-def _project_identity(root: Path) -> tuple[str, str]:
+def _project_identity(root: Path, instance_override: str | None = None) -> tuple[str, str]:
     config_path = root / "agents.toml"
     instance_path = root / ".local" / "instance.toml"
     if not config_path.is_file():
         raise ProvisionError(f"{root} is not an agag project: missing agents.toml")
-    if not instance_path.is_file():
+    if instance_override is None and not instance_path.is_file():
         raise ProvisionError(f"{root} is not provisionable: missing .local/instance.toml")
     try:
         config = tomllib.loads(config_path.read_text(encoding="utf-8"))
-        instance_config = tomllib.loads(instance_path.read_text(encoding="utf-8"))
+        instance_config = (
+            tomllib.loads(instance_path.read_text(encoding="utf-8"))
+            if instance_override is None
+            else {}
+        )
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise ProvisionError(f"cannot read agent identity: {error}") from error
     agent = str(config.get("project", "")).strip()
-    instance = str(instance_config.get("name", "")).strip()
+    instance = str(instance_override or instance_config.get("name", "")).strip()
     if not agent:
         raise ProvisionError(f"{config_path} has no project name")
     if not instance:
@@ -98,13 +103,18 @@ def provision(
     root: Path,
     *,
     admin_env: Path,
+    instance: str | None = None,
+    out: Path | None = None,
     description: str | None = None,
     client_factory: Callable[[Path], ZulipClient] = ZulipClient.from_env,
 ) -> ProvisionResult:
     """Create one bot, its credential file, and its two channel memberships."""
     root = Path(root).expanduser().resolve()
     admin_env = Path(admin_env).expanduser().resolve()
-    agent, instance = _project_identity(root)
+    agent, instance = _project_identity(root, instance)
+    credential_path = (
+        Path(out).expanduser().resolve() if out is not None else root / ".local" / "zulip.env"
+    )
     rendered_description = _description(root, instance, description)
     admin = read_env(admin_env)
     missing = [key for key in ("ZULIP_URL", "ZULIP_EMAIL", "ZULIP_API_KEY") if not admin.get(key)]
@@ -125,7 +135,7 @@ def provision(
     created = client.create_bot(instance, instance)
     bot_user_id = int(created["user_id"])
     bot_email = str(created["email"])
-    _write_bot_env(root / ".local" / "zulip.env", admin, bot_email, str(created["api_key"]))
+    _write_bot_env(credential_path, admin, bot_email, str(created["api_key"]))
 
     admin_user_id = int(client.whoami()["user_id"])
     client.subscribe_channels(["agents"], principals=[bot_user_id])
@@ -144,6 +154,7 @@ def provision(
         instance=instance,
         bot_user_id=bot_user_id,
         bot_email=bot_email,
+        credential_path=credential_path,
         channel_created=channel is None,
     )
 
@@ -158,6 +169,8 @@ def add_provision_parser(subparsers) -> None:
         "--admin-env",
         help=f"owner-class Zulip env (default ${ADMIN_ENV_VAR})",
     )
+    parser.add_argument("--instance", help="instance name (default from .local/instance.toml)")
+    parser.add_argument("--out", help="bot credential output (default <root>/.local/zulip.env)")
     parser.add_argument("--description", help="own-channel description override")
     parser.set_defaults(func=run_provision)
 
@@ -174,6 +187,8 @@ def run_provision(args: argparse.Namespace) -> int:
         result = provision(
             Path(args.root),
             admin_env=Path(admin_env),
+            instance=args.instance,
+            out=Path(args.out) if args.out else None,
             description=args.description,
         )
     except (ProvisionError, ZulipError, OSError, KeyError, ValueError) as error:
@@ -183,7 +198,7 @@ def run_provision(args: argparse.Namespace) -> int:
     print(
         f"Provisioned {result.instance}\n"
         f"  bot: {result.bot_email} (user_id={result.bot_user_id})\n"
-        f"  credentials: {result.root / '.local' / 'zulip.env'} (mode 0600)\n"
+        f"  credentials: {result.credential_path} (mode 0600)\n"
         f"  channels: subscribed to #agents; #{result.instance} {channel_action}\n\n"
         f"Next commands:\n"
         f"  cd {result.root}\n"

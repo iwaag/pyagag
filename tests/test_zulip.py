@@ -247,6 +247,65 @@ def test_channel_discovery_and_subscription_wrappers():
     assert len(calls) == before
 
 
+def test_create_bot_returns_complete_creation_response_without_followups():
+    calls = []
+    client = ZulipClient("https://zulip.example.invalid", "admin@example.invalid", "key")
+    client.call = lambda method, path, params=None, **kw: (
+        calls.append((method, path, params))
+        or {"user_id": 17, "email": "ping-bot@example.invalid", "api_key": "bot-key"}
+    )
+
+    assert client.create_bot("Ping", "ping") == {
+        "user_id": 17,
+        "email": "ping-bot@example.invalid",
+        "api_key": "bot-key",
+    }
+    assert calls == [
+        ("POST", "bots", {"full_name": "Ping", "short_name": "ping", "bot_type": 1})
+    ]
+
+
+def test_create_bot_fills_missing_profile_and_api_key():
+    calls = []
+    client = ZulipClient("https://zulip.example.invalid", "admin@example.invalid", "key")
+
+    def call(method, path, params=None, **kwargs):
+        calls.append((method, path, params))
+        if path == "bots":
+            return {"user_id": "18"}
+        if path == "users/18":
+            return {"user": {"delivery_email": "pong-bot@example.invalid"}}
+        return {"api_key": "regenerated-key"}
+
+    client.call = call
+    assert client.create_bot("Pong", "pong") == {
+        "user_id": 18,
+        "email": "pong-bot@example.invalid",
+        "api_key": "regenerated-key",
+    }
+    assert calls == [
+        ("POST", "bots", {"full_name": "Pong", "short_name": "pong", "bot_type": 1}),
+        ("GET", "users/18", None),
+        ("POST", "bots/18/api_key/regenerate", None),
+    ]
+
+
+def test_create_bot_rejects_incomplete_responses():
+    client = ZulipClient("https://zulip.example.invalid", "admin@example.invalid", "key")
+    client.call = lambda method, path, params=None, **kw: {"result": "success"}
+    with pytest.raises(ZulipError, match="user_id"):
+        client.create_bot("Missing", "missing")
+
+    def no_key(method, path, params=None, **kwargs):
+        if path == "bots":
+            return {"user_id": 19, "email": "missing-key-bot@example.invalid"}
+        return {"result": "success"}
+
+    client.call = no_key
+    with pytest.raises(ZulipError, match="api_key"):
+        client.create_bot("Missing key", "missing-key")
+
+
 def test_create_channel_sends_folder_id_only_when_given():
     calls = []
     client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
@@ -334,6 +393,33 @@ def test_membership_wrappers_read_users_and_subscribe_principals():
         "users/me/subscriptions",
         {"subscriptions": [{"name": "pj-one"}], "principals": [8, 9]},
     )
+
+
+def test_user_lookup_and_channel_description_wrappers():
+    calls = []
+    client = ZulipClient("https://zulip.example.invalid", "admin@example.invalid", "key")
+
+    def call(method, path, params=None, **kwargs):
+        calls.append((method, path, params))
+        if path == "users":
+            return {
+                "members": [
+                    {"user_id": 7, "email": "masked@example.invalid"},
+                    {
+                        "user_id": 8,
+                        "email": "user8@example.invalid",
+                        "delivery_email": "real@example.invalid",
+                    },
+                ]
+            }
+        return {"result": "success"}
+
+    client.call = call
+    assert client.user_by_email("real@example.invalid")["user_id"] == 8
+    assert client.user_by_email("masked@example.invalid")["user_id"] == 7
+    assert client.user_by_email("absent@example.invalid") is None
+    assert client.update_channel_description(23, "New description") == {"result": "success"}
+    assert calls[-1] == ("PATCH", "streams/23", {"description": "New description"})
 
 
 def test_serve_handles_a_dm_and_skips_its_own():

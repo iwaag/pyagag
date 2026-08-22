@@ -279,6 +279,44 @@ class ZulipClient:
     def whoami(self) -> dict:
         return self.call("GET", "users/me")
 
+    def create_bot(self, full_name: str, short_name: str) -> dict:
+        """Create a generic bot and return its usable credentials.
+
+        Zulip versions differ in how much ``POST /bots`` returns.  Fill in
+        the bot profile from the user endpoint and regenerate the API key
+        only when the creation response omitted it.  Callers must check for
+        an existing bot first: regenerating a key invalidates the running
+        bot's credential.
+        """
+        created = self.call(
+            "POST",
+            "bots",
+            {"full_name": full_name, "short_name": short_name, "bot_type": 1},
+        )
+        try:
+            user_id = int(created["user_id"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ZulipError("POST bots did not return a bot user_id") from error
+
+        result = dict(created)
+        result["user_id"] = user_id
+        if not result.get("email"):
+            fetched = self.call("GET", f"users/{user_id}")
+            profile = fetched.get("user", fetched)
+            if profile.get("email"):
+                result["email"] = profile["email"]
+            elif profile.get("delivery_email"):
+                result["email"] = profile["delivery_email"]
+        if not result.get("api_key"):
+            regenerated = self.call("POST", f"bots/{user_id}/api_key/regenerate")
+            if regenerated.get("api_key"):
+                result["api_key"] = regenerated["api_key"]
+
+        missing = [key for key in ("email", "api_key") if not result.get(key)]
+        if missing:
+            raise ZulipError(f"created bot {user_id} is missing {', '.join(missing)}")
+        return result
+
     def register(self) -> tuple[str, int]:
         result = self.call("POST", "register", {"event_types": ["message"]})
         return result["queue_id"], int(result["last_event_id"])
@@ -376,6 +414,21 @@ class ZulipClient:
     def users(self) -> list[dict]:
         """Realm members, bots included, active and deactivated alike."""
         return self.call("GET", "users").get("members", [])
+
+    def user_by_email(self, email: str) -> dict | None:
+        """Find a realm member by visible or owner-visible delivery email."""
+        for user in self.users():
+            if email in (user.get("delivery_email"), user.get("email")):
+                return user
+        return None
+
+    def update_channel_description(self, stream_id: int, description: str) -> dict:
+        """Replace a channel description by numeric stream id."""
+        return self.call(
+            "PATCH",
+            f"streams/{int(stream_id)}",
+            {"description": description},
+        )
 
     def channel_subscribers(self, stream_id: int) -> list[int]:
         """User ids currently subscribed to one channel."""

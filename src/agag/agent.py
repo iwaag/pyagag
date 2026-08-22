@@ -251,8 +251,14 @@ def run_role(
     extra_args: list[str] | None = None,
     on_event=None,
     extra_meta: Mapping[str, object] | None = None,
+    agent: ResolvedAgent | None = None,
 ) -> tuple[str, dict, int]:
     """Resolve `role`, run it once, and return output, record, and exit code.
+
+    `agent` is an already-resolved role for a caller that had to look at the
+    resolution before the run (autolab decides agcode's budget and
+    claude_code's bypass from the harness); without it `role`/`profile` are
+    resolved here.
 
     The tool grant is the role's own (`allowed_tools` in `agents.toml`). The
     remaining keyword arguments pass straight to `run_harness` for the agent
@@ -260,7 +266,8 @@ def run_role(
     `extra_meta` is stamped into the run record beside the harness's own
     facts (autolab records the project a run was for).
     """
-    agent = resolve_spec_role(spec, role, profile_override=profile, home=home)
+    if agent is None:
+        agent = resolve_spec_role(spec, role, profile_override=profile, home=home)
     result = run_harness(
         agent,
         prompt,

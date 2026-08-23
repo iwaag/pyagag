@@ -27,6 +27,7 @@ def agent(
     harness: str,
     environment: dict[str, str] | None = None,
     base_url: str = "http://127.0.0.1:11434",
+    model_options: dict | None = None,
 ) -> ResolvedAgent:
     model = (
         "anthropic/claude-sonnet-5"
@@ -34,7 +35,7 @@ def agent(
         else "ollama/qwen3.6:35b-a3b-coding-nvfp4"
     )
     return ResolvedAgent(
-        "coding", "test-profile", harness, model.split("/", 1)[0], model, {},
+        "coding", "test-profile", harness, model.split("/", 1)[0], model, model_options or {},
         str(command), base_url, environment or {},
     )
 
@@ -226,6 +227,7 @@ def test_agcode_argv_shape_and_model_smuggling_rejected(tmp_path):
         sys.executable, "-m", "agag.agcode",
         "--model", "qwen3.6:35b-a3b-coding-nvfp4",
         "--base-url", "http://127.0.0.1:11434",
+        "--max-tokens", "32768",
         "--max-turns", "3",
     ]
     # The canonical ID stays in records; only the wire name is stripped.
@@ -235,6 +237,16 @@ def test_agcode_argv_shape_and_model_smuggling_rejected(tmp_path):
     assert "--base-url" not in build_argv(without)
     with pytest.raises(ValueError, match="resolved profile"):
         build_argv(resolved, extra_args=["--model", "wrong"])
+
+
+def test_agcode_model_max_tokens_comes_from_the_declared_model_options(tmp_path):
+    resolved = agent(Path(sys.executable), "agcode", model_options={"max_tokens": 1234})
+    argv = build_argv(resolved)
+    assert argv[argv.index("--max-tokens") + 1] == "1234"
+
+    invalid = agent(Path(sys.executable), "agcode", model_options={"max_tokens": 0})
+    with pytest.raises(ValueError, match="positive integer"):
+        build_argv(invalid)
 
 
 def test_agcode_runs_through_the_process_seam(tmp_path, messages_backend):
@@ -324,7 +336,8 @@ def test_stream_argv_shapes(tmp_path):
     assert "--verbose" not in plain
 
     agcode_argv = build_argv(agent(Path(sys.executable), "agcode"), stream=True)
-    assert agcode_argv[-2:] == ["--output-format", "stream-json"]
+    where = agcode_argv.index("--output-format")
+    assert agcode_argv[where + 1] == "stream-json"
     assert "--output-format" not in build_argv(agent(Path(sys.executable), "agcode"))
 
 

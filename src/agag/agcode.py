@@ -33,7 +33,7 @@ from typing import Any
 
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MAX_TURNS = 20
-DEFAULT_DEADLINE_S = 300.0
+DEFAULT_DEADLINE_S = 900.0
 # The response token cap. Sized for a thinking model that writes files: a
 # 35B local model's reasoning plus one whole-file write overran the old
 # 4096 routinely, and every overrun costs a turn and a re-read of the
@@ -41,6 +41,19 @@ DEFAULT_DEADLINE_S = 300.0
 DEFAULT_MAX_TOKENS = 32768
 ANTHROPIC_VERSION = "2023-06-01"
 DUMMY_API_KEY = "agcode-local"  # sent because the API shape wants it; never validated
+
+
+def max_tokens_from_options(options: dict[str, Any]) -> int:
+    """Return the model-configured response cap, or the process default.
+
+    ``agents.toml`` model tables deliberately carry provider-specific options.
+    Keep the validation at the agcode boundary so both its subprocess and
+    in-process callers accept the same safe spelling.
+    """
+    value = options.get("max_tokens", DEFAULT_MAX_TOKENS)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("model option max_tokens must be a positive integer")
+    return value
 
 
 # Machine-readable failure vocabulary (P3). Every non-done run carries exactly

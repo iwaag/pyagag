@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .agent_config import ResolvedAgent
+from .agcode import max_tokens_from_options
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 DEFAULT_OUTPUT_TAIL_CHARS = 2000
@@ -70,6 +71,8 @@ def build_argv(
             argv += ["--base-url", agent.provider_base_url]
         if stream:
             argv += ["--output-format", "stream-json"]
+        if "--max-tokens" not in extra_args:
+            argv += ["--max-tokens", str(max_tokens_from_options(agent.model_options))]
         return argv + extra_args
     if agent.harness == "fake":
         return [agent.command, *extra_args]

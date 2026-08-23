@@ -631,7 +631,7 @@ def test_a_cut_off_turn_is_nudged_and_the_run_continues(backend, tmp_path):
     """A max_tokens stop means the model was mid-action, not finished. Ending
     there reads a cut-off preamble as the final answer and throws the turn
     away — what a local model's long thinking plus one whole-file write does
-    to a 4096-token response."""
+    to the response cap."""
     backend.responses.append(text_response("Now let me create the core:", stop_reason="max_tokens"))
     backend.responses.append(text_response("the whole answer"))
 

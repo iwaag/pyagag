@@ -34,6 +34,11 @@ from typing import Any
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MAX_TURNS = 20
 DEFAULT_DEADLINE_S = 300.0
+# The response token cap. Sized for a thinking model that writes files: a
+# 35B local model's reasoning plus one whole-file write overran the old
+# 4096 routinely, and every overrun costs a turn and a re-read of the
+# grown context to recover from. Backends cap it at what they can serve.
+DEFAULT_MAX_TOKENS = 32768
 ANTHROPIC_VERSION = "2023-06-01"
 DUMMY_API_KEY = "agcode-local"  # sent because the API shape wants it; never validated
 
@@ -286,7 +291,7 @@ class MessagesClient:
         base_url: str,
         model: str,
         *,
-        max_tokens: int = 4096,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
         temperature: float | None = None,
         timeout_s: float = 300.0,
     ):
@@ -483,7 +488,7 @@ def run(
     model: str | None = None,
     max_turns: int = DEFAULT_MAX_TURNS,
     deadline_s: float = DEFAULT_DEADLINE_S,
-    max_tokens: int = 4096,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     temperature: float | None = None,
     task_input: str | None = None,
     tools: Sequence[Tool] = DEFAULT_TOOLS,
@@ -674,8 +679,8 @@ def run(
                 # finished. Ending here reads a cut-off preamble ("Now let me
                 # create the core simulation logic:") as the final answer and
                 # throws the turn away — observed on a 35B local model, whose
-                # long thinking blocks plus one whole-file write overrun a
-                # 4096-token response routinely. So the run continues: any
+                # long thinking blocks plus one whole-file write overrun the
+                # response cap routinely. So the run continues: any
                 # tool call that was cut off is answered as an error (its
                 # arguments are incomplete and must never be executed), and a
                 # response cut off before any call gets a plain nudge. The
@@ -784,7 +789,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS)
     parser.add_argument("--deadline-s", type=float, default=DEFAULT_DEADLINE_S)
-    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     parser.add_argument("--temperature", type=float, default=None)
     # Both at once is a usage error rather than a silent precedence rule —
     # there is no reading of "hand the model this content" that wants two.

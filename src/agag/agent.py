@@ -284,7 +284,12 @@ def run_role(
         result.meta.update(extra_meta)
     run_record = {"schema": "ag.agent-run.v1", **result.meta}
     if record:
-        write_run_record(record, request_id=record.stem, meta=result.meta)
+        write_run_record(
+            record,
+            request_id=record.stem,
+            meta=result.meta,
+            extra_meta=dict(extra_meta) if extra_meta else None,
+        )
     return result.output, run_record, result.exit_code
 
 

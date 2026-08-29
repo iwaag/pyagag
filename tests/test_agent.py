@@ -1,5 +1,6 @@
 """The skeleton: one spec drives instance name, role runs and the listener."""
 
+import json
 from pathlib import Path
 
 from agag import agent, entrance
@@ -109,6 +110,7 @@ def test_run_role_passes_the_grant_and_writes_its_record(tmp_path, monkeypatch):
     assert run_record["schema"] == "ag.agent-run.v1"
     assert run_record["project"] == "demo"
     assert record.exists()
+    assert json.loads(record.read_text(encoding="utf-8"))["project"] == "demo"
     assert calls[0][2]["allowed_tools"] == "Read"
     assert calls[0][2]["cwd"] == tmp_path
 

@@ -403,6 +403,7 @@ def write_run_record(
     *,
     request_id: str,
     meta: dict,
+    extra_meta: dict | None = None,
     outcome: str | None = None,
     failure: str | None = None,
 ) -> Path:
@@ -424,6 +425,8 @@ def write_run_record(
     failure = failure or meta.get("failure")
     if failure:
         record["failure"] = failure
+    if extra_meta:
+        record.update(extra_meta)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return path

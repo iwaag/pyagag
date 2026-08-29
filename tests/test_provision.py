@@ -10,10 +10,11 @@ from agag.provision import AGENT_FOLDER_DESCRIPTION, ProvisionError, provision
 
 
 class FakeClient:
-    def __init__(self, *, existing_user=None, existing_channel=None, folders=()):
+    def __init__(self, *, existing_user=None, existing_channel=None, folders=(), owners=(8,)):
         self.existing_user = existing_user
         self.existing_channel = existing_channel
         self.folders = list(folders)
+        self.owners = list(owners)
         self.calls = []
 
     def user_by_email(self, email):
@@ -31,6 +32,10 @@ class FakeClient:
     def whoami(self):
         self.calls.append(("whoami",))
         return {"user_id": 7}
+
+    def realm_owners(self):
+        self.calls.append(("realm_owners",))
+        return list(self.owners)
 
     def subscribe_channels(self, names, principals=None):
         self.calls.append(("subscribe_channels", names, principals))
@@ -107,7 +112,7 @@ def test_provision_creates_bot_env_and_channels(tmp_path):
         "agecho-lab1",
         "The conversational entrance for `agecho-lab1`: plain topics ask this instance a "
         "question, and `agechoplan-…` topics request its work.",
-        [21, 7],
+        [21, 8],
         3,
     ) in client.calls
     # The realm had no folder, so provisioning minted one and filed the
@@ -169,6 +174,30 @@ def test_provision_leaves_an_already_filed_channel_alone(tmp_path):
     assert not [call for call in client.calls if call[0] == "set_channel_folder"]
 
 
+def test_provision_subscribes_the_realm_owners_not_the_provisioner(tmp_path):
+    root = project(tmp_path)
+    client = FakeClient(owners=[8, 4])
+    result = provision(
+        root, admin_env=admin_env(tmp_path), client_factory=lambda path: client
+    )
+    # 7 is whoami — the dedicated Provisioner account. It holds the
+    # owner-class credentials but reads nothing, so it is not a watcher.
+    assert result.watchers == (8, 4)
+    principals = [call[3] for call in client.calls if call[0] == "create_channel"][0]
+    assert principals == [21, 8, 4] and 7 not in principals
+
+
+def test_provision_falls_back_to_the_caller_when_no_owner_is_visible(tmp_path):
+    root = project(tmp_path)
+    client = FakeClient(owners=[])
+    result = provision(
+        root, admin_env=admin_env(tmp_path), client_factory=lambda path: client
+    )
+    # A channel watched by whoever made it is wrong; one watched by nobody
+    # is worse.
+    assert result.watchers == (7,)
+
+
 def test_provision_accepts_remote_instance_and_output_path(tmp_path):
     root = project(tmp_path)
     (root / ".local" / "instance.toml").unlink()
@@ -192,7 +221,7 @@ def test_provision_accepts_remote_instance_and_output_path(tmp_path):
         "agecho-remote",
         "The conversational entrance for `agecho-remote`: plain topics ask this instance a "
         "question, and `agechoplan-…` topics request its work.",
-        [21, 7],
+        [21, 8],
         3,
     ) in client.calls
 

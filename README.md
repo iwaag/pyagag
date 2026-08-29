@@ -282,10 +282,12 @@ declare, and `--provision` immediately runs the Zulip setup.
 `agag provision [root]` uses the owner-class credentials whose **path** is in
 `AGAG_ZULIP_ADMIN_ENV` (or `--admin-env`). It creates a generic bot, writes
 `<root>/.local/zulip.env` with mode 0600, subscribes the bot to `#agents`, and
-creates or updates the instance's own channel from `params/channel.md`, and
-files that channel in the `agents` channel folder — minting the folder if the
-realm has none, and moving a channel that already existed unfiled. (`--folder`
-names another; `--no-folder` leaves it where it is.) It
+creates or updates the instance's own channel from `params/channel.md`. That
+channel is subscribed by the realm's organization owners — the humans who
+watch the new agent, never the provisioner account itself — and filed in the
+`agents` channel folder, which is minted if the realm has none and which a
+channel that already existed unfiled is moved into (`--folder` names another;
+`--no-folder` leaves it where it is). It
 refuses when the bot email already exists rather than regenerating a running
 bot's key. The remaining human checklist is the once-per-realm provisioner
 account, an optional per-agent Plane account, and permanent listener service

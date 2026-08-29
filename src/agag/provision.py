@@ -47,6 +47,7 @@ class ProvisionResult:
     channel_created: bool
     folder: str | None = None
     folder_id: int | None = None
+    watchers: tuple[int, ...] = ()
 
 
 def _project_identity(root: Path, instance_override: str | None = None) -> tuple[str, str]:
@@ -99,6 +100,23 @@ def _folder_id(client: ZulipClient, name: str) -> int:
     if existing is not None:
         return int(existing["id"])
     return client.create_channel_folder(name, AGENT_FOLDER_DESCRIPTION)
+
+
+def _watchers(client: ZulipClient) -> list[int]:
+    """The humans a new instance's own channel is opened for.
+
+    The realm's organization owners, resolved at provisioning time. This used
+    to be `whoami()` — whoever held the owner-class credentials — which was
+    right only while that was the developer's own account. Once agag got a
+    dedicated `Provisioner` account (`AGAG_ZULIP_ADMIN_ENV`), every channel
+    it made was subscribed by a machine identity nobody reads and by no human
+    at all; three agents were provisioned that way before anyone noticed.
+
+    Falling back to the caller is deliberate: a channel watched by whoever
+    made it is wrong, but a channel watched by nobody is worse.
+    """
+    owners = client.realm_owners()
+    return owners or [int(client.whoami()["user_id"])]
 
 
 def _write_bot_env(path: Path, admin: dict[str, str], email: str, api_key: str) -> None:
@@ -165,14 +183,14 @@ def provision(
     bot_email = str(created["email"])
     _write_bot_env(credential_path, admin, bot_email, str(created["api_key"]))
 
-    admin_user_id = int(client.whoami()["user_id"])
+    watchers = _watchers(client)
     client.subscribe_channels(["agents"], principals=[bot_user_id])
     folder_id = _folder_id(client, folder) if folder else None
     channel = next((item for item in client.channels() if item.get("name") == instance), None)
     client.create_channel(
         instance,
         rendered_description,
-        principals=[bot_user_id, admin_user_id],
+        principals=[bot_user_id, *watchers],
         folder_id=folder_id,
     )
     if channel is not None:
@@ -193,6 +211,7 @@ def provision(
         channel_created=channel is None,
         folder=folder if folder_id is not None else None,
         folder_id=folder_id,
+        watchers=tuple(watchers),
     )
 
 
@@ -246,11 +265,13 @@ def run_provision(args: argparse.Namespace) -> int:
         return 2
     channel_action = "created" if result.channel_created else "updated"
     filed = f" (folder {result.folder!r})" if result.folder else ""
+    watching = ", ".join(str(user) for user in result.watchers) or "nobody"
     print(
         f"Provisioned {result.instance}\n"
         f"  bot: {result.bot_email} (user_id={result.bot_user_id})\n"
         f"  credentials: {result.credential_path} (mode 0600)\n"
-        f"  channels: subscribed to #agents; #{result.instance} {channel_action}{filed}\n\n"
+        f"  channels: subscribed to #agents; #{result.instance} {channel_action}{filed}\n"
+        f"  watching #{result.instance}: user ids {watching}\n\n"
         f"Next commands:\n"
         f"  cd {result.root}\n"
         f"  uv run python -m {result.agent}.intro\n"

@@ -81,6 +81,9 @@ ROOTCHAT_HISTORY = 200
 #: `num_before` of a call already being made.
 LAST_SPEAKER_LOOKBACK = 30
 
+# Zulip's organization-owner role id, as `GET /users` reports it.
+OWNER_ROLE = 100
+
 # Zulip's resolved-topic marker: the topic is renamed to "✔ <topic>".
 RESOLVED_TOPIC_PREFIX = "✔ "
 
@@ -422,6 +425,21 @@ class ZulipClient:
     def users(self) -> list[dict]:
         """Realm members, bots included, active and deactivated alike."""
         return self.call("GET", "users").get("members", [])
+
+    def realm_owners(self) -> list[int]:
+        """Active, non-bot organization owners (Zulip role 100), by user id.
+
+        Who owns the realm is the closest machine-readable answer to "which
+        humans should see a new agent". It is resolved here, at provisioning
+        time, so no generated agent has to carry a realm-local user id.
+        """
+        return [
+            int(user["user_id"])
+            for user in self.users()
+            if user.get("role") == OWNER_ROLE
+            and not user.get("is_bot")
+            and user.get("is_active", True)
+        ]
 
     def user_by_email(self, email: str) -> dict | None:
         """Find a realm member by visible or owner-visible delivery email."""

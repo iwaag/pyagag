@@ -259,7 +259,7 @@ def run_init(args: argparse.Namespace) -> int:
         return 2
     print(checklist(plan))
     if args.provision:
-        from agag.provision import run_provision
+        from agag.provision import AGENT_FOLDER, run_provision
 
         provision_args = argparse.Namespace(
             root=str(root),
@@ -267,6 +267,7 @@ def run_init(args: argparse.Namespace) -> int:
             instance=None,
             out=None,
             description=args.description,
+            folder=AGENT_FOLDER,
         )
         return run_provision(provision_args)
     return 0

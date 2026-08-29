@@ -6,13 +6,14 @@ import pytest
 
 from agag import init
 from agag.cli import main
-from agag.provision import ProvisionError, provision
+from agag.provision import AGENT_FOLDER_DESCRIPTION, ProvisionError, provision
 
 
 class FakeClient:
-    def __init__(self, *, existing_user=None, existing_channel=None):
+    def __init__(self, *, existing_user=None, existing_channel=None, folders=()):
         self.existing_user = existing_user
         self.existing_channel = existing_channel
+        self.folders = list(folders)
         self.calls = []
 
     def user_by_email(self, email):
@@ -39,12 +40,26 @@ class FakeClient:
         self.calls.append(("channels",))
         return [self.existing_channel] if self.existing_channel else []
 
-    def create_channel(self, name, description, principals):
-        self.calls.append(("create_channel", name, description, principals))
+    def create_channel(self, name, description, principals, folder_id=None):
+        self.calls.append(("create_channel", name, description, principals, folder_id))
         return {"subscribed": []}
 
     def update_channel_description(self, stream_id, description):
         self.calls.append(("update_channel_description", stream_id, description))
+        return {"result": "success"}
+
+    def channel_folder_by_name(self, name):
+        self.calls.append(("channel_folder_by_name", name))
+        return next((f for f in self.folders if f["name"] == name), None)
+
+    def create_channel_folder(self, name, description=""):
+        self.calls.append(("create_channel_folder", name, description))
+        folder = {"id": 3, "name": name, "description": description}
+        self.folders.append(folder)
+        return folder["id"]
+
+    def set_channel_folder(self, stream_id, folder_id):
+        self.calls.append(("set_channel_folder", stream_id, folder_id))
         return {"result": "success"}
 
 
@@ -93,12 +108,43 @@ def test_provision_creates_bot_env_and_channels(tmp_path):
         "The conversational entrance for `agecho-lab1`: plain topics ask this instance a "
         "question, and `agechoplan-…` topics request its work.",
         [21, 7],
+        3,
     ) in client.calls
+    # The realm had no folder, so provisioning minted one and filed the
+    # channel at creation; no move was needed.
+    assert result.folder == "agents" and result.folder_id == 3
+    assert ("create_channel_folder", "agents", AGENT_FOLDER_DESCRIPTION) in client.calls
+    assert not [call for call in client.calls if call[0] == "set_channel_folder"]
+
+
+def test_provision_reuses_an_existing_agents_folder(tmp_path):
+    root = project(tmp_path)
+    client = FakeClient(folders=[{"id": 9, "name": "agents"}])
+    result = provision(
+        root, admin_env=admin_env(tmp_path), client_factory=lambda path: client
+    )
+    assert result.folder_id == 9
+    # Folder creation is not idempotent; the lookup by name is what stops a
+    # second agent from trying to mint a duplicate.
+    assert not [call for call in client.calls if call[0] == "create_channel_folder"]
+
+
+def test_provision_leaves_the_channel_unfiled_when_asked(tmp_path):
+    root = project(tmp_path)
+    client = FakeClient()
+    result = provision(
+        root, admin_env=admin_env(tmp_path), folder=None, client_factory=lambda path: client
+    )
+    assert result.folder is None and result.folder_id is None
+    assert not [call for call in client.calls if "folder" in call[0]]
 
 
 def test_provision_updates_an_existing_channel_description(tmp_path):
     root = project(tmp_path)
-    client = FakeClient(existing_channel={"stream_id": 33, "name": "agecho-lab1"})
+    client = FakeClient(
+        existing_channel={"stream_id": 33, "name": "agecho-lab1"},
+        folders=[{"id": 9, "name": "agents"}],
+    )
     result = provision(
         root,
         admin_env=admin_env(tmp_path),
@@ -107,6 +153,20 @@ def test_provision_updates_an_existing_channel_description(tmp_path):
     )
     assert not result.channel_created
     assert ("update_channel_description", 33, "Updated for agecho-lab1") in client.calls
+    # `create_channel` only joined the existing channel, so its `folder_id`
+    # filed nothing: an unfiled channel is moved instead. This is the route
+    # by which a channel older than its realm's folders gets filed.
+    assert ("set_channel_folder", 33, 9) in client.calls
+
+
+def test_provision_leaves_an_already_filed_channel_alone(tmp_path):
+    root = project(tmp_path)
+    client = FakeClient(
+        existing_channel={"stream_id": 33, "name": "agecho-lab1", "folder_id": 9},
+        folders=[{"id": 9, "name": "agents"}],
+    )
+    provision(root, admin_env=admin_env(tmp_path), client_factory=lambda path: client)
+    assert not [call for call in client.calls if call[0] == "set_channel_folder"]
 
 
 def test_provision_accepts_remote_instance_and_output_path(tmp_path):
@@ -133,6 +193,7 @@ def test_provision_accepts_remote_instance_and_output_path(tmp_path):
         "The conversational entrance for `agecho-remote`: plain topics ask this instance a "
         "question, and `agechoplan-…` topics request its work.",
         [21, 7],
+        3,
     ) in client.calls
 
 

@@ -15,8 +15,16 @@ from agag.zulip import ZulipClient, ZulipError, read_env
 
 ADMIN_ENV_VAR = "AGAG_ZULIP_ADMIN_ENV"
 
+#: Where an instance's own channel is filed. Every agent channel in one
+#: folder is what makes a realm readable once there are more than a few of
+#: them; `#agents` itself belongs there too, as the board they share.
+AGENT_FOLDER = "agents"
+AGENT_FOLDER_DESCRIPTION = "Agent instance channels and the shared #agents board"
+
 __all__ = [
     "ADMIN_ENV_VAR",
+    "AGENT_FOLDER",
+    "AGENT_FOLDER_DESCRIPTION",
     "ProvisionError",
     "ProvisionResult",
     "add_provision_parser",
@@ -37,6 +45,8 @@ class ProvisionResult:
     bot_email: str
     credential_path: Path
     channel_created: bool
+    folder: str | None = None
+    folder_id: int | None = None
 
 
 def _project_identity(root: Path, instance_override: str | None = None) -> tuple[str, str]:
@@ -78,6 +88,19 @@ def _description(root: Path, instance: str, override: str | None) -> str:
     return description.replace("{instance}", instance)
 
 
+def _folder_id(client: ZulipClient, name: str) -> int:
+    """The id of the channel folder `name`, created if the realm lacks it.
+
+    Folder creation is not idempotent — Zulip rejects a duplicate name — so
+    the lookup comes first, and it is by display name because the id is a
+    realm-local fact no generated agent can carry.
+    """
+    existing = client.channel_folder_by_name(name)
+    if existing is not None:
+        return int(existing["id"])
+    return client.create_channel_folder(name, AGENT_FOLDER_DESCRIPTION)
+
+
 def _write_bot_env(path: Path, admin: dict[str, str], email: str, api_key: str) -> None:
     lines = [
         f"ZULIP_URL={admin['ZULIP_URL']}",
@@ -106,9 +129,14 @@ def provision(
     instance: str | None = None,
     out: Path | None = None,
     description: str | None = None,
+    folder: str | None = AGENT_FOLDER,
     client_factory: Callable[[Path], ZulipClient] = ZulipClient.from_env,
 ) -> ProvisionResult:
-    """Create one bot, its credential file, and its two channel memberships."""
+    """Create one bot, its credential file, and its two channel memberships.
+
+    `folder` is the channel folder the instance's own channel is filed in,
+    by name; `None` leaves it unfiled.
+    """
     root = Path(root).expanduser().resolve()
     admin_env = Path(admin_env).expanduser().resolve()
     agent, instance = _project_identity(root, instance)
@@ -139,14 +167,21 @@ def provision(
 
     admin_user_id = int(client.whoami()["user_id"])
     client.subscribe_channels(["agents"], principals=[bot_user_id])
+    folder_id = _folder_id(client, folder) if folder else None
     channel = next((item for item in client.channels() if item.get("name") == instance), None)
     client.create_channel(
         instance,
         rendered_description,
         principals=[bot_user_id, admin_user_id],
+        folder_id=folder_id,
     )
     if channel is not None:
         client.update_channel_description(int(channel["stream_id"]), rendered_description)
+        # `folder_id` above filed nothing: the channel already existed, so
+        # the call only joined it. Re-provisioning is also how a channel
+        # created before the realm had folders gets filed.
+        if folder_id is not None and channel.get("folder_id") != folder_id:
+            client.set_channel_folder(int(channel["stream_id"]), folder_id)
 
     return ProvisionResult(
         root=root,
@@ -156,6 +191,8 @@ def provision(
         bot_email=bot_email,
         credential_path=credential_path,
         channel_created=channel is None,
+        folder=folder if folder_id is not None else None,
+        folder_id=folder_id,
     )
 
 
@@ -172,6 +209,18 @@ def add_provision_parser(subparsers) -> None:
     parser.add_argument("--instance", help="instance name (default from .local/instance.toml)")
     parser.add_argument("--out", help="bot credential output (default <root>/.local/zulip.env)")
     parser.add_argument("--description", help="own-channel description override")
+    parser.add_argument(
+        "--folder",
+        default=AGENT_FOLDER,
+        help=f"channel folder for the instance's own channel (default {AGENT_FOLDER})",
+    )
+    parser.add_argument(
+        "--no-folder",
+        dest="folder",
+        action="store_const",
+        const=None,
+        help="leave the instance's own channel unfiled",
+    )
     parser.set_defaults(func=run_provision)
 
 
@@ -190,16 +239,18 @@ def run_provision(args: argparse.Namespace) -> int:
             instance=args.instance,
             out=Path(args.out) if args.out else None,
             description=args.description,
+            folder=args.folder,
         )
     except (ProvisionError, ZulipError, OSError, KeyError, ValueError) as error:
         print(f"agag provision: {error}", file=sys.stderr)
         return 2
     channel_action = "created" if result.channel_created else "updated"
+    filed = f" (folder {result.folder!r})" if result.folder else ""
     print(
         f"Provisioned {result.instance}\n"
         f"  bot: {result.bot_email} (user_id={result.bot_user_id})\n"
         f"  credentials: {result.credential_path} (mode 0600)\n"
-        f"  channels: subscribed to #agents; #{result.instance} {channel_action}\n\n"
+        f"  channels: subscribed to #agents; #{result.instance} {channel_action}{filed}\n\n"
         f"Next commands:\n"
         f"  cd {result.root}\n"
         f"  uv run python -m {result.agent}.intro\n"

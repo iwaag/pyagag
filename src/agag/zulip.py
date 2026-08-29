@@ -376,7 +376,8 @@ class ZulipClient:
 
         `folder_id` places a newly created channel into a channel folder
         (Zulip 11.0+). It only applies at creation: joining an existing
-        channel leaves that channel's folder alone.
+        channel leaves that channel's folder alone, and
+        `set_channel_folder` is how that one is moved.
         """
         params: dict = {
             "subscriptions": [{"name": name, "description": description}],
@@ -390,6 +391,13 @@ class ZulipClient:
     def channel_folders(self) -> list[dict]:
         """Channel folders in the realm, unarchived only, each with its `id`."""
         return self.call("GET", "channel_folders").get("channel_folders", [])
+
+    def channel_folder_by_name(self, name: str) -> dict | None:
+        """One unarchived channel folder by its display name, or `None`."""
+        for folder in self.channel_folders():
+            if folder.get("name") == name:
+                return folder
+        return None
 
     def create_channel_folder(self, name: str, description: str = "") -> int:
         """Create a channel folder and return its id.
@@ -428,6 +436,20 @@ class ZulipClient:
             "PATCH",
             f"streams/{int(stream_id)}",
             {"description": description},
+        )
+
+    def set_channel_folder(self, stream_id: int, folder_id: int) -> dict:
+        """Move an existing channel into a channel folder by numeric ids.
+
+        `create_channel`'s `folder_id` only files a channel at creation, so
+        this is the only way to file one that already exists — including
+        every channel created before its realm had folders. Verified against
+        Zulip 12.2 (feature level 500).
+        """
+        return self.call(
+            "PATCH",
+            f"streams/{int(stream_id)}",
+            {"folder_id": int(folder_id)},
         )
 
     def channel_subscribers(self, stream_id: int) -> list[int]:

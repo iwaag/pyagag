@@ -534,6 +534,20 @@ class ZulipClient:
         )
         return int(result["id"])
 
+    def add_reaction(self, message_id: int, emoji_name: str = "eyes") -> None:
+        """React to a message — an acknowledgement that is not a post.
+
+        A bot *post* into a run topic re-serves that topic's owner: it is the
+        resume mechanism itself. So a bot that wants to say "seen" without
+        waking anybody has exactly one move, because Zulip reactions raise no
+        message event and no mention. Reacting twice is an error the caller
+        can ignore; the reaction is already there.
+        """
+        self.call(
+            "POST", f"messages/{int(message_id)}/reactions",
+            {"emoji_name": emoji_name},
+        )
+
     def topic_history(self, channel: str, topic: str, num_before: int = 50) -> list[dict]:
         """The topic's conversation, newest last, raw text — `dm_history`'s
         channel analog."""

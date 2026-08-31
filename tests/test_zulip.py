@@ -221,6 +221,16 @@ def test_resolve_topic_skips_an_already_resolved_topic():
     assert len(calls) == 1 and calls[0][0] == "PATCH"
 
 
+def test_add_reaction_acknowledges_without_posting_a_message():
+    """The ack must not be a post: a bot message in a run topic re-serves
+    its owner, so `seen` has to travel as a reaction."""
+    calls = []
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+    client.call = lambda *a, **k: calls.append(a) or {}
+    client.add_reaction(4211, "eyes")
+    assert calls == [("POST", "messages/4211/reactions", {"emoji_name": "eyes"})]
+
+
 def test_channel_discovery_and_subscription_wrappers():
     calls = []
     client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")

@@ -40,6 +40,7 @@ def files(tmp_path: Path, body: str = BASE, overlay: str | None = None) -> tuple
         (BASE.replace('harness = "agcode"', 'harness = "ollama"'), "E_UNKNOWN_HARNESS"),
         (BASE.replace('model = "ollama/local-model"', 'model = "ollama/absent"'), "E_UNKNOWN_MODEL"),
         (BASE.replace('harness = "agcode"', 'harness = "claude_code"', 1), "E_INCOMPATIBLE"),
+        (BASE.replace('harness = "agcode"', 'harness = "gemini_cli"', 1), "E_INCOMPATIBLE"),
         (BASE.replace('profile = "local"', 'profile = "absent"'), "E_UNKNOWN_PROFILE"),
         (BASE.replace("requires = []", 'requires = ["ui_actions"]'), "E_CAPABILITY_UNMET"),
     ],
@@ -226,3 +227,48 @@ def test_v1_roles_carry_no_grant(tmp_path):
     main, local = files(tmp_path)
     config, overlay = load_config(main, local)
     assert resolve_role(config, overlay, "generator", check_available=False).allowed_tools is None
+
+
+GEMINI = BASE + '''[models."google/gemini-2.5-flash"]
+[profiles.gemini]
+harness = "gemini_cli"
+model = "google/gemini-2.5-flash"
+'''
+
+
+def test_gemini_profile_resolves_to_the_gemini_command(tmp_path, monkeypatch):
+    """gemini_cli takes the native name, serves google only, defaults to the
+    `gemini` on PATH, and carries no secret: the CLI owns its own key."""
+    gemini = tmp_path / "bin" / "gemini"
+    gemini.parent.mkdir()
+    gemini.write_text("#!/bin/sh\n", encoding="utf-8")
+    gemini.chmod(0o755)
+    monkeypatch.setenv("PATH", str(gemini.parent) + os.pathsep + os.environ["PATH"])
+    main, local = files(tmp_path, GEMINI, overlay='''schema = "ag.agent-config.v1"
+[roles.generator]
+profile = "gemini"
+''')
+    config, overlay = load_config(main, local)
+    resolved = resolve_role(config, overlay, "generator")
+
+    assert resolved.harness == "gemini_cli"
+    assert resolved.provider == "google"
+    assert resolved.command == str(gemini)
+    assert resolved.model == "google/gemini-2.5-flash"
+    assert resolved.native_model == "gemini-2.5-flash"
+    assert resolved.environment == {}
+    main.write_text(GEMINI.replace("requires = []", 'requires = ["agentic_tools", "workspace_fs"]'), encoding="utf-8")
+    config, overlay = load_config(main, local)
+    assert resolve_role(config, overlay, "generator").harness == "gemini_cli"
+
+
+def test_gemini_profile_without_the_executable_is_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    main, local = files(tmp_path, GEMINI, overlay='''schema = "ag.agent-config.v1"
+[roles.generator]
+profile = "gemini"
+''')
+    config, overlay = load_config(main, local)
+    with pytest.raises(AgentConfigError) as caught:
+        resolve_role(config, overlay, "generator")
+    assert caught.value.code == "E_UNAVAILABLE"

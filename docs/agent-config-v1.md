@@ -142,6 +142,7 @@ The v1 harness vocabulary is closed:
 |---|---|---|---|
 | `claude_code` | `claude -p --output-format json --model <native-name>` | `anthropic` only | `agentic_tools`, `workspace_fs` |
 | `agcode` | `python -m agag.agcode --model <native-name> [--base-url <endpoint>]` | any provider serving a Messages API endpoint | `agentic_tools`, `workspace_fs` |
+| `gemini_cli` | `gemini -p "" -o json -m <native-name> --skip-trust --approval-mode <mode>` | `google` only | `agentic_tools`, `workspace_fs` |
 | `fake` | configured test executable | any | none |
 
 Ollama is a provider, not a harness. `agcode` is the vocabulary's one direct
@@ -159,12 +160,26 @@ whenever one is resolved. Note the spelling: agcode posts to
 `{base_url}/v1/messages`, so the declared endpoint is the bare base URL, with
 no OpenAI-compatible `/v1` suffix.
 
-The vocabulary has changed twice, and neither change carries a compatibility
+`gemini_cli` drives Google's Gemini CLI headless, and differs from
+`claude_code` in two ways a consumer should know. Permissions are an
+**approval mode**, not a grant: headless `default` mode has nobody to answer
+its prompt, so `run_harness()` always names one — `yolo` for
+`skip_permissions`, whatever `--approval-mode` the caller put in
+`extra_args` otherwise (a read-only role passes `plan`), and `yolo` when
+neither says. The role's `allowed_tools` has no Gemini spelling and is not
+passed. And **the exit code is not a failure signal**: an API failure prints
+`"status": "error"` and exits 0, so failure is read from the result document
+into `is_error`. The CLI resolves its own API key (no `local.secrets`
+plumbing exists for `google`), prints token counts but no cost, and needs
+`--skip-trust` because a workspace nobody trusted interactively is refused.
+
+The vocabulary has changed three times, and no change carries a compatibility
 shim — silent fallback is what this contract forbids. `agcode` was **added**
 after `claude_code` and `fake`; a pyagag older than that commit rejects
 `harness = "agcode"` as `E_UNKNOWN_HARNESS`. `opencode` was later **removed**;
 a pyagag newer than that commit rejects `harness = "opencode"` the same way.
-A consumer moves its pin and its profiles together.
+`gemini_cli` was **added** after that, with the same consequence for older
+pins. A consumer moves its pin and its profiles together.
 
 A canonical model ID is `<provider>/<native-name>`. The provider matches
 `[a-z0-9_-]+`; the native name is non-empty and contains no slash or

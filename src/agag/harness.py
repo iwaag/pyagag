@@ -74,6 +74,22 @@ def build_argv(
         if "--max-tokens" not in extra_args:
             argv += ["--max-tokens", str(max_tokens_from_options(agent.model_options))]
         return argv + extra_args
+    if agent.harness == "gemini_cli":
+        # `-p` is what leaves interactive mode; its argument is appended to
+        # stdin, so an empty one hands the stdin prompt through untouched.
+        # `--skip-trust`: an untrusted cwd otherwise exits 55 and forces the
+        # approval mode back to `default`. Headless `default` has nobody to
+        # answer the prompt, so the mode is always chosen here: the caller's
+        # bypass is `yolo`, a caller that names a mode (a read-only role's
+        # `plan`) keeps it, and `yolo` is the default otherwise — the
+        # `allowed_tools` grant has no Gemini spelling and is not passed.
+        output = "stream-json" if stream else "json"
+        argv = [agent.command, "-p", "", "-o", output, "-m", agent.native_model, "--skip-trust"]
+        if skip_permissions or "--approval-mode" not in extra_args:
+            argv += ["--approval-mode", "yolo"]
+        for directory in add_dirs or []:
+            argv += ["--include-directories", directory]
+        return argv + extra_args
     if agent.harness == "fake":
         return [agent.command, *extra_args]
     raise ValueError(f"unsupported harness: {agent.harness}")
@@ -117,6 +133,126 @@ def _extract_claude(raw: str) -> tuple[str, dict]:
     if isinstance(doc.get("usage"), dict):
         meta["usage"] = doc["usage"]
     return doc.get("result") if isinstance(doc.get("result"), str) else "", meta
+
+
+def _extract_gemini(raw: str) -> tuple[str, dict]:
+    """Read gemini CLI's `-o json` document or its `-o stream-json` lines.
+
+    The single document is `{"session_id", "response", "stats"}`; the stream
+    ends with `{"type": "result", "status", "error"?, "stats"}` and carries
+    the answer in earlier `{"type": "message", "role": "assistant"}` lines.
+    Either way the exit code says nothing — an API failure printed
+    `"status": "error"` and exited 0 (2026-09-04) — so failure is read from
+    the document into `is_error`/`subtype`, which run_harness already names.
+    Token counts become `usage`; the CLI prints no cost, so none is claimed.
+    """
+    try:
+        doc = json.loads(raw)
+        streamed = False
+    except json.JSONDecodeError:
+        doc = _result_line(raw)
+        streamed = True
+        if doc is None:
+            return raw, {}
+    if not isinstance(doc, dict):
+        return raw, {}
+    meta: dict = {}
+    error = doc.get("error")
+    if doc.get("status") == "error" or (isinstance(error, dict) and error):
+        meta["is_error"] = True
+        meta["subtype"] = (error or {}).get("type", "error") if isinstance(error, dict) else "error"
+    else:
+        meta["is_error"] = False
+    stats = doc.get("stats") if isinstance(doc.get("stats"), dict) else {}
+    usage = _gemini_usage(stats)
+    if usage:
+        meta["usage"] = usage
+    turns = sum(
+        model.get("api", {}).get("totalRequests", 0)
+        for model in stats.get("models", {}).values()
+        if isinstance(model, dict) and isinstance(model.get("api"), dict)
+    )
+    if turns:
+        meta["num_turns"] = turns
+    if streamed:
+        output = _gemini_stream_text(raw)
+    else:
+        output = doc.get("response") if isinstance(doc.get("response"), str) else ""
+    if meta["is_error"] and not output.strip() and isinstance(error, dict):
+        output = str(error.get("message", ""))
+    return output, meta
+
+
+def _gemini_usage(stats: dict) -> dict:
+    """Token counts as `usage`, whichever of the two stat spellings arrived.
+
+    `-o json` nests them per model as `stats.models.<name>.tokens` with the
+    keys `input`/`candidates`/`cached`/`thoughts`/`tool`; the stream's result
+    line writes `input_tokens`/`output_tokens`/`cached` flat on `stats` (and
+    again under `stats.models.<name>`). The model name is the one the CLI
+    *used*, not the one asked for — a `-m gemini-2.5-flash` run reported
+    `gemini-3.5-flash` — so nothing is looked up by name: the flat spelling
+    is read when present, else the per-model tables are summed.
+    """
+    spellings = (
+        ("input_tokens", "input_tokens"), ("output_tokens", "output_tokens"),
+        ("cached_tokens", "cached_tokens"), ("cached", "cached_tokens"),
+        ("thoughts_tokens", "thoughts_tokens"), ("tool_tokens", "tool_tokens"),
+        ("input", "input_tokens"), ("candidates", "output_tokens"),
+        ("thoughts", "thoughts_tokens"), ("tool", "tool_tokens"),
+    )
+
+    def read(table: dict) -> dict:
+        found: dict = {}
+        for key, spelled in spellings:
+            value = table.get(key)
+            if isinstance(value, (int, float)) and spelled not in found:
+                found[spelled] = value
+        return found
+
+    usage = read(stats)
+    if "input_tokens" in usage:
+        return usage
+    totals: dict = {}
+    models = stats.get("models")
+    for model in (models.values() if isinstance(models, dict) else ()):
+        if not isinstance(model, dict):
+            continue
+        table = model.get("tokens") if isinstance(model.get("tokens"), dict) else model
+        for key, value in read(table).items():
+            totals[key] = totals.get(key, 0) + value
+    return totals
+
+
+def _gemini_stream_text(raw: str) -> str:
+    """The assistant's text from a stream-json capture: every
+    `{"type": "message", "role": "assistant"}` line's `content`, joined —
+    chunks marked `delta` run together, whole messages get a newline."""
+    parts: list[str] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "message":
+            continue
+        if event.get("role") != "assistant":
+            continue
+        content = event.get("content")
+        if isinstance(content, list):
+            content = "".join(
+                part.get("text", "") for part in content if isinstance(part, dict)
+            )
+        if not isinstance(content, str):
+            continue
+        if event.get("delta") or not parts:
+            parts.append(content)
+        else:
+            parts.append("\n" + content)
+    return "".join(parts)
 
 
 def _extract_agcode(raw: str) -> tuple[str, dict]:
@@ -264,7 +400,8 @@ def run_harness(
             {**meta, "outcome": "aborted", "failure": "timeout"},
         )
     stream = (
-        (on_event is not None or stream) and agent.harness in ("claude_code", "agcode")
+        (on_event is not None or stream)
+        and agent.harness in ("claude_code", "agcode", "gemini_cli")
     )
     try:
         argv = build_argv(
@@ -347,6 +484,8 @@ def run_harness(
         output, reported = _extract_claude(raw)
     elif agent.harness == "agcode":
         output, reported = _extract_agcode(raw)
+    elif agent.harness == "gemini_cli":
+        output, reported = _extract_gemini(raw)
     else:
         # `fake`: whatever the stub printed is the output, minus the trailing
         # newline `print` adds, and no statistics of its own. The extractor

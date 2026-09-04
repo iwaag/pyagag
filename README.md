@@ -5,7 +5,7 @@
 record convention. The import package is `agag`.
 
 `run_harness()` drives one harness process per run — `claude_code`, `agcode`,
-or the test-only `fake` — and normalizes its result. It keeps the
+`gemini_cli`, or the test-only `fake` — and normalizes its result. It keeps the
 subprocess's real working directory and inherited `PWD` environment value
 aligned. This is the shared first defense against harnesses that trust `PWD`;
 consumers may deliberately add a CLI-native directory option as a second,

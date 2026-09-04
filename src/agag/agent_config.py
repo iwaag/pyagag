@@ -20,15 +20,19 @@ SCHEMA = "ag.agent-config.v1"
 #: part of the role and a role without one is `E_SCHEMA`.
 SCHEMA_V2 = "ag.agent-config.v2"
 SCHEMAS = frozenset({SCHEMA, SCHEMA_V2})
-CANONICAL_HARNESSES = {"claude_code", "agcode", "fake"}
+CANONICAL_HARNESSES = {"claude_code", "agcode", "gemini_cli", "fake"}
 INTRINSIC_CAPABILITIES = {
     "claude_code": {"agentic_tools", "workspace_fs"},
     "agcode": {"agentic_tools", "workspace_fs"},
+    "gemini_cli": {"agentic_tools", "workspace_fs"},
     "fake": set(),
 }
 # Harnesses whose CLI takes the provider-native model name rather than the
 # canonical provider/name ID. The canonical spelling still travels in records.
-NATIVE_MODEL_HARNESSES = frozenset({"claude_code", "agcode"})
+NATIVE_MODEL_HARNESSES = frozenset({"claude_code", "agcode", "gemini_cli"})
+# Harnesses bound to one provider: the CLI carries its own account, so a
+# model from anyone else is a configuration error, not a runtime surprise.
+HARNESS_PROVIDER = {"claude_code": "anthropic", "gemini_cli": "google"}
 MODEL_ID_RE = re.compile(r"^[a-z0-9_-]+/[^/\s]+$")
 
 
@@ -160,7 +164,8 @@ def _validate_committed(config: dict[str, Any]) -> None:
             raise AgentConfigError("E_BAD_MODEL_ID", f"profile {name!r}: malformed model {model!r}")
         if model not in models:
             raise AgentConfigError("E_UNKNOWN_MODEL", f"profile {name!r}: undeclared model {model!r}")
-        if harness == "claude_code" and model.split("/", 1)[0] != "anthropic":
+        bound = HARNESS_PROVIDER.get(harness)
+        if bound and model.split("/", 1)[0] != bound:
             raise AgentConfigError("E_INCOMPATIBLE", f"profile {name!r}: {harness} cannot serve {model}")
     for role, settings in roles.items():
         if not isinstance(settings, dict):
@@ -193,7 +198,7 @@ def _resolve_command(harness: str, overlay: dict[str, Any], *, check_available: 
     # that runs ``python -m agag.agcode``. sys.executable is absolute, which
     # skips the PATH lookup below and satisfies the file/exec checks; an
     # overlay command may still point at a foreign interpreter.
-    defaults = {"claude_code": "claude", "agcode": sys.executable}
+    defaults = {"claude_code": "claude", "agcode": sys.executable, "gemini_cli": "gemini"}
     command = os.path.expanduser(command or defaults.get(harness, ""))
     resolved = shutil.which(command) if command and not Path(command).is_absolute() else command
     if check_available and (not resolved or not Path(resolved).is_file() or not os.access(resolved, os.X_OK)):

@@ -13,7 +13,9 @@ import pytest
 
 from agag.agent_config import ResolvedAgent
 from agag import harness
-from agag.harness import _extract_agcode, _extract_claude, build_argv, run_harness, write_run_record
+from agag.harness import (
+    _extract_agcode, _extract_claude, _extract_gemini, build_argv, run_harness, write_run_record,
+)
 
 
 def stub(path: Path, body: str) -> Path:
@@ -29,11 +31,10 @@ def agent(
     base_url: str = "http://127.0.0.1:11434",
     model_options: dict | None = None,
 ) -> ResolvedAgent:
-    model = (
-        "anthropic/claude-sonnet-5"
-        if harness == "claude_code"
-        else "ollama/qwen3.6:35b-a3b-coding-nvfp4"
-    )
+    model = {
+        "claude_code": "anthropic/claude-sonnet-5",
+        "gemini_cli": "google/gemini-2.5-flash",
+    }.get(harness, "ollama/qwen3.6:35b-a3b-coding-nvfp4")
     return ResolvedAgent(
         "coding", "test-profile", harness, model.split("/", 1)[0], model, model_options or {},
         str(command), base_url, environment or {},
@@ -438,3 +439,108 @@ def test_stream_records_the_run_without_a_watcher(monkeypatch, tmp_path):
     assert "stream-json" in seen["argv"]
     assert result.output == "done"
     assert '"type": "result"' in transcript.read_text(encoding="utf-8")
+
+
+# --- gemini_cli -------------------------------------------------------------
+
+GEMINI_JSON = {
+    "session_id": "s1",
+    "response": "pong",
+    "stats": {
+        "models": {"gemini-3.5-flash": {
+            "api": {"totalRequests": 6, "totalErrors": 5},
+            "tokens": {"input": 5964, "prompt": 14112, "candidates": 1, "total": 14287,
+                       "cached": 8148, "thoughts": 174, "tool": 0},
+        }},
+        "tools": {"totalCalls": 0},
+    },
+}
+
+
+def test_gemini_argv_shape_and_approval_mode(tmp_path):
+    resolved = agent(tmp_path / "gemini", "gemini_cli")
+    argv = build_argv(resolved, add_dirs=["/w"], allowed_tools="Read,Glob")
+    assert argv == [
+        str(tmp_path / "gemini"), "-p", "", "-o", "json", "-m", "gemini-2.5-flash",
+        "--skip-trust", "--approval-mode", "yolo", "--include-directories", "/w",
+    ]
+    # The grant has no Gemini spelling and is not passed.
+    assert "Read,Glob" not in argv
+    assert build_argv(resolved, stream=True)[4] == "stream-json"
+    # A caller that names a mode keeps it; the bypass overrides it.
+    plan = build_argv(resolved, extra_args=["--approval-mode", "plan"])
+    assert plan.count("--approval-mode") == 1 and plan[plan.index("--approval-mode") + 1] == "plan"
+    both = build_argv(resolved, extra_args=["--approval-mode", "plan"], skip_permissions=True)
+    assert both[both.index("--approval-mode") + 1] == "yolo"
+    with pytest.raises(ValueError):
+        build_argv(resolved, extra_args=["-m", "other"])
+
+
+def test_gemini_json_extraction(tmp_path):
+    command = stub(tmp_path / "gemini", f'''
+        import json, sys
+        sys.stdin.read()
+        print(json.dumps({json.dumps(GEMINI_JSON)}))
+    ''')
+    result = run_harness(agent(command, "gemini_cli"), "prompt", cwd=tmp_path, timeout=5)
+    assert result.output == "pong"
+    assert result.exit_code == 0
+    assert result.meta["harness"] == "gemini_cli"
+    assert result.meta["provider"] == "google"
+    assert result.meta["outcome"] == "done"
+    assert result.meta["num_turns"] == 6
+    assert result.meta["usage"] == {
+        "input_tokens": 5964, "output_tokens": 1, "cached_tokens": 8148,
+        "thoughts_tokens": 174, "tool_tokens": 0,
+    }
+    assert "cost_usd" not in result.meta
+
+
+def test_gemini_error_with_exit_zero_is_a_failed_run(tmp_path):
+    """The CLI exits 0 on an API failure (seen 2026-09-04); the document says so."""
+    command = stub(tmp_path / "gemini", '''
+        import json, sys
+        sys.stdin.read()
+        emit = lambda doc: print(json.dumps(doc), flush=True)
+        emit({"type": "init", "model": "gemini-2.5-flash"})
+        emit({"type": "message", "role": "user", "content": "prompt"})
+        emit({"type": "result", "status": "error",
+              "error": {"type": "unknown", "message": "[API Error: high demand]"},
+              "stats": {"total_tokens": 0, "input_tokens": 0, "output_tokens": 0}})
+    ''')
+    result = run_harness(
+        agent(command, "gemini_cli"), "prompt", cwd=tmp_path, timeout=5, on_event=lambda e: None
+    )
+    assert result.exit_code == -1
+    assert result.meta["outcome"] == "failed"
+    assert result.meta["failure"] == "gemini_cli reported an error (unknown): [API Error: high demand]"
+
+
+def test_gemini_stream_events_and_extraction(tmp_path):
+    """Captured 2026-09-04: assistant text arrives as delta message lines and
+    the result line's stats are flat."""
+    command = stub(tmp_path / "gemini", '''
+        import json, sys
+        sys.stdin.read()
+        emit = lambda doc: print(json.dumps(doc), flush=True)
+        emit({"type": "init", "session_id": "s", "model": "gemini-2.5-flash"})
+        emit({"type": "message", "role": "user", "content": "prompt"})
+        emit({"type": "message", "role": "assistant", "content": "po", "delta": True})
+        emit({"type": "message", "role": "assistant", "content": "ng", "delta": True})
+        emit({"type": "result", "status": "success", "stats": {
+            "total_tokens": 14307, "input_tokens": 14125, "output_tokens": 1, "cached": 0,
+            "input": 14125, "duration_ms": 20893, "tool_calls": 0,
+            "models": {"gemini-3.5-flash": {"input_tokens": 14125, "output_tokens": 1}}}})
+    ''')
+    events = []
+    result = run_harness(
+        agent(command, "gemini_cli"), "prompt", cwd=tmp_path, timeout=5, on_event=events.append
+    )
+    assert [event["type"] for event in events] == ["init", "message", "message", "message", "result"]
+    assert result.output == "pong"
+    assert result.meta["outcome"] == "done"
+    assert result.meta["usage"] == {"input_tokens": 14125, "output_tokens": 1, "cached_tokens": 0}
+
+
+def test_gemini_extractor_tolerates_non_json_stdout():
+    assert _extract_gemini("plain text") == ("plain text", {})

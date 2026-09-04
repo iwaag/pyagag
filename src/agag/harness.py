@@ -366,8 +366,11 @@ def _extract_agy(raw: str) -> tuple[str, dict]:
 
 
 #: agy's tool parameter names → the detail keys a claude-shaped progress
-#: reader looks for. `CommandLine` and `TargetFile` are seen (2026-09-05);
-#: the rest follow the CLI's PascalCase spelling and are a best guess.
+#: reader looks for. All seen in the CLI's conversation store after one
+#: workrun (2026-09-05): `CommandLine` (+`Cwd`) on run_command,
+#: `AbsolutePath` on view_file, `TargetFile` on write_to_file,
+#: `DirectoryPath` on list_dir, `SearchDirectory`/`Query` and
+#: `SearchPath`/`Pattern` on the search tools, `Url` on read_url_content.
 AGY_PARAMETER_KEYS = {
     "CommandLine": "command",
     "TargetFile": "file_path", "AbsolutePath": "file_path", "TargetPath": "file_path",

@@ -362,6 +362,16 @@ def test_channel_folder_wrappers_list_and_create():
     )
 
 
+def test_archive_channel_folder_patches_is_archived():
+    calls = []
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+    client.call = lambda method, path, params=None, **kw: (
+        calls.append((method, path, params)) or {"result": "success"}
+    )
+    client.archive_channel_folder(4)
+    assert calls == [("PATCH", "channel_folders/4", {"is_archived": True})]
+
+
 def test_unsubscribe_channels_sends_names_and_skips_an_empty_list():
     calls = []
     client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")

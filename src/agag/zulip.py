@@ -470,6 +470,17 @@ class ZulipClient:
             {"folder_id": int(folder_id)},
         )
 
+    def archive_channel_folder(self, folder_id: int) -> dict:
+        """Archive one channel folder; the channels it held are not touched.
+
+        Zulip refuses to archive a folder that still holds an unarchived
+        channel, so retire the channels first. Organization administrators
+        only — the same principal that files channels it did not create.
+        """
+        return self.call(
+            "PATCH", f"channel_folders/{int(folder_id)}", {"is_archived": True}
+        )
+
     def channel_subscribers(self, stream_id: int) -> list[int]:
         """User ids currently subscribed to one channel."""
         return self.call("GET", f"streams/{stream_id}/members").get("subscribers", [])

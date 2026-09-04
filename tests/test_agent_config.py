@@ -272,3 +272,43 @@ profile = "gemini"
     with pytest.raises(AgentConfigError) as caught:
         resolve_role(config, overlay, "generator")
     assert caught.value.code == "E_UNAVAILABLE"
+
+
+def test_google_secret_references_become_gemini_api_key(tmp_path, monkeypatch):
+    gemini = tmp_path / "bin" / "gemini"
+    gemini.parent.mkdir()
+    gemini.write_text("#!/bin/sh\n", encoding="utf-8")
+    gemini.chmod(0o755)
+    monkeypatch.setenv("PATH", str(gemini.parent) + os.pathsep + os.environ["PATH"])
+    key_file = tmp_path / "gemini.key"
+    key_file.write_text("file-key\n", encoding="utf-8")
+    main, local = files(tmp_path, GEMINI, overlay=f'''schema = "ag.agent-config.v1"
+[local.secrets]
+google_api_key_file = "{key_file}"
+[roles.generator]
+profile = "gemini"
+''')
+    config, overlay = load_config(main, local)
+    assert resolve_role(config, overlay, "generator").environment == {"GEMINI_API_KEY": "file-key"}
+
+    monkeypatch.setenv("MY_GEMINI", "env-key")
+    main, local = files(tmp_path, GEMINI, overlay='''schema = "ag.agent-config.v1"
+[local.secrets]
+google_api_key_env = "MY_GEMINI"
+[roles.generator]
+profile = "gemini"
+''')
+    config, overlay = load_config(main, local)
+    assert resolve_role(config, overlay, "generator").environment == {"GEMINI_API_KEY": "env-key"}
+
+    key_file.unlink()
+    main, local = files(tmp_path, GEMINI, overlay=f'''schema = "ag.agent-config.v1"
+[local.secrets]
+google_api_key_file = "{key_file}"
+[roles.generator]
+profile = "gemini"
+''')
+    config, overlay = load_config(main, local)
+    with pytest.raises(AgentConfigError) as caught:
+        resolve_role(config, overlay, "generator")
+    assert caught.value.code == "E_UNAVAILABLE"

@@ -100,6 +100,7 @@ base_url = "http://example.invalid:11434"
 [local.secrets]
 anthropic_api_key_file = "~/.secrets/anthropic"
 # alternatively: anthropic_api_key_env = "ANTHROPIC_API_KEY_SOURCE"
+google_api_key_file = "~/.secrets/gemini"    # becomes GEMINI_API_KEY for gemini_cli
 
 [roles.generator]
 profile = "hosted"
@@ -169,9 +170,13 @@ its prompt, so `run_harness()` always names one — `yolo` for
 neither says. The role's `allowed_tools` has no Gemini spelling and is not
 passed. And **the exit code is not a failure signal**: an API failure prints
 `"status": "error"` and exits 0, so failure is read from the result document
-into `is_error`. The CLI resolves its own API key (no `local.secrets`
-plumbing exists for `google`), prints token counts but no cost, and needs
+into `is_error`. The CLI prints token counts but no cost, and needs
 `--skip-trust` because a workspace nobody trusted interactively is refused.
+Its API key lives in the user's encrypted store, which an interactive shell
+opens and a launchd-started run does not (exit 41, "you must specify the
+GEMINI_API_KEY environment variable"); `local.secrets.google_api_key_file`
+or `google_api_key_env` hands the key to the run as `GEMINI_API_KEY`, the
+way the `anthropic_api_key_*` pair does for `ANTHROPIC_API_KEY`.
 
 The vocabulary has changed three times, and no change carries a compatibility
 shim — silent fallback is what this contract forbids. `agcode` was **added**

@@ -206,18 +206,31 @@ def _resolve_command(harness: str, overlay: dict[str, Any], *, check_available: 
     return str(resolved or command)
 
 
+#: The one secret a provider's CLI reads from the run environment, and the
+#: overlay key that names where it comes from (`<prefix>_env` / `<prefix>_file`).
+#: gemini_cli under launchd is why `google` is here: the CLI keeps its key in
+#: the user's encrypted store, which a launchd-started run could not open
+#: (2026-09-04, exit 41 "you must specify the GEMINI_API_KEY environment
+#: variable"), so the key is handed to the run explicitly instead.
+PROVIDER_SECRETS = {
+    "anthropic": ("ANTHROPIC_API_KEY", "anthropic_api_key"),
+    "google": ("GEMINI_API_KEY", "google_api_key"),
+}
+
+
 def _resolve_secret_environment(
     provider: str, overlay: dict[str, Any], *, check_available: bool
 ) -> dict[str, str]:
-    if provider != "anthropic":
+    if provider not in PROVIDER_SECRETS:
         return {}
+    variable, prefix = PROVIDER_SECRETS[provider]
     secrets = _table(_table(overlay, "local"), "secrets")
-    if reference := secrets.get("anthropic_api_key_env"):
+    if reference := secrets.get(f"{prefix}_env"):
         value = os.environ.get(reference, "")
         if check_available and not value:
             raise AgentConfigError("E_UNAVAILABLE", f"secret environment variable {reference!r} is unavailable")
-        return {"ANTHROPIC_API_KEY": value} if value else {}
-    if reference := secrets.get("anthropic_api_key_file"):
+        return {variable: value} if value else {}
+    if reference := secrets.get(f"{prefix}_file"):
         path = Path(os.path.expanduser(reference))
         try:
             value = path.read_text(encoding="utf-8").strip()
@@ -227,7 +240,7 @@ def _resolve_secret_environment(
             return {}
         if check_available and not value:
             raise AgentConfigError("E_UNAVAILABLE", f"secret file {reference!r} is empty")
-        return {"ANTHROPIC_API_KEY": value} if value else {}
+        return {variable: value} if value else {}
     return {}
 
 

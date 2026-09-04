@@ -144,6 +144,7 @@ The v1 harness vocabulary is closed:
 | `claude_code` | `claude -p --output-format json --model <native-name>` | `anthropic` only | `agentic_tools`, `workspace_fs` |
 | `agcode` | `python -m agag.agcode --model <native-name> [--base-url <endpoint>]` | any provider serving a Messages API endpoint | `agentic_tools`, `workspace_fs` |
 | `gemini_cli` | `gemini -p "" -o json -m <native-name> --skip-trust --approval-mode <mode>` | `google` only | `agentic_tools`, `workspace_fs` |
+| `agy` | `agy --input-format stream-json --output-format stream-json --model <native-name> --disable-slash-commands --add-dir <cwd> --print-timeout <N>s [--dangerously-skip-permissions]` | `antigravity` only | `agentic_tools`, `workspace_fs` |
 | `fake` | configured test executable | any | none |
 
 Ollama is a provider, not a harness. `agcode` is the vocabulary's one direct
@@ -178,13 +179,37 @@ GEMINI_API_KEY environment variable"); `local.secrets.google_api_key_file`
 or `google_api_key_env` hands the key to the run as `GEMINI_API_KEY`, the
 way the `anthropic_api_key_*` pair does for `ANTHROPIC_API_KEY`.
 
-The vocabulary has changed three times, and no change carries a compatibility
+`agy` drives Google's **Antigravity CLI** headless. Its provider is
+`antigravity`, not `google`: the catalog is the Antigravity account's
+(`agy models` lists Gemini, Claude and GPT-OSS entries alike), the CLI
+carries its own OAuth token, and no `local.secrets` entry feeds it. The
+prompt goes in on stdin as one stream-json line — `-p` takes the prompt as
+its *value* and reads nothing from stdin — so streamed and single-document
+runs are the same process and every run leaves a real transcript; the
+result is the `result` payload of the last `{"event": "result"}` line.
+Three things a consumer should know. **cwd is not the workspace**: without
+`--add-dir <cwd>` a file "in the current directory" lands in
+`~/.gemini/antigravity-cli/scratch/`, so `run_harness()` always passes it.
+**Headless mode auto-denies every tool that would prompt, reads included**
+(there is no read-only door: `--mode plan` writes a plan file instead of
+doing the work), so the bypass is the default — `skip_permissions`, or no
+`--mode` of the caller's own in `extra_args`. And **a denial is not a
+failure**: the CLI exits 0 with an empty response and `denied_actions`,
+which the record keeps next to `empty_final`. `--print-timeout` is set just
+under the run's timeout, because its 5-minute default would otherwise end a
+long run early; an unknown model exits 1 with `status: ERROR` and the
+catalog in `error`. Tokens are recorded, no cost. For a live-progress
+consumer the `step_update` events are also delivered claude-shaped
+(`assistant` events with `text`/`tool_use` blocks, the tool's `CommandLine`
+doubled as `command`, `TargetFile` as `file_path`), after the raw event.
+
+The vocabulary has changed four times, and no change carries a compatibility
 shim — silent fallback is what this contract forbids. `agcode` was **added**
 after `claude_code` and `fake`; a pyagag older than that commit rejects
 `harness = "agcode"` as `E_UNKNOWN_HARNESS`. `opencode` was later **removed**;
 a pyagag newer than that commit rejects `harness = "opencode"` the same way.
-`gemini_cli` was **added** after that, with the same consequence for older
-pins. A consumer moves its pin and its profiles together.
+`gemini_cli` was **added** after that, and `agy` after it, with the same
+consequence for older pins. A consumer moves its pin and its profiles together.
 
 A canonical model ID is `<provider>/<native-name>`. The provider matches
 `[a-z0-9_-]+`; the native name is non-empty and contains no slash or

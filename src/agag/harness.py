@@ -17,6 +17,8 @@ from .agcode import max_tokens_from_options
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 DEFAULT_OUTPUT_TAIL_CHARS = 2000
+#: The harnesses with a stream-json mode, and so a live-progress seam.
+STREAMING_HARNESSES = ("claude_code", "agcode", "gemini_cli", "agy")
 
 
 @dataclass
@@ -45,7 +47,12 @@ def build_argv(
     extra_args: list[str] | None = None,
     skip_permissions: bool = False,
     stream: bool = False,
+    cwd: Path | None = None,
+    timeout: float | None = None,
 ) -> list[str]:
+    """The argv for one run. `cwd` and `timeout` are what run_harness already
+    knows; only `agy` reads them (its workspace and print deadline are flags,
+    not inherited state), the other harnesses ignore both."""
     extra_args = list(extra_args or [])
     if "--model" in extra_args or "-m" in extra_args:
         raise ValueError("model selection belongs to the resolved profile")
@@ -90,9 +97,47 @@ def build_argv(
         for directory in add_dirs or []:
             argv += ["--include-directories", directory]
         return argv + extra_args
+    if agent.harness == "agy":
+        # Antigravity CLI. The prompt travels on stdin as one stream-json
+        # line (`_agy_stdin`): `-p` takes the prompt as its *value* and
+        # nothing else reads stdin, so this is the one route that keeps
+        # run_harness's stdin handoff — and every run then leaves a real
+        # transcript, streamed or not (both modes produce this same argv).
+        # cwd is NOT the workspace: without `--add-dir <cwd>` a "write e.txt
+        # here" landed in `~/.gemini/antigravity-cli/scratch/` (2026-09-05).
+        # `--print-timeout` defaults to 5m0s and would end a twenty-minute
+        # run at five; it is set just under the caller's timeout so agy
+        # reports its own deadline as a result document instead of being
+        # killed. Headless mode auto-denies every tool that would prompt,
+        # reads included, so the bypass is the default: the caller's
+        # `skip_permissions`, or no `--mode` of its own in extra_args.
+        argv = [
+            agent.command, "--input-format", "stream-json", "--output-format", "stream-json",
+            "--model", agent.native_model, "--disable-slash-commands",
+        ]
+        for directory in [str(cwd)] if cwd is not None else []:
+            argv += ["--add-dir", directory]
+        for directory in add_dirs or []:
+            argv += ["--add-dir", directory]
+        if timeout is not None:
+            argv += ["--print-timeout", f"{max(1, int(timeout) - AGY_PRINT_TIMEOUT_MARGIN_S)}s"]
+        if skip_permissions or "--mode" not in extra_args:
+            argv.append("--dangerously-skip-permissions")
+        return argv + extra_args
     if agent.harness == "fake":
         return [agent.command, *extra_args]
     raise ValueError(f"unsupported harness: {agent.harness}")
+
+
+#: agy's own print deadline sits this far under run_harness's timeout, so the
+#: CLI ends the run with `error: "timeout waiting for response"` (exit 1, a
+#: document) before the subprocess kill would leave a truncated stream.
+AGY_PRINT_TIMEOUT_MARGIN_S = 10
+
+
+def _agy_stdin(prompt: str) -> str:
+    """The prompt as agy's stream-json input: one NDJSON line per turn."""
+    return json.dumps({"event": "user", "message": {"role": "user", "content": prompt}}) + "\n"
 
 
 def _result_line(raw: str) -> dict | None:
@@ -255,6 +300,131 @@ def _gemini_stream_text(raw: str) -> str:
     return "".join(parts)
 
 
+def _agy_result(raw: str) -> dict | None:
+    """agy's result document: the `result` payload of the last
+    `{"event": "result"}` stream line, or the single `-o json` document."""
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError:
+        doc = None
+        for line in reversed(raw.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("event") == "result":
+                doc = event
+                break
+        if doc is None:
+            return None
+    if isinstance(doc, dict) and doc.get("event") == "result":
+        doc = doc.get("result")
+    return doc if isinstance(doc, dict) else None
+
+
+def _extract_agy(raw: str) -> tuple[str, dict]:
+    """Read agy's stream-json capture (or its `--output-format json` document).
+
+    The stream is keyed by `event`, and the result payload is **nested**:
+    `{"event": "result", "result": {"status": "SUCCESS"|"ERROR", "response",
+    "error"?, "duration_seconds", "num_turns", "usage", "denied_actions"?}}`.
+    `response` keeps its trailing newline, which is dropped once. A failure
+    is `status: ERROR` (exit 1 too, but the document says why: an unknown
+    model carries the whole catalog in `error`). A tool denial is the trap:
+    **exit 0, empty response, `denied_actions`** — kept in meta, because
+    without it that run is an unexplained `empty_final`. The CLI prints
+    tokens and no cost (2026-09-05).
+    """
+    doc = _agy_result(raw)
+    if doc is None:
+        return raw, {}
+    meta: dict = {}
+    error = doc.get("error")
+    if doc.get("status") == "ERROR" or (isinstance(error, str) and error):
+        meta["is_error"] = True
+        first = str(error or "").strip().splitlines()
+        meta["subtype"] = first[0][:120] if first else "error"
+    else:
+        meta["is_error"] = False
+    if isinstance(doc.get("duration_seconds"), (int, float)):
+        meta["duration_ms"] = int(doc["duration_seconds"] * 1000)
+    if isinstance(doc.get("num_turns"), int):
+        meta["num_turns"] = doc["num_turns"]
+    if isinstance(doc.get("usage"), dict):
+        meta["usage"] = doc["usage"]
+    if isinstance(doc.get("denied_actions"), list) and doc["denied_actions"]:
+        meta["denied_actions"] = doc["denied_actions"]
+    output = doc.get("response") if isinstance(doc.get("response"), str) else ""
+    if output.endswith("\n"):
+        output = output[:-1]
+    if meta["is_error"] and not output.strip() and isinstance(error, str):
+        output = error
+    return output, meta
+
+
+#: agy's tool parameter names → the detail keys a claude-shaped progress
+#: reader looks for. `CommandLine` and `TargetFile` are seen (2026-09-05);
+#: the rest follow the CLI's PascalCase spelling and are a best guess.
+AGY_PARAMETER_KEYS = {
+    "CommandLine": "command",
+    "TargetFile": "file_path", "AbsolutePath": "file_path", "TargetPath": "file_path",
+    "DirectoryPath": "path", "SearchDirectory": "path", "SearchPath": "path",
+    "Query": "pattern", "Pattern": "pattern",
+    "Url": "url",
+}
+
+
+def _agy_events(on_event: Callable[[dict], None]) -> Callable[[dict], None]:
+    """Wrap a progress consumer so agy's `step_update` stream also arrives
+    claude-shaped: `{"type": "assistant", "message": {"content": [...]}}`
+    with `text` and `tool_use` blocks, which is what autolab's display reads.
+    Every raw event is passed through first, so a consumer that knows agy's
+    own spelling loses nothing. An `agent_response` step's `text_delta`
+    chunks are gathered until the step is DONE and emitted as one `text`
+    block; a `tool` step becomes one `tool_use` block the first time it is
+    seen, with its parameters both as agy spells them and under the
+    snake_case keys of `AGY_PARAMETER_KEYS`.
+    """
+    text_parts: dict[int, list[str]] = {}
+    tools_seen: set[int] = set()
+
+    def emit(block: dict) -> None:
+        on_event({"type": "assistant", "message": {"role": "assistant", "content": [block]}})
+
+    def wrapped(event: dict) -> None:
+        on_event(event)
+        if event.get("event") != "step_update":
+            return
+        step = event.get("step_update")
+        if not isinstance(step, dict):
+            return
+        index = step.get("step_index", -1)
+        kind = step.get("step_type")
+        if kind == "agent_response":
+            delta = step.get("text_delta")
+            if isinstance(delta, str):
+                text_parts.setdefault(index, []).append(delta)
+            if step.get("state") in ("DONE", "ERROR"):
+                text = "".join(text_parts.pop(index, []))
+                if text.strip():
+                    emit({"type": "text", "text": text})
+        elif kind == "tool" and index not in tools_seen:
+            tools_seen.add(index)
+            info = step.get("tool_info") if isinstance(step.get("tool_info"), dict) else {}
+            parameters = info.get("parameters") if isinstance(info.get("parameters"), dict) else {}
+            arguments = dict(parameters)
+            for key, spelled in AGY_PARAMETER_KEYS.items():
+                if key in parameters and spelled not in arguments:
+                    arguments[spelled] = parameters[key]
+            name = step.get("tool_name") or info.get("name") or "?"
+            emit({"type": "tool_use", "name": str(name), "input": arguments})
+
+    return wrapped
+
+
 def _extract_agcode(raw: str) -> tuple[str, dict]:
     """Read agcode's single stdout JSON document.
 
@@ -380,7 +550,7 @@ def run_harness(
 ) -> HarnessResult:
     """Launch, extract, and normalize one harness process without fallback.
 
-    ``on_event`` switches claude_code and agcode to their stream-json modes
+    ``on_event`` switches the streaming harnesses to their stream-json modes
     and receives each event dict as the run produces it — the live-progress
     seam. The extracted result is identical either way (the stream's final
     ``"type": "result"`` line carries the single-document fields), and the
@@ -399,10 +569,7 @@ def run_harness(
             "agent run timed out (no budget left)", -1,
             {**meta, "outcome": "aborted", "failure": "timeout"},
         )
-    stream = (
-        (on_event is not None or stream)
-        and agent.harness in ("claude_code", "agcode", "gemini_cli")
-    )
+    stream = (on_event is not None or stream) and agent.harness in STREAMING_HARNESSES
     try:
         argv = build_argv(
             agent,
@@ -411,6 +578,8 @@ def run_harness(
             extra_args=extra_args,
             skip_permissions=skip_permissions,
             stream=stream,
+            cwd=cwd,
+            timeout=timeout,
         )
     except ValueError as error:
         return HarnessResult(str(error), -1, {**meta, "outcome": "failed", "failure": str(error)})
@@ -424,16 +593,19 @@ def run_harness(
         env[f"AGENT_PROVIDER_{agent.provider.upper()}_BASE_URL"] = agent.provider_base_url
     started = time.monotonic()
     consumer_errors: list[str] = []
+    stdin_payload = _agy_stdin(prompt) if agent.harness == "agy" else prompt
+    consumer = on_event if on_event is not None else (lambda event: None)
+    if agent.harness == "agy" and on_event is not None:
+        consumer = _agy_events(on_event)
     try:
         if stream:
             returncode, stdout, stderr, consumer_errors = _run_streaming(
-                argv, prompt, cwd=cwd, timeout=timeout, env=env,
-                on_event=on_event if on_event is not None else lambda event: None,
+                argv, stdin_payload, cwd=cwd, timeout=timeout, env=env, on_event=consumer,
             )
         else:
             proc = subprocess.run(
                 argv,
-                input=prompt,
+                input=stdin_payload,
                 cwd=cwd,
                 capture_output=True,
                 text=True,
@@ -486,6 +658,8 @@ def run_harness(
         output, reported = _extract_agcode(raw)
     elif agent.harness == "gemini_cli":
         output, reported = _extract_gemini(raw)
+    elif agent.harness == "agy":
+        output, reported = _extract_agy(raw)
     else:
         # `fake`: whatever the stub printed is the output, minus the trailing
         # newline `print` adds, and no statistics of its own. The extractor
@@ -560,6 +734,10 @@ def write_run_record(
     for key in ("empty_final", "truncated"):
         if meta.get(key):
             record[key] = True
+    # agy: a headless tool denial exits 0 with an empty answer; this is the
+    # only thing that tells the reader why the run said nothing.
+    if meta.get("denied_actions"):
+        record["denied_actions"] = meta["denied_actions"]
     record["outcome"] = outcome or meta.get("outcome", "failed")
     failure = failure or meta.get("failure")
     if failure:

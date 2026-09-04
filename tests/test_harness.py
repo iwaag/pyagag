@@ -14,7 +14,8 @@ import pytest
 from agag.agent_config import ResolvedAgent
 from agag import harness
 from agag.harness import (
-    _extract_agcode, _extract_claude, _extract_gemini, build_argv, run_harness, write_run_record,
+    _extract_agcode, _extract_agy, _extract_claude, _extract_gemini, build_argv, run_harness,
+    write_run_record,
 )
 
 
@@ -34,6 +35,7 @@ def agent(
     model = {
         "claude_code": "anthropic/claude-sonnet-5",
         "gemini_cli": "google/gemini-2.5-flash",
+        "agy": "antigravity/gemini-3.8-flash-medium",
     }.get(harness, "ollama/qwen3.6:35b-a3b-coding-nvfp4")
     return ResolvedAgent(
         "coding", "test-profile", harness, model.split("/", 1)[0], model, model_options or {},
@@ -544,3 +546,171 @@ def test_gemini_stream_events_and_extraction(tmp_path):
 
 def test_gemini_extractor_tolerates_non_json_stdout():
     assert _extract_gemini("plain text") == ("plain text", {})
+
+
+# --- agy (Antigravity CLI) --------------------------------------------------
+# Shapes captured on agstudio 2026-09-05 (agy 1.1.26).
+
+AGY_INIT = {"event": "init", "conversation_id": "c1", "init": {
+    "model": "gemini-3.8-flash-low", "cwd": "/w", "tools": ["run_command", "view_file"],
+    "permission_mode": "request-review"}}
+AGY_USAGE = {"input_tokens": 13847, "output_tokens": 2, "thinking_tokens": 0,
+             "cache_read_tokens": 0, "total_tokens": 13849}
+
+
+def agy_stub(path: Path, lines: list[dict], exit_code: int = 0) -> Path:
+    """An agy that checks its stdin is one `{"event": "user"}` line, then
+    prints the given stream and exits."""
+    return stub(path, f'''
+        import json, sys
+        lines = [json.loads(line) for line in sys.stdin.read().splitlines() if line.strip()]
+        assert len(lines) == 1 and lines[0]["event"] == "user", lines
+        assert lines[0]["message"]["content"] == "prompt", lines
+        for doc in {json.dumps(lines)}:
+            print(json.dumps(doc), flush=True)
+        sys.exit({exit_code})
+    ''')
+
+
+def test_agy_argv_shape_workspace_and_bypass(tmp_path):
+    resolved = agent(tmp_path / "agy", "agy")
+    argv = build_argv(resolved, add_dirs=["/extra"], allowed_tools="Read,Glob",
+                      cwd=Path("/w"), timeout=1200)
+    assert argv == [
+        str(tmp_path / "agy"), "--input-format", "stream-json", "--output-format", "stream-json",
+        "--model", "gemini-3.8-flash-medium", "--disable-slash-commands",
+        "--add-dir", "/w", "--add-dir", "/extra", "--print-timeout", "1190s",
+        "--dangerously-skip-permissions",
+    ]
+    # The grant has no Antigravity spelling and is not passed.
+    assert "Read,Glob" not in argv
+    # Streaming and single-document runs are the same process.
+    assert build_argv(resolved, stream=True, add_dirs=["/extra"], cwd=Path("/w"), timeout=1200) == argv
+    # A caller that names a mode keeps it and loses the bypass; skip_permissions overrides.
+    plan = build_argv(resolved, extra_args=["--mode", "plan"])
+    assert "--dangerously-skip-permissions" not in plan and plan[-2:] == ["--mode", "plan"]
+    both = build_argv(resolved, extra_args=["--mode", "plan"], skip_permissions=True)
+    assert "--dangerously-skip-permissions" in both
+    # No timeout, no cwd: neither flag is invented.
+    bare = build_argv(resolved)
+    assert "--print-timeout" not in bare and "--add-dir" not in bare
+    with pytest.raises(ValueError):
+        build_argv(resolved, extra_args=["--model", "other"])
+
+
+def test_agy_result_line_nested_payload_is_extracted(tmp_path):
+    command = agy_stub(tmp_path / "agy", [
+        AGY_INIT,
+        {"event": "step_update", "step_update": {"step_index": 0, "state": "DONE", "step_type": "user_input"}},
+        {"event": "step_update", "step_update": {"step_index": 1, "state": "ACTIVE",
+                                                 "step_type": "agent_response", "text_delta": "PONG"}},
+        {"event": "step_update", "step_update": {"step_index": 1, "state": "DONE",
+                                                 "step_type": "agent_response", "text_delta": "\n",
+                                                 "duration_seconds": 1.03, "usage": AGY_USAGE}},
+        {"event": "result", "result": {"conversation_id": "c1", "status": "SUCCESS",
+                                       "response": "PONG\n", "duration_seconds": 1.059951,
+                                       "num_turns": 1, "usage": AGY_USAGE}},
+    ])
+    seen = {}
+    real = harness.subprocess.run
+
+    def spy(argv, **kwargs):
+        seen["argv"] = argv
+        return real(argv, **kwargs)
+
+    harness.subprocess.run = spy
+    try:
+        result = run_harness(agent(command, "agy"), "prompt", cwd=tmp_path, timeout=30)
+    finally:
+        harness.subprocess.run = real
+    assert seen["argv"][seen["argv"].index("--add-dir") + 1] == str(tmp_path)
+    assert "--print-timeout" in seen["argv"]
+    assert result.output == "PONG"
+    assert result.exit_code == 0
+    assert result.meta["harness"] == "agy"
+    assert result.meta["provider"] == "antigravity"
+    assert result.meta["outcome"] == "done"
+    assert result.meta["num_turns"] == 1
+    assert result.meta["duration_ms"] == 1059
+    assert result.meta["usage"] == AGY_USAGE
+    assert "cost_usd" not in result.meta and "denied_actions" not in result.meta
+
+
+def test_agy_unknown_model_exits_1_and_fails_with_the_error(tmp_path):
+    catalog = "invalid model selection (--model \"x\"): model x is not recognized\nAvailable models:\n  Gemini 3.8 Flash (High)"
+    command = agy_stub(tmp_path / "agy", [
+        {"event": "result", "result": {"conversation_id": "", "status": "ERROR", "response": "",
+                                       "error": catalog, "duration_seconds": 0, "num_turns": 0,
+                                       "usage": {"input_tokens": 0, "output_tokens": 0}}},
+    ], exit_code=1)
+    result = run_harness(agent(command, "agy"), "prompt", cwd=tmp_path, timeout=30)
+    assert result.exit_code == 1
+    assert result.meta["outcome"] == "failed"
+    assert result.meta["is_error"] is True
+    assert result.meta["subtype"].startswith("invalid model selection")
+    assert result.meta["failure"].startswith("agy exited 1: invalid model selection")
+    assert "Gemini 3.8 Flash (High)" in result.meta["failure"]
+
+
+def test_agy_denial_exits_0_empty_and_keeps_denied_actions(tmp_path):
+    """Headless mode auto-denies a tool that would prompt: exit 0, empty
+    response, `denied_actions` — the one thing that explains the empty run."""
+    denied = [{"action": "command", "display_name": "RunCommand"}]
+    command = agy_stub(tmp_path / "agy", [
+        AGY_INIT,
+        {"event": "step_update", "step_update": {"step_index": 2, "state": "ERROR", "step_type": "tool",
+                                                 "tool_name": "run_command",
+                                                 "tool_info": {"name": "run_command",
+                                                               "parameters": {"CommandLine": "echo hi"},
+                                                               "error": {"type": "TOOL_ERROR", "message": "denied"}}}},
+        {"event": "result", "result": {"conversation_id": "c2", "status": "SUCCESS", "response": "",
+                                       "duration_seconds": 1.5, "num_turns": 1, "usage": AGY_USAGE,
+                                       "denied_actions": denied}},
+    ])
+    result = run_harness(agent(command, "agy"), "prompt", cwd=tmp_path, timeout=30)
+    assert result.exit_code == 0
+    assert result.meta["outcome"] == "done"
+    assert result.meta["empty_final"] is True
+    assert result.meta["denied_actions"] == denied
+    record_path = tmp_path / "run.json"
+    write_run_record(record_path, request_id="r", meta=result.meta)
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["denied_actions"] == denied and record["empty_final"] is True
+
+
+def test_agy_stream_events_are_translated_for_a_claude_shaped_reader(tmp_path):
+    command = agy_stub(tmp_path / "agy", [
+        AGY_INIT,
+        {"event": "step_update", "step_update": {"step_index": 1, "state": "DONE", "step_type": "agent_response"}},
+        {"event": "step_update", "step_update": {"step_index": 2, "state": "ACTIVE", "step_type": "tool",
+                                                 "tool_name": "run_command",
+                                                 "tool_info": {"name": "run_command",
+                                                               "parameters": {"CommandLine": "ls -la"}}}},
+        {"event": "step_update", "step_update": {"step_index": 2, "state": "DONE", "step_type": "tool",
+                                                 "tool_name": "run_command",
+                                                 "tool_info": {"name": "run_command",
+                                                               "parameters": {"CommandLine": "ls -la"}}}},
+        {"event": "step_update", "step_update": {"step_index": 3, "state": "ACTIVE",
+                                                 "step_type": "agent_response", "text_delta": "two "}},
+        {"event": "step_update", "step_update": {"step_index": 3, "state": "DONE",
+                                                 "step_type": "agent_response", "text_delta": "files\n"}},
+        {"event": "result", "result": {"status": "SUCCESS", "response": "two files\n",
+                                       "duration_seconds": 2, "num_turns": 2, "usage": AGY_USAGE}},
+    ])
+    events = []
+    result = run_harness(agent(command, "agy"), "prompt", cwd=tmp_path, timeout=30, on_event=events.append)
+    assert result.output == "two files" and result.meta["outcome"] == "done"
+    raw = [event for event in events if "event" in event]
+    assert [event["event"] for event in raw] == ["init"] + ["step_update"] * 5 + ["result"]
+    translated = [event["message"]["content"][0] for event in events if event.get("type") == "assistant"]
+    # One tool_use the first time the tool step is seen, one text block per finished response.
+    assert translated == [
+        {"type": "tool_use", "name": "run_command", "input": {"CommandLine": "ls -la", "command": "ls -la"}},
+        {"type": "text", "text": "two files\n"},
+    ]
+
+
+def test_agy_extractor_tolerates_non_json_stdout_and_a_bare_json_document():
+    assert _extract_agy("plain text") == ("plain text", {})
+    output, meta = _extract_agy(json.dumps({"status": "SUCCESS", "response": "x\n", "num_turns": 1}))
+    assert (output, meta["num_turns"], meta["is_error"]) == ("x", 1, False)

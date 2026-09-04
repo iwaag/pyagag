@@ -41,6 +41,7 @@ def files(tmp_path: Path, body: str = BASE, overlay: str | None = None) -> tuple
         (BASE.replace('model = "ollama/local-model"', 'model = "ollama/absent"'), "E_UNKNOWN_MODEL"),
         (BASE.replace('harness = "agcode"', 'harness = "claude_code"', 1), "E_INCOMPATIBLE"),
         (BASE.replace('harness = "agcode"', 'harness = "gemini_cli"', 1), "E_INCOMPATIBLE"),
+        (BASE.replace('harness = "agcode"', 'harness = "agy"', 1), "E_INCOMPATIBLE"),
         (BASE.replace('profile = "local"', 'profile = "absent"'), "E_UNKNOWN_PROFILE"),
         (BASE.replace("requires = []", 'requires = ["ui_actions"]'), "E_CAPABILITY_UNMET"),
     ],
@@ -312,3 +313,48 @@ profile = "gemini"
     with pytest.raises(AgentConfigError) as caught:
         resolve_role(config, overlay, "generator")
     assert caught.value.code == "E_UNAVAILABLE"
+
+
+AGY = BASE + '''[models."antigravity/claude-sonnet-4-6"]
+[profiles.agy]
+harness = "agy"
+model = "antigravity/claude-sonnet-4-6"
+'''
+
+
+def test_agy_profile_resolves_to_the_agy_command_and_pushes_no_secret(tmp_path, monkeypatch):
+    """agy serves the `antigravity` provider (the CLI's own catalog, Claude
+    included), takes the native name, defaults to `agy` on PATH, and carries
+    no secret even when the overlay names a Google key: the CLI owns its
+    OAuth token."""
+    agy = tmp_path / "bin" / "agy"
+    agy.parent.mkdir()
+    agy.write_text("#!/bin/sh\n", encoding="utf-8")
+    agy.chmod(0o755)
+    monkeypatch.setenv("PATH", str(agy.parent) + os.pathsep + os.environ["PATH"])
+    main, local = files(tmp_path, AGY, overlay='''schema = "ag.agent-config.v1"
+[local.secrets]
+google_api_key_file = "/nonexistent/gemini"
+[roles.generator]
+profile = "agy"
+''')
+    config, overlay = load_config(main, local)
+    resolved = resolve_role(config, overlay, "generator")
+    assert resolved.harness == "agy"
+    assert resolved.provider == "antigravity"
+    assert resolved.command == str(agy)
+    assert resolved.native_model == "claude-sonnet-4-6"
+    assert resolved.environment == {}
+    # And the overlay's command spelling expands `~`.
+    local.write_text('''schema = "ag.agent-config.v1"
+[local.harness.agy]
+command = "~/.local/bin/agy"
+[roles.generator]
+profile = "agy"
+''', encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".local" / "bin").mkdir(parents=True)
+    (tmp_path / ".local" / "bin" / "agy").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / ".local" / "bin" / "agy").chmod(0o755)
+    config, overlay = load_config(main, local)
+    assert resolve_role(config, overlay, "generator").command == str(tmp_path / ".local" / "bin" / "agy")

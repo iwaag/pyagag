@@ -42,6 +42,7 @@ def files(tmp_path: Path, body: str = BASE, overlay: str | None = None) -> tuple
         (BASE.replace('harness = "agcode"', 'harness = "claude_code"', 1), "E_INCOMPATIBLE"),
         (BASE.replace('harness = "agcode"', 'harness = "gemini_cli"', 1), "E_INCOMPATIBLE"),
         (BASE.replace('harness = "agcode"', 'harness = "agy"', 1), "E_INCOMPATIBLE"),
+        (BASE.replace('harness = "agcode"', 'harness = "codex"', 1), "E_INCOMPATIBLE"),
         (BASE.replace('profile = "local"', 'profile = "absent"'), "E_UNKNOWN_PROFILE"),
         (BASE.replace("requires = []", 'requires = ["ui_actions"]'), "E_CAPABILITY_UNMET"),
     ],
@@ -358,3 +359,47 @@ profile = "agy"
     (tmp_path / ".local" / "bin" / "agy").chmod(0o755)
     config, overlay = load_config(main, local)
     assert resolve_role(config, overlay, "generator").command == str(tmp_path / ".local" / "bin" / "agy")
+
+
+CODEX = BASE + '''[models."openai/gpt-5.4-mini"]
+effort = "low"
+[profiles.codex]
+harness = "codex"
+model = "openai/gpt-5.4-mini"
+'''
+
+
+def test_codex_profile_resolves_to_the_codex_command_with_its_effort_and_no_secret(tmp_path, monkeypatch):
+    """codex serves the `openai` provider (the ChatGPT account's catalog),
+    takes the native name, defaults to `codex` on PATH, carries the model's
+    declared `effort` in `model_options`, and pushes no secret: the CLI owns
+    its own auth."""
+    codex = tmp_path / "bin" / "codex"
+    codex.parent.mkdir()
+    codex.write_text("#!/bin/sh\n", encoding="utf-8")
+    codex.chmod(0o755)
+    monkeypatch.setenv("PATH", str(codex.parent) + os.pathsep + os.environ["PATH"])
+    main, local = files(tmp_path, CODEX, overlay='''schema = "ag.agent-config.v1"
+[local.secrets]
+google_api_key_file = "/nonexistent/gemini"
+[roles.generator]
+profile = "codex"
+''')
+    config, overlay = load_config(main, local)
+    resolved = resolve_role(config, overlay, "generator")
+    assert resolved.harness == "codex"
+    assert resolved.provider == "openai"
+    assert resolved.command == str(codex)
+    assert resolved.native_model == "gpt-5.4-mini"
+    assert resolved.model_options == {"effort": "low"}
+    assert resolved.environment == {}
+    # And the overlay's command spelling expands `~`.
+    local.write_text('''schema = "ag.agent-config.v1"
+[local.harness.codex]
+command = "~/.local/bin/codex"
+[roles.generator]
+profile = "codex"
+''', encoding="utf-8")
+    config, overlay = load_config(main, local)
+    resolved = resolve_role(config, overlay, "generator", check_available=False)
+    assert resolved.command == os.path.expanduser("~/.local/bin/codex")

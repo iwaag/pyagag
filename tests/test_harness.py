@@ -14,7 +14,8 @@ import pytest
 from agag.agent_config import ResolvedAgent
 from agag import harness
 from agag.harness import (
-    _extract_agcode, _extract_agy, _extract_claude, _extract_gemini, build_argv, run_harness,
+    _extract_agcode, _extract_agy, _extract_claude, _extract_codex, _extract_gemini, build_argv,
+    run_harness,
     write_run_record,
 )
 
@@ -714,3 +715,195 @@ def test_agy_extractor_tolerates_non_json_stdout_and_a_bare_json_document():
     assert _extract_agy("plain text") == ("plain text", {})
     output, meta = _extract_agy(json.dumps({"status": "SUCCESS", "response": "x\n", "num_turns": 1}))
     assert (output, meta["num_turns"], meta["is_error"]) == ("x", 1, False)
+
+
+# --- codex (OpenAI Codex CLI) ----------------------------------------------
+# Shapes captured on agstudio 2026-09-05 (codex-cli 0.153.2, ChatGPT account).
+
+CODEX_USAGE = {"input_tokens": 11062, "cached_input_tokens": 4352, "cache_write_input_tokens": 0,
+               "output_tokens": 18, "reasoning_output_tokens": 10}
+CODEX_400 = ('{"type":"error","status":400,"error":{"type":"invalid_request_error","message":'
+             '"The \'no-such-model-xyz\' model is not supported when using Codex with a ChatGPT account."}}')
+
+
+def codex_stub(path: Path, lines: list[dict], exit_code: int = 0) -> Path:
+    """A codex that checks the prompt arrived on stdin (the argv ends in `-`),
+    then prints the given JSONL and exits."""
+    return stub(path, f'''
+        import json, sys
+        assert sys.argv[1] == "exec" and sys.argv[-1] == "-", sys.argv
+        assert sys.stdin.read() == "prompt"
+        for doc in json.loads({json.dumps(json.dumps(lines))}):
+            print(json.dumps(doc), flush=True)
+        sys.exit({exit_code})
+    ''')
+
+
+def codex_agent(command: Path, effort: str | None = "low") -> ResolvedAgent:
+    return ResolvedAgent(
+        "coding", "test-profile", "codex", "openai", "openai/gpt-5.4-mini",
+        {"effort": effort} if effort else {}, str(command), None, {},
+    )
+
+
+def test_codex_argv_shape_sandbox_and_effort(tmp_path):
+    resolved = codex_agent(tmp_path / "codex")
+    argv = build_argv(resolved, add_dirs=["/extra"], allowed_tools="Read,Glob", cwd=Path("/w"), timeout=1200)
+    assert argv == [
+        str(tmp_path / "codex"), "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--color", "never",
+        "-C", "/w", "-m", "gpt-5.4-mini", "-c", 'model_reasoning_effort="low"',
+        "-s", "danger-full-access", "--add-dir", "/extra", "-",
+    ]
+    # The grant has no Codex spelling and is not passed.
+    assert "Read,Glob" not in argv
+    # Streaming and single-document runs are the same process.
+    assert build_argv(resolved, stream=True, add_dirs=["/extra"], cwd=Path("/w"), timeout=1200) == argv
+    # A caller that names a sandbox keeps it; skip_permissions overrides it with full access.
+    ro = build_argv(resolved, extra_args=["-s", "read-only"])
+    assert ro.count("-s") == 1 and ro[ro.index("-s") + 1] == "read-only" and ro[-1] == "-"
+    ro = build_argv(resolved, extra_args=["--sandbox", "read-only"])
+    assert "-s" not in ro and "danger-full-access" not in ro
+    both = build_argv(resolved, extra_args=["-s", "read-only"], skip_permissions=True)
+    assert both[both.index("-s") + 1] == "danger-full-access"
+    # No cwd, no effort: neither flag is invented.
+    bare = build_argv(codex_agent(tmp_path / "codex", effort=None))
+    assert "-C" not in bare and "-c" not in bare and bare[-1] == "-"
+    with pytest.raises(ValueError):
+        build_argv(resolved, extra_args=["-m", "other"])
+
+
+def test_codex_last_agent_message_and_usage_are_extracted(tmp_path):
+    command = codex_stub(tmp_path / "codex", [
+        {"type": "thread.started", "thread_id": "t1"},
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"id": "item_0", "type": "agent_message",
+                                            "text": "I'll run the command first, then report."}},
+        {"type": "item.started", "item": {"id": "item_1", "type": "command_execution",
+                                          "command": "/bin/zsh -lc 'echo hi'", "aggregated_output": "",
+                                          "exit_code": None, "status": "in_progress"}},
+        {"type": "item.completed", "item": {"id": "item_1", "type": "command_execution",
+                                            "command": "/bin/zsh -lc 'echo hi'", "aggregated_output": "hi\n",
+                                            "exit_code": 0, "status": "completed"}},
+        {"type": "item.completed", "item": {"id": "item_2", "type": "reasoning", "text": "thinking"}},
+        {"type": "item.completed", "item": {"id": "item_3", "type": "agent_message", "text": "PONG"}},
+        {"type": "turn.completed", "usage": CODEX_USAGE},
+    ])
+    seen = {}
+    real = harness.subprocess.run
+
+    def spy(argv, **kwargs):
+        seen["argv"] = argv
+        return real(argv, **kwargs)
+
+    harness.subprocess.run = spy
+    try:
+        result = run_harness(codex_agent(command), "prompt", cwd=tmp_path, timeout=30)
+    finally:
+        harness.subprocess.run = real
+    assert seen["argv"][seen["argv"].index("-C") + 1] == str(tmp_path)
+    assert result.output == "PONG"
+    assert result.exit_code == 0
+    assert result.meta["harness"] == "codex"
+    assert result.meta["provider"] == "openai"
+    assert result.meta["outcome"] == "done"
+    assert result.meta["is_error"] is False
+    assert result.meta["num_turns"] == 1
+    assert result.meta["usage"] == CODEX_USAGE
+    assert "cost_usd" not in result.meta
+    record_path = tmp_path / "run.json"
+    write_run_record(record_path, request_id="r", meta=result.meta)
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["usage"]["cached_input_tokens"] == 4352 and "cost_usd" not in record
+
+
+def test_codex_turn_failed_exits_1_and_fails_with_the_400_quoted(tmp_path):
+    command = codex_stub(tmp_path / "codex", [
+        {"type": "thread.started", "thread_id": "t2"},
+        {"type": "item.completed", "item": {"id": "item_0", "type": "error",
+                                            "message": "Model metadata for `no-such-model-xyz` not found."}},
+        {"type": "turn.started"},
+        {"type": "error", "message": CODEX_400},
+        {"type": "turn.failed", "error": {"message": CODEX_400}},
+    ], exit_code=1)
+    result = run_harness(codex_agent(command), "prompt", cwd=tmp_path, timeout=30)
+    assert result.exit_code == 1
+    assert result.meta["outcome"] == "failed"
+    assert result.meta["is_error"] is True
+    assert result.meta["subtype"] == "turn_failed"
+    assert result.meta["failure"].startswith("codex exited 1: ")
+    assert "model is not supported when using Codex with a ChatGPT account" in result.meta["failure"]
+    assert result.meta["num_turns"] == 0 and "usage" not in result.meta
+
+
+def test_codex_read_only_denial_is_done_with_the_explanation_as_output(tmp_path):
+    """A sandbox denial is not an error: exit 0, the command ran, the write
+    failed, and the last message says why."""
+    explanation = ("`echo hello-from-shell` printed `hello-from-shell`, and creating `b.txt` failed "
+                   "because the workspace is read-only (`operation not permitted`).")
+    command = codex_stub(tmp_path / "codex", [
+        {"type": "thread.started", "thread_id": "t3"},
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "Running it."}},
+        {"type": "item.started", "item": {"id": "item_1", "type": "command_execution",
+                                          "command": "/bin/zsh -lc 'echo hello-from-shell'",
+                                          "aggregated_output": "", "exit_code": None, "status": "in_progress"}},
+        {"type": "item.completed", "item": {"id": "item_1", "type": "command_execution",
+                                            "command": "/bin/zsh -lc 'echo hello-from-shell'",
+                                            "aggregated_output": "hello-from-shell\n", "exit_code": 0,
+                                            "status": "completed"}},
+        {"type": "item.completed", "item": {"id": "item_2", "type": "agent_message", "text": "Now writing."}},
+        {"type": "item.completed", "item": {"id": "item_3", "type": "agent_message", "text": explanation}},
+        {"type": "turn.completed", "usage": CODEX_USAGE},
+    ])
+    result = run_harness(codex_agent(command), "prompt", cwd=tmp_path, timeout=30, extra_args=["-s", "read-only"])
+    assert result.exit_code == 0
+    assert result.meta["outcome"] == "done"
+    assert result.output == explanation
+    assert "empty_final" not in result.meta and "failure" not in result.meta
+
+
+def test_codex_stream_events_are_translated_for_a_claude_shaped_reader(tmp_path):
+    changes = [{"path": "/w/c.txt", "kind": "add"}]
+    command = codex_stub(tmp_path / "codex", [
+        {"type": "thread.started", "thread_id": "t4"},
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "Creating it."}},
+        {"type": "item.started", "item": {"id": "item_1", "type": "command_execution",
+                                          "command": "ls -la", "aggregated_output": "", "exit_code": None,
+                                          "status": "in_progress"}},
+        {"type": "item.completed", "item": {"id": "item_1", "type": "command_execution",
+                                            "command": "ls -la", "aggregated_output": "x\n", "exit_code": 0,
+                                            "status": "completed"}},
+        {"type": "item.completed", "item": {"id": "item_2", "type": "reasoning", "text": "hmm"}},
+        {"type": "item.started", "item": {"id": "item_3", "type": "file_change", "changes": changes,
+                                          "status": "in_progress"}},
+        {"type": "item.completed", "item": {"id": "item_3", "type": "file_change", "changes": changes,
+                                            "status": "completed"}},
+        {"type": "item.completed", "item": {"id": "item_4", "type": "agent_message", "text": "Created c.txt."}},
+        {"type": "turn.completed", "usage": CODEX_USAGE},
+    ])
+    events = []
+    result = run_harness(codex_agent(command), "prompt", cwd=tmp_path, timeout=30, on_event=events.append)
+    assert result.output == "Created c.txt." and result.meta["outcome"] == "done"
+    assert result.meta["num_turns"] == 2
+    raw = [event["type"] for event in events if event.get("type") != "assistant"]
+    assert raw == ["thread.started", "turn.started", "item.completed", "item.started", "item.completed",
+                   "item.completed", "item.started", "item.completed", "item.completed", "turn.completed"]
+    translated = [event["message"]["content"][0] for event in events if event.get("type") == "assistant"]
+    # One tool_use per tool item (on item.started), one text block per agent message, no reasoning.
+    assert translated == [
+        {"type": "text", "text": "Creating it."},
+        {"type": "tool_use", "name": "shell", "input": {"command": "ls -la"}},
+        {"type": "tool_use", "name": "apply_patch", "input": {"path": "/w/c.txt", "changes": changes}},
+        {"type": "text", "text": "Created c.txt."},
+    ]
+
+
+def test_codex_extractor_tolerates_non_json_stdout_and_a_killed_stream():
+    assert _extract_codex("plain text") == ("plain text", {})
+    # A killed run: items but no turn.completed — nothing is invented.
+    output, meta = _extract_codex(json.dumps({"type": "turn.started"}) + "\n"
+                                  + json.dumps({"type": "item.completed",
+                                                "item": {"id": "i", "type": "agent_message", "text": "partial"}}))
+    assert (output, meta["is_error"], meta["num_turns"]) == ("partial", False, 0)
+    assert "usage" not in meta

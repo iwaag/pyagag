@@ -145,6 +145,7 @@ The v1 harness vocabulary is closed:
 | `agcode` | `python -m agag.agcode --model <native-name> [--base-url <endpoint>]` | any provider serving a Messages API endpoint | `agentic_tools`, `workspace_fs` |
 | `gemini_cli` | `gemini -p "" -o json -m <native-name> --skip-trust --approval-mode <mode>` | `google` only | `agentic_tools`, `workspace_fs` |
 | `agy` | `agy --input-format stream-json --output-format stream-json --model <native-name> --disable-slash-commands --add-dir <cwd> --print-timeout <N>s [--dangerously-skip-permissions]` | `antigravity` only | `agentic_tools`, `workspace_fs` |
+| `codex` | `codex exec --json --skip-git-repo-check --ephemeral --color never -C <cwd> -m <native-name> [-c model_reasoning_effort="<effort>"] -s <sandbox> -` | `openai` only | `agentic_tools`, `workspace_fs` |
 | `fake` | configured test executable | any | none |
 
 Ollama is a provider, not a harness. `agcode` is the vocabulary's one direct
@@ -203,13 +204,46 @@ consumer the `step_update` events are also delivered claude-shaped
 (`assistant` events with `text`/`tool_use` blocks, the tool's `CommandLine`
 doubled as `command`, `TargetFile` as `file_path`), after the raw event.
 
-The vocabulary has changed four times, and no change carries a compatibility
+`codex` drives OpenAI's **Codex CLI** (`codex exec`) headless, on the
+ChatGPT account the CLI is logged into; its provider is `openai`, the
+CLI carries its own auth (`~/.codex/auth.json`), and no `local.secrets`
+entry feeds it. The prompt goes in on stdin (`-` as the prompt argument),
+so run_harness's stdin handoff works unchanged; `--json` is a flat, typed
+JSONL stream, the same for a watched and an unwatched run, and every run
+leaves a real transcript. What a consumer should know. **`exec` never
+prompts**, so what a run may do is entirely its sandbox: `run_harness()`
+passes `-s danger-full-access` for `skip_permissions` and when the caller
+names nothing (`workspace-write` can neither commit — `.git` is protected —
+nor reach the network, so it serves no role that commits or posts), and a
+caller that names `-s`/`--sandbox` in `extra_args` keeps it — `read-only`
+is a real read-only door for a role that only reads. The `allowed_tools`
+grant has no Codex spelling and is not passed. **The reasoning effort is a
+model option**: `[models."openai/gpt-5.6-terra"] effort = "low"` becomes
+`-c model_reasoning_effort="low"`. **The answer is the last
+`agent_message`** — the model narrates before acting, so the first one is
+a preamble. **A sandbox denial is not a failure**: the run exits 0 and the
+last message explains why the write did not happen. An unknown model exits
+1 with `turn.failed`, whose message is the API's 400 JSON as a string;
+`is_error` is set and `subtype` is `turn_failed`. `num_turns` is the number
+of tool items (commands run + patches applied) — a unit of its own:
+claude_code counts API turns, agy user messages. Tokens are recorded
+(`cached_input_tokens` is most of every run), no cost. `--skip-git-repo-check`
+is always on, because a cwd that is neither a git repository nor a trusted
+project exits 1 before reading the prompt, and `--ephemeral` keeps a run
+from persisting a session under `~/.codex/sessions/`. There is no timeout
+flag; run_harness's kill is the deadline, and a killed capture has no
+`turn.completed`. For a live-progress consumer the item events are also
+delivered claude-shaped (`assistant` events with `text` blocks per
+message, `tool_use` blocks named `shell` with `command` and `apply_patch`
+with `path`), after the raw event.
+
+The vocabulary has changed five times, and no change carries a compatibility
 shim — silent fallback is what this contract forbids. `agcode` was **added**
 after `claude_code` and `fake`; a pyagag older than that commit rejects
 `harness = "agcode"` as `E_UNKNOWN_HARNESS`. `opencode` was later **removed**;
 a pyagag newer than that commit rejects `harness = "opencode"` the same way.
-`gemini_cli` was **added** after that, and `agy` after it, with the same
-consequence for older pins. A consumer moves its pin and its profiles together.
+`gemini_cli` was **added** after that, then `agy`, then `codex`, with the
+same consequence for older pins. A consumer moves its pin and its profiles together.
 
 A canonical model ID is `<provider>/<native-name>`. The provider matches
 `[a-z0-9_-]+`; the native name is non-empty and contains no slash or

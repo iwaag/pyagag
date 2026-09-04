@@ -18,7 +18,7 @@ from .agcode import max_tokens_from_options
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 DEFAULT_OUTPUT_TAIL_CHARS = 2000
 #: The harnesses with a stream-json mode, and so a live-progress seam.
-STREAMING_HARNESSES = ("claude_code", "agcode", "gemini_cli", "agy")
+STREAMING_HARNESSES = ("claude_code", "agcode", "gemini_cli", "agy", "codex")
 
 
 @dataclass
@@ -51,8 +51,9 @@ def build_argv(
     timeout: float | None = None,
 ) -> list[str]:
     """The argv for one run. `cwd` and `timeout` are what run_harness already
-    knows; only `agy` reads them (its workspace and print deadline are flags,
-    not inherited state), the other harnesses ignore both."""
+    knows; `agy` reads both (its workspace and print deadline are flags, not
+    inherited state), `codex` reads `cwd` (`-C`), the other harnesses ignore
+    them."""
     extra_args = list(extra_args or [])
     if "--model" in extra_args or "-m" in extra_args:
         raise ValueError("model selection belongs to the resolved profile")
@@ -124,6 +125,38 @@ def build_argv(
         if skip_permissions or "--mode" not in extra_args:
             argv.append("--dangerously-skip-permissions")
         return argv + extra_args
+    if agent.harness == "codex":
+        # OpenAI's Codex CLI, `codex exec`. `-` as the prompt reads stdin, so
+        # run_harness's stdin handoff works unchanged (a 400 kB prompt was
+        # accepted, 2026-09-05). `--json` is the flat JSONL stream, the same
+        # for a watched and an unwatched run. `--skip-git-repo-check`: a cwd
+        # that is neither a git repository nor a trusted project exits 1
+        # before reading the prompt, and front's topic workspaces are not
+        # repositories. `--ephemeral`: every run would otherwise persist a
+        # session under `~/.codex/sessions/`. `exec` never prompts, so what a
+        # run may do is entirely the sandbox: the caller's bypass is
+        # `danger-full-access` (`workspace-write` can neither commit — `.git`
+        # is protected — nor reach the network), a caller that names a
+        # sandbox in extra_args (a read-only role's `read-only`) keeps it,
+        # and full access is the default otherwise. The reasoning effort is
+        # a config value, taken from the model's declared options
+        # (`[models."openai/<name>"] effort = "low"`); the `-c` value is
+        # parsed as TOML, hence the inner quotes. The `allowed_tools` grant
+        # has no Codex spelling and is not passed.
+        argv = [
+            agent.command, "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--color", "never",
+        ]
+        if cwd is not None:
+            argv += ["-C", str(cwd)]
+        argv += ["-m", agent.native_model]
+        effort = agent.model_options.get("effort")
+        if isinstance(effort, str) and effort:
+            argv += ["-c", f'model_reasoning_effort="{effort}"']
+        if skip_permissions or not ({"-s", "--sandbox"} & set(extra_args)):
+            argv += ["-s", "danger-full-access"]
+        for directory in add_dirs or []:
+            argv += ["--add-dir", directory]
+        return argv + extra_args + ["-"]
     if agent.harness == "fake":
         return [agent.command, *extra_args]
     raise ValueError(f"unsupported harness: {agent.harness}")
@@ -428,6 +461,122 @@ def _agy_events(on_event: Callable[[dict], None]) -> Callable[[dict], None]:
     return wrapped
 
 
+def _codex_lines(raw: str) -> list[dict]:
+    """The JSON objects of a `codex exec --json` capture, in order."""
+    events: list[dict] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _extract_codex(raw: str) -> tuple[str, dict]:
+    """Read a `codex exec --json` capture.
+
+    The stream is flat and typed: `thread.started`, `turn.started`,
+    `item.started`/`item.completed` with an `item` of type `agent_message`
+    (`text`), `command_execution` (`command`, `aggregated_output`,
+    `exit_code`, `status`), `file_change` (`changes: [{path, kind}]`),
+    `reasoning` or `error` (`message`); then `turn.completed` with `usage`,
+    or `error` + `turn.failed` (`error.message`, the API's 400 JSON as a
+    string for an unknown model; exit 1 too). The answer is the **last**
+    `agent_message`: the model narrates before acting, so the first one is
+    a preamble. A sandbox denial is not a failure — exit 0, and the last
+    message explains ("the workspace is read-only"). `num_turns` here is
+    the number of tool items (commands run + patches applied), a unit of its
+    own: claude_code counts API turns, agy user messages. No cost is printed
+    (a ChatGPT account); `usage` keeps `cached_input_tokens`, which is most
+    of every run (2026-09-05). A capture with no `turn.completed` and no
+    `turn.failed` is a killed run, and run_harness's timeout branch names it.
+    """
+    events = _codex_lines(raw)
+    if not events:
+        return raw, {}
+    meta: dict = {"is_error": False}
+    output = ""
+    tools = 0
+    failure: str | None = None
+    for event in events:
+        kind = event.get("type")
+        item = event.get("item") if isinstance(event.get("item"), dict) else None
+        if kind == "item.completed" and item:
+            if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                output = item["text"]
+            elif item.get("type") in ("command_execution", "file_change"):
+                tools += 1
+        elif kind == "turn.completed":
+            if isinstance(event.get("usage"), dict):
+                meta["usage"] = event["usage"]
+        elif kind == "turn.failed":
+            error = event.get("error")
+            message = error.get("message") if isinstance(error, dict) else error
+            failure = str(message) if message else (failure or "turn failed")
+        elif kind == "error" and failure is None:
+            message = event.get("message")
+            failure = str(message) if message else "error"
+    if failure is not None:
+        meta["is_error"] = True
+        meta["subtype"] = "turn_failed"
+        if not output.strip():
+            output = failure
+    meta["num_turns"] = tools
+    return output, meta
+
+
+def _codex_events(on_event: Callable[[dict], None]) -> Callable[[dict], None]:
+    """Wrap a progress consumer so codex's item stream also arrives
+    claude-shaped: `{"type": "assistant", "message": {"content": [...]}}`
+    with `text` and `tool_use` blocks, which is what autolab's display reads.
+    Every raw event is passed through first. A completed `agent_message`
+    becomes one `text` block; a `command_execution` becomes a `tool_use`
+    named `shell` with `command` the first time its item id is seen (on
+    `item.started`, so the display shows the command as it starts); a
+    `file_change` a `tool_use` named `apply_patch` with `path` from the
+    first change and the whole `changes` list. `reasoning` items are
+    skipped.
+    """
+    tools_seen: set[str] = set()
+
+    def emit(block: dict) -> None:
+        on_event({"type": "assistant", "message": {"role": "assistant", "content": [block]}})
+
+    def wrapped(event: dict) -> None:
+        on_event(event)
+        kind = event.get("type")
+        if kind not in ("item.started", "item.completed"):
+            return
+        item = event.get("item")
+        if not isinstance(item, dict):
+            return
+        item_type = item.get("type")
+        if item_type == "agent_message":
+            if kind == "item.completed" and isinstance(item.get("text"), str) and item["text"].strip():
+                emit({"type": "text", "text": item["text"]})
+            return
+        if item_type not in ("command_execution", "file_change"):
+            return
+        item_id = str(item.get("id", ""))
+        if item_id in tools_seen:
+            return
+        tools_seen.add(item_id)
+        if item_type == "command_execution":
+            emit({"type": "tool_use", "name": "shell", "input": {"command": item.get("command", "")}})
+        else:
+            changes = item.get("changes") if isinstance(item.get("changes"), list) else []
+            first = changes[0] if changes and isinstance(changes[0], dict) else {}
+            emit({"type": "tool_use", "name": "apply_patch",
+                  "input": {"path": first.get("path", ""), "changes": changes}})
+
+    return wrapped
+
+
 def _extract_agcode(raw: str) -> tuple[str, dict]:
     """Read agcode's single stdout JSON document.
 
@@ -600,6 +749,8 @@ def run_harness(
     consumer = on_event if on_event is not None else (lambda event: None)
     if agent.harness == "agy" and on_event is not None:
         consumer = _agy_events(on_event)
+    elif agent.harness == "codex" and on_event is not None:
+        consumer = _codex_events(on_event)
     try:
         if stream:
             returncode, stdout, stderr, consumer_errors = _run_streaming(
@@ -663,6 +814,8 @@ def run_harness(
         output, reported = _extract_gemini(raw)
     elif agent.harness == "agy":
         output, reported = _extract_agy(raw)
+    elif agent.harness == "codex":
+        output, reported = _extract_codex(raw)
     else:
         # `fake`: whatever the stub printed is the output, minus the trailing
         # newline `print` adds, and no statistics of its own. The extractor

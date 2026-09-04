@@ -20,24 +20,31 @@ SCHEMA = "ag.agent-config.v1"
 #: part of the role and a role without one is `E_SCHEMA`.
 SCHEMA_V2 = "ag.agent-config.v2"
 SCHEMAS = frozenset({SCHEMA, SCHEMA_V2})
-CANONICAL_HARNESSES = {"claude_code", "agcode", "gemini_cli", "agy", "fake"}
+CANONICAL_HARNESSES = {"claude_code", "agcode", "gemini_cli", "agy", "codex", "fake"}
 INTRINSIC_CAPABILITIES = {
     "claude_code": {"agentic_tools", "workspace_fs"},
     "agcode": {"agentic_tools", "workspace_fs"},
     "gemini_cli": {"agentic_tools", "workspace_fs"},
     "agy": {"agentic_tools", "workspace_fs"},
+    "codex": {"agentic_tools", "workspace_fs"},
     "fake": set(),
 }
 # Harnesses whose CLI takes the provider-native model name rather than the
 # canonical provider/name ID. The canonical spelling still travels in records.
-NATIVE_MODEL_HARNESSES = frozenset({"claude_code", "agcode", "gemini_cli", "agy"})
+NATIVE_MODEL_HARNESSES = frozenset({"claude_code", "agcode", "gemini_cli", "agy", "codex"})
 # Harnesses bound to one provider: the CLI carries its own account, so a
 # model from anyone else is a configuration error, not a runtime surprise.
 # `agy` (Google's Antigravity CLI) serves the *Antigravity account's* catalog
 # — Gemini, Claude and GPT-OSS models alike — so its provider is `antigravity`,
 # not `google`: a `google` binding would also push `GEMINI_API_KEY` from the
 # overlay into every run, and the CLI carries its own OAuth token.
-HARNESS_PROVIDER = {"claude_code": "anthropic", "gemini_cli": "google", "agy": "antigravity"}
+# `codex` (OpenAI's Codex CLI) is bound to `openai`: the ChatGPT account's
+# catalog. The CLI can also drive a local Ollama (`--oss`), but that route is
+# not wired — the first cut is one provider, and a binding is what turns an
+# `ollama/*` profile into `E_INCOMPATIBLE` instead of a runtime surprise.
+HARNESS_PROVIDER = {
+    "claude_code": "anthropic", "gemini_cli": "google", "agy": "antigravity", "codex": "openai",
+}
 MODEL_ID_RE = re.compile(r"^[a-z0-9_-]+/[^/\s]+$")
 
 
@@ -203,7 +210,10 @@ def _resolve_command(harness: str, overlay: dict[str, Any], *, check_available: 
     # that runs ``python -m agag.agcode``. sys.executable is absolute, which
     # skips the PATH lookup below and satisfies the file/exec checks; an
     # overlay command may still point at a foreign interpreter.
-    defaults = {"claude_code": "claude", "agcode": sys.executable, "gemini_cli": "gemini", "agy": "agy"}
+    defaults = {
+        "claude_code": "claude", "agcode": sys.executable, "gemini_cli": "gemini", "agy": "agy",
+        "codex": "codex",
+    }
     command = os.path.expanduser(command or defaults.get(harness, ""))
     resolved = shutil.which(command) if command and not Path(command).is_absolute() else command
     if check_available and (not resolved or not Path(resolved).is_file() or not os.access(resolved, os.X_OK)):

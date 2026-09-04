@@ -5,7 +5,8 @@
 record convention. The import package is `agag`.
 
 `run_harness()` drives one harness process per run — `claude_code`, `agcode`,
-`gemini_cli`, `agy` (Antigravity CLI), or the test-only `fake` — and
+`gemini_cli`, `agy` (Antigravity CLI), `codex` (OpenAI Codex CLI), or the
+test-only `fake` — and
 normalizes its result. It keeps the
 subprocess's real working directory and inherited `PWD` environment value
 aligned. This is the shared first defense against harnesses that trust `PWD`;

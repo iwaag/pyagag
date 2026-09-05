@@ -187,3 +187,29 @@ def test_serve_entrance_reports_a_failed_run(tmp_path, monkeypatch):
         assert "exited 2" in str(error)
     else:
         raise AssertionError("expected EntranceError")
+
+
+def test_roster_for_states_the_listener_s_own_routing(tmp_path):
+    """`roster_for` must agree with `topic_filter`, or the observer routes by
+    a vocabulary the listener does not use."""
+    from agag.agent import AgentSpec, roster_for, topic_filter
+
+    (tmp_path / ".local").mkdir()
+    (tmp_path / ".local" / "instance.toml").write_text('name = "agecho-agstudio1"\n')
+    spec = AgentSpec(
+        "agecho", tmp_path, plan_prefix="agechoplan-", run_prefix="agechorun-",
+        extra_prefixes=("bmining-",),
+    )
+
+    class Client:
+        def whoami(self):
+            return {"full_name": "agecho-agstudio1", "user_id": 16}
+
+    found = roster_for(spec, Client())
+    assert found.instance == "agecho-agstudio1"
+    assert found.bot_id == 16
+    matches = topic_filter(spec)
+    assert matches(found.channel, "anything at all")
+    for prefix in found.prefixes:
+        assert matches("some-other-channel", f"{prefix}thing")
+    assert not matches("some-other-channel", "unrelated-topic")

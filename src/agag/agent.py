@@ -42,7 +42,7 @@ from . import selfnote
 from .agent_config import ResolvedAgent, load_config, resolve_role
 from .harness import run_harness, write_run_record
 from .instance import instance_name as read_instance_name
-from .intro import post_intro
+from .intro import Roster, post_intro
 from .zulip import ZulipClient, channel_name, dm_partners, is_dm_for_us, log, serve, sweep_serve
 
 #: The common sweep ack, shared wording across agents. Posted synchronously
@@ -68,6 +68,7 @@ __all__ = [
     "listener_main",
     "log_only",
     "resolve_spec_role",
+    "roster_for",
     "run_role",
     "topic_filter",
 ]
@@ -399,9 +400,37 @@ def listener_main(
 # --- the introduction ------------------------------------------------------
 
 
+def roster_for(spec: AgentSpec, client: ZulipClient) -> Roster:
+    """What routes messages to this instance, read off the running instance.
+
+    `topic_filter` above is the whole of the routing, and this is the same two
+    facts stated for somebody who cannot read this process: the channel it
+    matches by name and the prefixes it matches anywhere. The Zulip name and
+    id come from the bot's own profile, because the *mention* route matches
+    `@**<full name>**` and that name is chosen at provisioning time, not here
+    — `agforge-agstudio1` is its own instance name, `Front` is not.
+    """
+    profile = client.whoami()
+    instance = spec.instance_name()
+    return Roster(
+        instance=instance,
+        agent=spec.agent,
+        bot=str(profile.get("full_name") or instance),
+        bot_id=int(profile["user_id"]) if profile.get("user_id") is not None else None,
+        # Not "the channel it owns": the channel whose name it matches. It may
+        # not exist, and saying so is the reader's job, not the poster's.
+        channel=instance,
+        prefixes=spec.sweep_prefixes,
+    )
+
+
 def intro_main(spec: AgentSpec) -> str:
     """Append the current introduction to `#agents` for this instance."""
     client = ZulipClient.from_env(spec.zulip_env)
     return post_intro(
-        client, instance=spec.instance_name(), intro_path=spec.intro_path, root=spec.root
+        client,
+        instance=spec.instance_name(),
+        intro_path=spec.intro_path,
+        root=spec.root,
+        roster=roster_for(spec, client),
     )

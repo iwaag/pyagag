@@ -15,6 +15,8 @@ from agag.selfnote import (
     Conversation,
     home_from_environment,
     is_selfnote,
+    is_speech,
+    is_system_notice,
     last_real_message,
     last_real_sender,
     note,
@@ -177,3 +179,48 @@ def test_the_note_of_another_agent_is_skipped_too():
 def test_without_selfnotes_leaves_the_conversation():
     history = [message(15, rootchat_note(HOME), id=1), message(13, "hi", id=2)]
     assert [m["id"] for m in without_selfnotes(history)] == [2]
+
+
+# --- Zulip's own notices are not speech either -----------------------------
+
+
+def notice(text="@_**Developer|8** has marked this topic as unresolved.", id=1):
+    """What Zulip's Notification Bot posts: a cross-realm system bot, not a
+    realm member, recognisable only by its realm."""
+    return {
+        "id": id, "sender_id": 6, "sender_email": "notification-bot@zulip.com",
+        "sender_full_name": "Notification Bot", "sender_realm_str": "zulipinternal",
+        "content": text,
+    }
+
+
+def test_a_system_notice_is_recognised_by_its_realm_not_its_name():
+    assert is_system_notice(notice())
+    assert not is_speech(notice())
+    # A realm member calling itself "Notification Bot" is still somebody speaking.
+    impostor = {**message(13, "hi"), "sender_full_name": "Notification Bot", "sender_realm_str": "agdev"}
+    assert not is_system_notice(impostor) and is_speech(impostor)
+    # Messages without the field (older fixtures, DM payloads) are speech.
+    assert is_speech(message(13, "hi"))
+
+
+def test_an_unresolve_notice_does_not_hand_the_owner_a_turn():
+    """`operation_room` p8: the Developer un-✔'d a run topic Front had
+    answered; Zulip's "marked as unresolved" line was read as the Developer
+    speaking again and Front bought a run to say nothing was new. The last
+    real speaker in that topic is Front, and the topic awaits nobody."""
+    history = [
+        message(8, "Routine `ghtrends`, run of 2026-09-07T15:14Z", id=1),
+        message(15, "Message received. Please wait for the reply.", id=2),
+        message(15, "@**Developer** Verification-only run confirmed.", id=3),
+        notice("@_**Developer|8** has marked this topic as resolved.", id=4),
+        notice("@_**Developer|8** has marked this topic as unresolved.", id=5),
+    ]
+    assert last_real_sender(history) == 15
+    assert last_real_message(history)["id"] == 3
+    assert [m["id"] for m in without_selfnotes(history)] == [1, 2, 3]
+
+
+def test_a_topic_holding_only_notices_awaits_nobody():
+    assert last_real_sender([notice(id=1)]) is None
+    assert last_real_message([notice(id=1)]) is None

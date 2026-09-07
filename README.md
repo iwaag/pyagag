@@ -137,7 +137,12 @@ conversation in front of it. Three pieces carry that:
   mention test, `serve_topic`'s post-run re-check — goes through
   `last_real_sender`. Miss one and a note an agent wrote to itself buys the
   other agent a run, which is the ack loop of `agent_standardize` p7 in a
-  new coat.
+  new coat. **Zulip's own notices are not speech either**: a post from the
+  `zulipinternal` realm (Notification Bot's "has marked this topic as
+  resolved / unresolved", "moved here", Welcome Bot) is the server talking
+  *about* the conversation, and `last_real_sender` skips it the same way —
+  un-resolving a topic used to buy its owner a run to answer the notice
+  (`operation_room` p8).
 - **Two triggers, not one.** `sweep_serve(..., on_mention=…)` serves the
   *owner* of a topic on anybody else's post in it, and a *participant* only
   when a post names it. Mentions come off the event stream's `mentioned`

@@ -206,25 +206,51 @@ def own_rootchat(messages, self_id: int) -> Conversation | None:
 
 # --- who spoke last, for real ---------------------------------------------
 
+#: The realm Zulip's own system bots post from — Notification Bot ("… has
+#: marked this topic as resolved / unresolved", "… moved here"), Welcome Bot,
+#: the email gateway. Their lines are the server talking about the
+#: conversation, not anybody talking in it. The realm string is the marker,
+#: not the display name (renameable) or the user id (realm-local; these
+#: senders are not even in the realm's member list).
+SYSTEM_REALM = "zulipinternal"
+
+
+def is_system_notice(message) -> bool:
+    """A post by one of Zulip's cross-realm system bots.
+
+    Un-resolving a `#front` run topic posts "Developer has marked this topic
+    as unresolved" into it, and until `operation_room` p8 that line counted
+    as somebody speaking: the topic's owner was served and a run was bought to
+    answer a notice. Same shape as the selfnote ack loop, one realm over.
+    """
+    return message.get("sender_realm_str") == SYSTEM_REALM
+
+
+def is_speech(message) -> bool:
+    """A message somebody actually said: not a selfnote, not a system notice."""
+    return not is_selfnote(message.get("content")) and not is_system_notice(message)
+
 
 def without_selfnotes(messages):
-    """The conversation with the machine-to-machine lines taken out."""
-    return [m for m in messages if not is_selfnote(m.get("content"))]
+    """The conversation with the machine-to-machine lines taken out —
+    selfnotes and system notices alike."""
+    return [m for m in messages if is_speech(m)]
 
 
 def last_real_message(messages) -> dict | None:
-    """The newest message that is not a selfnote, or None if there is none."""
+    """The newest message that is speech, or None if there is none."""
     for message in reversed(list(messages)):
-        if not is_selfnote(message.get("content")):
+        if is_speech(message):
             return message
     return None
 
 
 def last_real_sender(messages) -> int | None:
-    """Who spoke last, ignoring selfnotes. None when nobody really has.
+    """Who spoke last, ignoring selfnotes and system notices. None when
+    nobody really has.
 
     This is the predicate every "does this topic await me?" check is built
-    on. A topic holding nothing but notes awaits nobody.
+    on. A topic holding nothing but notes and notices awaits nobody.
     """
     message = last_real_message(messages)
     if message is None:

@@ -554,3 +554,16 @@ def test_a_selfnote_during_the_run_does_not_re_arm_the_topic():
 
     topics.serve_topic(client, CHANNEL, TOPIC, handler, ack_text="ack")
     assert servings == [1]
+
+
+def test_workspace_identity_reads_a_generation_directory(tmp_path):
+    from agag.topics import generation_dir, workspace_identity
+
+    root = tmp_path / ".local" / "topics"
+    cwd = generation_dir(root, "front", "front-routine-x-2026-09-07T07:00Z", 4, "front")
+    assert workspace_identity(cwd) == {
+        "channel": "front", "topic": "front-routine-x-2026-09-07T07:00Z", "generation": 4,
+    }
+    # A project clone or a generator workspace is not a conversation.
+    assert workspace_identity(tmp_path / "projects" / "pj-x") == {}
+    assert workspace_identity(root / "front" / "topic" / "notanumber" / "front") == {}

@@ -45,6 +45,7 @@ __all__ = [
     "chatlog_path",
     "format_chatlog",
     "generation_dir",
+    "workspace_identity",
     "guide",
     "next_generation",
     "next_record_path",
@@ -90,6 +91,25 @@ def next_generation(topic_dir: Path) -> int:
             if child.is_dir() and child.name.isdigit():
                 highest = max(highest, int(child.name))
     return highest + 1
+
+
+def workspace_identity(cwd: Path) -> dict:
+    """`{channel, topic, generation}` read back from a generation directory.
+
+    The inverse of `generation_dir`, keyed on the `.local/topics` pair in the
+    path so a caller does not need the topics root. The names are the
+    *directory* names, i.e. after `_safe_topic_component`; the relay's
+    `/inflight` walks the same directories, so they match what it reports. A
+    cwd that is not a generation directory (autolab's project clones,
+    forge's generator workspace) yields `{}`.
+    """
+    parts = cwd.resolve().parts
+    for index in range(len(parts) - 5):
+        if parts[index] == ".local" and parts[index + 1] == "topics":
+            channel, topic, number = parts[index + 2:index + 5]
+            if number.isdigit():
+                return {"channel": channel, "topic": topic, "generation": int(number)}
+    return {}
 
 
 def generation_dir(root: Path, channel: str, topic: str, number: int, role: str) -> Path:

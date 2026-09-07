@@ -716,6 +716,9 @@ def run_harness(
     transcript kept for exactly that question could not say so.
     """
     meta = identity(agent)
+    # Wall clock, for the record: `duration_ms` alone cannot say *when* a run
+    # happened, and the cost gauge (`gauge_panel`) needs a day to file it on.
+    meta["started_at"] = time.time()
     if timeout <= 0:
         return HarnessResult(
             "agent run timed out (no budget left)", -1,
@@ -881,9 +884,13 @@ def write_run_record(
     for key in (
         "role", "profile", "harness", "provider", "model", "duration_ms",
         "cost_usd", "usage", "num_turns", "transcript",
+        "started_at", "channel", "topic", "generation",
     ):
         if key in meta:
             record[key] = meta[key]
+    # The record is written as soon as the harness returns, so "now" is the
+    # end of the run to within the write itself.
+    record["ended_at"] = meta.get("ended_at") or time.time()
     # Not §9 fields, and absent on the runs they do not describe: a run that
     # said nothing, or one whose responses were cut off at the token limit,
     # is exactly what a reader of a puzzling record needs to see.

@@ -41,6 +41,7 @@ from pathlib import Path
 from . import selfnote
 from .agent_config import ResolvedAgent, load_config, resolve_role
 from .harness import run_harness, write_run_record
+from .topics import workspace_identity
 from .instance import instance_name as read_instance_name
 from .intro import Roster, post_intro
 from .zulip import ZulipClient, channel_name, dm_partners, is_dm_for_us, log, serve, sweep_serve
@@ -281,6 +282,9 @@ def run_role(
         extra_args=extra_args,
         on_event=on_event,
     )
+    # Which conversation the run was for, read from where it ran; an explicit
+    # `extra_meta` wins over it.
+    result.meta.update(workspace_identity(cwd))
     if extra_meta:
         result.meta.update(extra_meta)
     run_record = {"schema": "ag.agent-run.v1", **result.meta}

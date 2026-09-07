@@ -92,6 +92,7 @@ def test_claude_json_extraction_and_identity(tmp_path):
     result = run_harness(agent(command, "claude_code"), "prompt", cwd=tmp_path, timeout=5)
     assert result.output == "done"
     assert result.exit_code == 0
+    assert isinstance(result.meta.pop("started_at"), float)
     assert result.meta == {
         "role": "coding", "profile": "test-profile", "harness": "claude_code",
         "provider": "anthropic", "model": "anthropic/claude-sonnet-5",
@@ -377,6 +378,7 @@ def test_claude_stream_events_and_extraction(tmp_path):
     )
     assert result.output == "done"
     assert result.exit_code == 0
+    assert isinstance(result.meta.pop("started_at"), float)
     assert result.meta == {
         "role": "coding", "profile": "test-profile", "harness": "claude_code",
         "provider": "anthropic", "model": "anthropic/claude-sonnet-5",
@@ -907,3 +909,19 @@ def test_codex_extractor_tolerates_non_json_stdout_and_a_killed_stream():
                                                 "item": {"id": "i", "type": "agent_message", "text": "partial"}}))
     assert (output, meta["is_error"], meta["num_turns"]) == ("partial", False, 0)
     assert "usage" not in meta
+
+
+def test_write_run_record_stamps_wall_clock_and_conversation(tmp_path):
+    import time as _time
+
+    before = _time.time()
+    path = write_run_record(
+        tmp_path / "run-0001.json",
+        request_id="run-0001",
+        meta={"harness": "fake", "duration_ms": 5, "started_at": before - 1,
+              "channel": "front", "topic": "t", "generation": 2},
+    )
+    record = json.loads(path.read_text())
+    assert record["started_at"] == before - 1
+    assert record["ended_at"] >= before
+    assert (record["channel"], record["topic"], record["generation"]) == ("front", "t", 2)

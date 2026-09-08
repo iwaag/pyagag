@@ -179,6 +179,23 @@ def messages_since(client: ZulipClient, channel: str, topic: str, after_id: int)
     return []
 
 
+def topic_messages(client: ZulipClient, channel: str, topic: str, count: int) -> list[dict]:
+    """The newest `count` messages, under whichever name the topic has.
+
+    `read` without `--since` used to ask for the bare name only, so a
+    conversation that had just been resolved read as *empty* — and a
+    supervisor that had the completion report placed beside its chatlog by
+    the listener (which does follow the rename) concluded the report was
+    fabricated (`front_desk` p2 step 5, twice in one afternoon). Same rule
+    as `messages_since` now.
+    """
+    for name in topic_names(topic):
+        messages = client.topic_history(channel, name, num_before=count)
+        if messages:
+            return messages
+    return []
+
+
 def last_id(client: ZulipClient, channel: str, topic: str) -> int:
     """The newest message id under either name, or 0 when there is none."""
     return max(client.topic_last_id(channel, name) for name in topic_names(topic))
@@ -452,8 +469,7 @@ def _run(args, client: ZulipClient, out) -> int:
                 return 0
         else:
             messages = _visible(
-                client.topic_history(args.channel, args.topic, num_before=args.count),
-                args.all,
+                topic_messages(client, args.channel, args.topic, args.count), args.all
             )
             if not messages:
                 print(f"no messages in #{args.channel} > {args.topic}", file=out)

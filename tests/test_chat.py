@@ -41,6 +41,8 @@ class Client:
 
     def topic_history(self, channel, topic, num_before=50):
         self.calls.append(("history", channel, topic, num_before))
+        if not self._holds(topic):
+            return []
         return self.messages
 
     #: When set, only this topic name holds the messages — the others are
@@ -315,6 +317,18 @@ def test_read_count_is_passed_through(monkeypatch):
     calls = []
     run(monkeypatch, ["read", CHANNEL, TOPIC, "--count", "3"], Client(calls, messages=[message()]))
     assert calls == [("history", CHANNEL, TOPIC, 3)]
+
+
+def test_read_follows_the_resolve_rename_like_since_does(monkeypatch):
+    """The completion report is very often the post that resolves the topic;
+    a plain read of the name the reader knows must find it (front_desk p2)."""
+    calls = []
+    client = Client(calls, messages=[message(id=7, content="task complete: commit fdf6d28")])
+    client.holder = f"✔ {TOPIC}"
+    code, out, err = run(monkeypatch, ["read", CHANNEL, TOPIC], client)
+    assert code == 0 and err == "" and "fdf6d28" in out
+    assert calls == [("history", CHANNEL, TOPIC, chat.DEFAULT_READ_COUNT),
+                     ("history", CHANNEL, f"✔ {TOPIC}", chat.DEFAULT_READ_COUNT)]
 
 
 def test_read_says_so_when_the_topic_is_empty(monkeypatch):

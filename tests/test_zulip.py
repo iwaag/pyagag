@@ -1899,3 +1899,22 @@ def test_the_threads_of_a_home_are_the_topics_it_anchored():
         Conversation("agforge-x", "assetrun-a"),
     ]
     assert remotes_for_home(client, "front", "front-nothing") == []
+
+
+def test_a_resolved_remote_is_still_a_thread_of_its_home_under_its_bare_name():
+    """The post that names an agent is very often the post that finishes the
+    conversation; a callback served after the ✔ rename must still get it."""
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    client.rootchat_messages = [
+        rootchat_note_message(
+            7, "work-g-15", f"{RESOLVED_TOPIC_PREFIX}workrun-task1-g-15",
+            "front/front-desk", 1,
+        ),
+    ]
+    assert remotes_for_home(client, "front", "front-desk") == [
+        Conversation("work-g-15", "workrun-task1-g-15"),
+    ]
+    # the callback sweep still leaves finished conversations alone
+    assert sweep_rootchats(client, self_id=7, bot_name="Front") == []

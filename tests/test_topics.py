@@ -445,6 +445,23 @@ def test_write_threads_renders_each_conversation_beside_the_chatlog(tmp_path):
     assert written[0].read_text(encoding="utf-8") == "[Forge] Work registered\n"
 
 
+def test_a_thread_is_read_across_its_resolve_rename(tmp_path):
+    """Renamed to `✔ …` a second after the report that called this run back:
+    the bare name is empty, and the report is what the run is here for."""
+    client = Board({
+        ("work-g-15", "✔ workrun-task1-g-15"): [
+            message(sender_id=13, name="Autolab", content="Task complete."),
+        ],
+    })
+    written = topics.write_threads(
+        client, tmp_path, [("work-g-15", "workrun-task1-g-15")], BOT_ID
+    )
+    assert [path.relative_to(tmp_path).as_posix() for path in written] == [
+        "threads/work-g-15/workrun-task1-g-15.md",
+    ]
+    assert written[0].read_text(encoding="utf-8") == "[Autolab] Task complete.\n"
+
+
 def test_a_thread_that_cannot_be_read_is_skipped_not_fatal(tmp_path):
     class Half(Board):
         def topic_history(self, channel, topic, num_before):

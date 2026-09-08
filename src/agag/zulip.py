@@ -900,7 +900,10 @@ def sweep_mentions(
 
 
 def rootchat_notes(
-    client: ZulipClient, num_before: int = ROOTCHAT_HISTORY
+    client: ZulipClient,
+    num_before: int = ROOTCHAT_HISTORY,
+    *,
+    include_resolved: bool = False,
 ) -> list[tuple[tuple[str, str], Conversation]]:
     """`((channel, topic), home)` for every root note this bot has written.
 
@@ -909,6 +912,15 @@ def rootchat_notes(
     topics are dropped — a finished conversation is not one to be called back
     into — and so is anything the search matched that does not parse as a
     root note.
+
+    `include_resolved` keeps them, under their **bare** name: the reader that
+    wants them is the one placing threads beside a served run, and the post
+    that names an agent is very often the post that finishes the
+    conversation. Front Desk lost a completion report on 2026-09-08 to
+    exactly that: the task reported and resolved its topic in the same
+    second, the callback run got no thread for it, read "post there to start
+    it" as the latest word, and posted a second start into a topic that no
+    longer existed under that name.
     """
     anchored: list[tuple[tuple[str, str], Conversation]] = []
     seen: set[tuple[str, str]] = set()
@@ -918,8 +930,12 @@ def rootchat_notes(
             continue
         topic = str(message.get("subject") or "")
         channel = channel_name(message)
-        if not topic or not channel or topic.startswith(RESOLVED_TOPIC_PREFIX):
+        if not topic or not channel:
             continue
+        if topic.startswith(RESOLVED_TOPIC_PREFIX):
+            if not include_resolved:
+                continue
+            topic = topic[len(RESOLVED_TOPIC_PREFIX):]
         if (channel, topic) in seen:
             continue  # the earliest note anchors the topic; later ones repeat
         seen.add((channel, topic))
@@ -933,12 +949,14 @@ def remotes_for_home(
     """Every conversation this one has reached out to, oldest note first.
 
     The list of threads a run serving `<channel>/<topic>` is party to, which
-    is what decides the `threads/` folder it gets.
+    is what decides the `threads/` folder it gets. A resolved remote is still
+    one of them, named without its `\u2714 `: the run that is called back by
+    a completion report must be able to read that report.
     """
     home = Conversation(channel, topic)
     found: list[Conversation] = []
     for (remote_channel, remote_topic), anchored in rootchat_notes(
-        client, num_before
+        client, num_before, include_resolved=True
     ):
         if anchored != home:
             continue

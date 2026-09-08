@@ -265,6 +265,32 @@ def test_read_hides_selfnotes_and_all_shows_them(monkeypatch):
     assert "[selfnote][rootchat] front/front-title-image" in out_all
 
 
+def test_send_refuses_the_bare_name_of_a_resolved_topic(monkeypatch):
+    """A post to the old name opens an empty topic beside the finished one."""
+    calls = []
+    client = Client(calls)
+    client.holders = {f"✔ {TOPIC}": 77}
+    code, out, err = run(monkeypatch, ["send", CHANNEL, TOPIC, "start again"], client)
+    assert code != 0 and "resolved" in err and f"agentchat read {CHANNEL} {TOPIC}" in err
+    assert [call for call in calls if call[0] == "send"] == []
+
+
+def test_send_refuses_a_resolved_name_outright(monkeypatch):
+    calls = []
+    code, _, err = run(monkeypatch, ["send", CHANNEL, f"✔ {TOPIC}", "hi"], Client(calls))
+    assert code != 0 and "finished" in err
+    assert [call for call in calls if call[0] == "send"] == []
+
+
+def test_send_still_posts_into_a_live_topic_that_was_never_resolved(monkeypatch):
+    calls = []
+    client = Client(calls)
+    client.holders = {TOPIC: 5}
+    code, _, err = run(monkeypatch, ["send", CHANNEL, TOPIC, "go"], client)
+    assert code == 0 and err == ""
+    assert ("send", CHANNEL, TOPIC, "go") in calls
+
+
 def test_send_refuses_an_empty_message(monkeypatch):
     calls = []
     code, _, err = run(monkeypatch, ["send", CHANNEL, TOPIC, "   "], Client(calls))

@@ -128,7 +128,10 @@ Notes
   A topic that somebody marks resolved is renamed to "✔ <topic>". Keep using
   the name you know: reading follows the topic across that rename, so the
   close-out itself is not what makes you lose sight of it. `resolve` takes
-  the name you know too, and says so when it was already resolved.
+  the name you know too, and says so when it was already resolved. `send`
+  refuses a resolved conversation: a post under its old name would open an
+  empty topic beside it, not reach it. What comes next is a new request,
+  where that agent's introduction says new requests go.
 
   Resolving is somebody's decision, not a tidying reflex. Read the
   conversation, satisfy yourself that it is over, and resolve it when you
@@ -389,11 +392,40 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def refuse_resolved(client: ZulipClient, channel: str, topic: str) -> None:
+    """Refuse to post under the bare name of a conversation that is resolved.
+
+    Resolving renames the topic to `\u2714 <topic>`; a post to the old name
+    does not reach it, it opens an empty second topic beside it. Seen live on
+    2026-09-08: Front, called back by a task's completion report, posted a
+    second "start" into `workrun-task1-g-15` after autolab had resolved it,
+    and the agent that answered the stray topic could only say it was bound
+    to nothing. A finished conversation is read, not written to; what comes
+    next goes where that agent's introduction says a new request goes.
+    """
+    if topic.startswith(RESOLVED_TOPIC_PREFIX):
+        raise AgentChatError(
+            f"#{channel} > {topic} is a resolved conversation: it is finished. "
+            "Read it; a new request goes in a new topic."
+        )
+    resolved = f"{RESOLVED_TOPIC_PREFIX}{topic}"
+    if client.topic_last_id(channel, resolved) and not client.topic_last_id(
+        channel, topic
+    ):
+        raise AgentChatError(
+            f"#{channel} > {topic} was resolved (it is now {resolved!r}): that "
+            "conversation is finished, and a post under the old name would open "
+            "an empty topic beside it. Read it with `agentchat read "
+            f"{channel} {topic}`; a new request goes in a new topic."
+        )
+
+
 def _run(args, client: ZulipClient, out) -> int:
     if args.command == "send":
         text = " ".join(args.text).strip()
         if not text:
             raise AgentChatError("refusing to send an empty message")
+        refuse_resolved(client, args.channel, args.topic)
         joined = join_and_record(client, args.channel, args.topic, out)
         ensure_rootchat(client, args.channel, args.topic, out)
         message_id = client.send_to_channel(args.channel, args.topic, text)

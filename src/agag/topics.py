@@ -32,7 +32,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .selfnote import is_selfnote
-from .zulip import ZulipClient, ZulipError, _safe_topic_component, log as default_log, topic_write
+from .zulip import (
+    RESOLVED_TOPIC_PREFIX,
+    ZulipClient,
+    ZulipError,
+    _safe_topic_component,
+    log as default_log,
+    topic_write,
+)
 
 HISTORY_MESSAGES = 1000
 
@@ -182,11 +189,19 @@ def write_threads(
     served; these are the others the agent has spoken in and may be answered
     in. A thread that cannot be read is skipped and logged — a missing file is
     a run with less context, an exception is a run that does not happen.
+
+    Read across the `\u2714 ` resolve rename: the message that calls a run
+    back is very often the one that finished the conversation, and a thread
+    read under the bare name in that window is empty.
     """
     written: list[Path] = []
     for channel, topic in conversations:
         try:
             messages = client.topic_history(channel, topic, num_before=history_messages)
+            if not messages and not topic.startswith(RESOLVED_TOPIC_PREFIX):
+                messages = client.topic_history(
+                    channel, f"{RESOLVED_TOPIC_PREFIX}{topic}", num_before=history_messages
+                )
         except (ZulipError, ValueError) as error:
             log(f"could not render thread {channel!r}/{topic!r}: {error!r}")
             continue

@@ -39,6 +39,7 @@ TITLE_LIMIT = 255
 HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(?P<title>.+?)\s*#*\s*$")
 
 __all__ = [
+    "ALREADY_COMPLETED",
     "PLANE_ENV_VARIABLE",
     "PlaneConfig",
     "credentials_path",
@@ -59,7 +60,9 @@ __all__ = [
     "normalized_name",
     "plane_identifier",
     "read_env",
+    "reason_not_completed",
     "split_document",
+    "sub_works",
     "starting_state_id",
     "state_groups",
     "state_id_for_group",
@@ -484,3 +487,57 @@ def issue_label(project: dict, issue: dict) -> str:
     if identifier and sequence is not None:
         return f"{identifier}-{sequence}"
     return str(issue.get("id", "?"))
+
+
+# --- the parent/child completion rule --------------------------------------
+#
+# One Work with one Sub-Work per task is the shape autolab plans a mission in
+# and forge registers a request in, and "the parent is finished when its live
+# children are" is counting rather than judgement. It lived in
+# `agautolab.mission_done` until `front_desk` p3, where the Front Desk's
+# completion button needed the same rule for one named Work and had no
+# business importing an agent's whole-board CLI to get it.
+
+#: The refusal that means "you asked for a state it is already in". Like
+#: `agentchat resolve` on a resolved topic, that is an answer, not a failure.
+ALREADY_COMPLETED = "already Done"
+
+
+def sub_works(issues: list[dict], parent_id: str, groups: dict[str, str]) -> list[dict]:
+    """Non-cancelled children of one issue, in sequence order.
+
+    Plane CE v1.4.1 ignores a `?parent=` filter and 404s the `sub-issues`
+    endpoint, so children are filtered out of the full list client-side.
+    A cancelled child is not a child that is owed anything: it is dropped
+    here rather than counted as unfinished.
+    """
+    children = [
+        row
+        for row in issues
+        if str(row.get("parent") or "") == parent_id
+        and groups.get(str(row.get("state") or "")) != "cancelled"
+    ]
+    children.sort(key=lambda row: (row.get("sequence_id") or 0, str(row.get("id"))))
+    return children
+
+
+def reason_not_completed(issue: dict, children: list[dict], groups: dict[str, str]) -> str | None:
+    """Why this Work may not be marked Done, or None when it may.
+
+    A Work with no live children is not a mission — it is a task, or a Work
+    nobody has planned yet — and closing one would be inventing a decision.
+    """
+    own = groups.get(str(issue.get("state") or ""))
+    if own == "completed":
+        return ALREADY_COMPLETED
+    if own == "cancelled":
+        return "cancelled"
+    if not children:
+        return "no sub-work: this is not a mission"
+    open_children = [
+        child for child in children
+        if groups.get(str(child.get("state") or "")) != "completed"
+    ]
+    if open_children:
+        return f"{len(open_children)} of {len(children)} sub-works are not completed"
+    return None

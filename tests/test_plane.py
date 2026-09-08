@@ -237,3 +237,49 @@ def test_credentials_are_read_without_sourcing_shell(tmp_path):
 def test_a_missing_credentials_file_is_reported(tmp_path):
     with pytest.raises(plane.PlaneError):
         plane.load_plane_config(tmp_path / "absent.env")
+
+
+# --- the parent/child completion rule (`front_desk` p3) ---------------------
+#
+# Moved here from `agautolab.mission_done` so the Front Desk's completion
+# button and the agent's own CLI decide eligibility by one rule.
+
+GROUPS = {"s-back": "backlog", "s-run": "started", "s-done": "completed",
+          "s-cancel": "cancelled"}
+
+
+def issue(state, *, parent=None, sequence=1, ident="i"):
+    return {"id": ident, "sequence_id": sequence, "state": state, "parent": parent}
+
+
+def test_sub_works_are_the_live_children_in_sequence_order():
+    issues = [
+        issue("s-done", parent="p", sequence=2, ident="b"),
+        issue("s-run", parent="p", sequence=1, ident="a"),
+        issue("s-cancel", parent="p", sequence=3, ident="c"),
+        issue("s-run", parent="other", sequence=4, ident="d"),
+    ]
+    assert [row["id"] for row in plane.sub_works(issues, "p", GROUPS)] == ["a", "b"]
+
+
+def test_a_work_whose_live_children_are_all_completed_may_be_closed():
+    children = [issue("s-done", parent="p", ident="a")]
+    assert plane.reason_not_completed(issue("s-run", ident="p"), children, GROUPS) is None
+
+
+def test_an_unfinished_child_says_how_many():
+    children = [issue("s-done", parent="p", ident="a"), issue("s-run", parent="p", ident="b")]
+    assert plane.reason_not_completed(issue("s-run", ident="p"), children, GROUPS) == (
+        "1 of 2 sub-works are not completed")
+
+
+def test_a_work_already_done_is_an_answer_not_a_failure():
+    children = [issue("s-done", parent="p", ident="a")]
+    assert plane.reason_not_completed(
+        issue("s-done", ident="p"), children, GROUPS) == plane.ALREADY_COMPLETED
+
+
+def test_a_cancelled_work_and_a_childless_one_are_both_refused():
+    assert plane.reason_not_completed(issue("s-cancel", ident="p"), [], GROUPS) == "cancelled"
+    assert plane.reason_not_completed(issue("s-run", ident="p"), [], GROUPS) == (
+        "no sub-work: this is not a mission")

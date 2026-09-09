@@ -22,7 +22,7 @@ tidying on its own would be deciding somebody else's conversation is over.
 
 from __future__ import annotations
 
-from .agent import SWEEP_ACK, AgentSpec, is_ack, run_role
+from .agent import SWEEP_ACK, AgentSpec, exec_options_for, is_ack, run_role
 from .topics import (
     TopicResult,
     chatlog_path,
@@ -149,6 +149,10 @@ def serve_entrance(spec: AgentSpec, context) -> TopicResult:
         transcript=workspace / "transcript.jsonl",
         stream=True,
         home=(context.channel, context.topic),
+        # The entrance is work like any other, so it runs under whatever this
+        # conversation was told to run under. An option that covered the
+        # answer but not the working roles would be a menu that lies.
+        selection=context.selection,
     )
     if exit_code != 0:
         raise EntranceError(f"front run exited {exit_code}: {output.strip()[:500]}")
@@ -162,4 +166,5 @@ def handle_entrance(spec: AgentSpec, client: ZulipClient, channel: str, topic: s
         client, channel, topic, lambda context: serve_entrance(spec, context),
         ack_text=SWEEP_ACK,
         empty_reply=EMPTY_REPLY,
+        exec_options=exec_options_for(spec, client),
     )

@@ -216,3 +216,12 @@ def test_a_restart_re_derives_the_same_selection_from_the_topic_alone():
     first = execopt.resolve(history, BOT, known=MENU.names)
     assert execopt.resolve(list(history), BOT, known=MENU.names) == first
     assert first.option == "agy"
+
+
+def test_an_agent_may_publish_what_its_own_default_costs():
+    # A default consumes a pool like anything else, and a threshold that
+    # cannot name the pool it is judged against cannot be judged.
+    mine = Option("default", "anthropic", "everything", "Claude Sonnet 5")
+    menu = execopt.with_default(BOT, [AGY, mine])
+    assert menu.names == ("default", "agy")
+    assert menu.get("default").pool == "anthropic"

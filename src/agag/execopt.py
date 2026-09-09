@@ -164,17 +164,22 @@ class ExecOptions:
         return f"{HEADING}\n\n{PREAMBLE}\n\n```{FENCE}\n{body}\n```"
 
 
-def with_default(bot: str, options: Iterable[Option], *, pool: str = NONE,
-                 summary: str = "my configured defaults") -> ExecOptions:
+def with_default(bot: str, options: Iterable[Option]) -> ExecOptions:
     """`options` with `default` guaranteed first — the shape agents publish.
 
     A supporting agent always advertises `default`, because the reset command
-    names it and a menu that cannot say "go back" is not a menu.
+    names it and a menu that cannot say "go back" is not a menu. An agent
+    that listed its own `default` keeps it — its defaults consume a pool like
+    anything else, and saying which one is the difference between a threshold
+    that can be judged and one that cannot — and otherwise a bare one is
+    written.
     """
-    listed = [option for option in options if option.name != DEFAULT_OPTION]
+    listed = list(options)
+    own = next((option for option in listed if option.name == DEFAULT_OPTION), None)
+    rest = [option for option in listed if option.name != DEFAULT_OPTION]
     return ExecOptions(
         bot,
-        (Option(DEFAULT_OPTION, pool, "everything", summary), *listed),
+        (own or Option(DEFAULT_OPTION, NONE, "everything", "my configured defaults"), *rest),
     )
 
 

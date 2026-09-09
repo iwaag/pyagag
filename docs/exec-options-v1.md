@@ -48,7 +48,7 @@ option: agy-claude | pool: antigravity | covers: everything | Antigravity CLI, C
   | field | meaning |
   |---|---|
   | name | the public name. `default` is always present when `supported: yes` and means *no explicit selection*. |
-  | `pool: <name>` | the usage pool the option consumes — the shared account window a threshold like "70 %" is judged against. `-` when the agent cannot say. |
+  | `pool: <name>` | the usage pool the option consumes — the shared account window a threshold like "70 %" is judged against. **The convention is the provider whose account the harness spends** (`agag.agent_config.HARNESS_PROVIDER`: `anthropic`, `antigravity`, `openai`, `google`), so a consumer can line an option up against a budget observation without a table of its own; `agfront.budget` prints the same name beside each harness. `-` when the agent cannot say, and a pool nobody can name is a condition that cannot be judged rather than one at 0. |
   | `covers: <work>` | what the option applies to, in the agent's own words (`everything`, or `planning, task work` when auxiliary roles stay on the default pool). |
   | explanation | free text, one short phrase. |
 

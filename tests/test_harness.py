@@ -925,3 +925,28 @@ def test_write_run_record_stamps_wall_clock_and_conversation(tmp_path):
     assert record["started_at"] == before - 1
     assert record["ended_at"] >= before
     assert (record["channel"], record["topic"], record["generation"]) == ("front", "t", 2)
+
+
+def test_the_record_on_disk_carries_the_execution_option(tmp_path):
+    """`write_run_record` copies an allowlist, so a field added to `meta` and
+    not added there is silently dropped — which is what happened to the
+    execution option on its first live run (`runtime-profile` step5)."""
+    path = harness.write_run_record(
+        tmp_path / "run-0001.json",
+        request_id="run-0001",
+        meta={
+            "role": "front", "profile": "agy", "harness": "agy",
+            "provider": "antigravity", "model": "antigravity/g",
+            "outcome": "done",
+            "exec_option": "agy", "exec_source": "topic", "exec_message_id": 5539,
+            "exec_inherited_from": "pj-x/workplan-y",
+        },
+    )
+    record = json.loads(path.read_text(encoding="utf-8"))
+    # What was asked for …
+    assert record["exec_option"] == "agy"
+    assert record["exec_source"] == "topic"
+    assert record["exec_message_id"] == 5539
+    assert record["exec_inherited_from"] == "pj-x/workplan-y"
+    # … beside what ran.
+    assert (record["profile"], record["harness"]) == ("agy", "agy")

@@ -885,6 +885,12 @@ def write_run_record(
         "role", "profile", "harness", "provider", "model", "duration_ms",
         "cost_usd", "usage", "num_turns", "transcript",
         "started_at", "channel", "topic", "generation",
+        # What was *asked for*, beside what ran (`ag.exec-options.v1` §7).
+        # This list is an allowlist, so a field added to `meta` and not added
+        # here is silently dropped — which is exactly what happened to the
+        # execution option on its first live run: the returned record carried
+        # it and the file on disk did not.
+        "exec_option", "exec_source", "exec_message_id", "exec_inherited_from",
     ):
         if key in meta:
             record[key] = meta[key]

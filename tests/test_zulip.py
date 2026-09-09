@@ -1918,3 +1918,20 @@ def test_a_resolved_remote_is_still_a_thread_of_its_home_under_its_bare_name():
     ]
     # the callback sweep still leaves finished conversations alone
     assert sweep_rootchats(client, self_id=7, bot_name="Front") == []
+
+
+def test_whoami_is_asked_once_per_client(monkeypatch):
+    """A bot's own id and name do not change while a process runs, and every
+    serving now asks for them more than once."""
+    calls = []
+    client = ZulipClient("https://zulip.invalid", "bot@example.invalid", "key")
+    monkeypatch.setattr(
+        client, "call",
+        lambda method, path, params=None, timeout=30: calls.append(path)
+        or {"user_id": 11, "full_name": "Autolab"},
+    )
+    assert client.whoami()["user_id"] == 11
+    assert client.whoami()["full_name"] == "Autolab"
+    assert calls == ["users/me"]
+    client.whoami(refresh=True)
+    assert calls == ["users/me", "users/me"]

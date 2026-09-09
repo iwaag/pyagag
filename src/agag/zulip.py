@@ -189,6 +189,13 @@ class ZulipClient:
         self.calls = 0
         self.rate_limit_remaining: float | None = None
         self.rate_limit_limit: float | None = None
+        #: Our own profile, fetched once. A bot's user id and full name do not
+        #: change while a process runs, and every serving asks for them at
+        #: least twice now (the execution menu is addressed by the name a
+        #: mention matches, and `serve_topic` needs the id). A call that is
+        #: always the same answer is a call out of the quota the listeners
+        #: share.
+        self._whoami: dict | None = None
         if ca_bundle:
             self._ssl = ssl.create_default_context(cafile=ca_bundle)
         else:
@@ -279,8 +286,15 @@ class ZulipClient:
 
     # --- the four mechanics the receive side needs -------------------------
 
-    def whoami(self) -> dict:
-        return self.call("GET", "users/me")
+    def whoami(self, refresh: bool = False) -> dict:
+        """This bot's own profile, fetched once per client.
+
+        `refresh=True` re-reads it, for the one caller that has just changed
+        the account it is asking about.
+        """
+        if refresh or self._whoami is None:
+            self._whoami = self.call("GET", "users/me")
+        return self._whoami
 
     def create_bot(self, full_name: str, short_name: str) -> dict:
         """Create a generic bot and return its usable credentials.

@@ -527,3 +527,65 @@ def test_help_names_no_real_agent_channel_or_topic(capsys):
     text = capsys.readouterr().out
     for leak in ("agforge", "agfront", "agautolab", "cagent", "assetplan-", "intro-"):
         assert leak not in text
+
+
+# --- execution options (ag.exec-options.v1) --------------------------------
+
+from agag import execopt  # noqa: E402
+from agag.execopt import ExecOptions, Option  # noqa: E402
+
+
+def board(*rows):
+    return [(name, body) for name, body in rows]
+
+
+def test_options_prints_each_agents_published_menu():
+    menu = execopt.with_default(
+        "Autolab", [Option("agy", "antigravity", "everything", "Antigravity CLI")]
+    )
+    lines = chat.exec_options_lines(board(("autolab-agstudio1", f"hello\n\n{menu.block()}")))
+    assert lines[0] == "autolab-agstudio1: @**Autolab** use <option>"
+    assert any("`agy`" in line and "antigravity" in line for line in lines)
+
+
+def test_options_reports_an_agent_with_no_block_as_unknown():
+    lines = chat.exec_options_lines(board(("agecho-agstudio1", "I am an old agent.")))
+    assert lines == ["agecho-agstudio1: unknown — publishes no execution options block"]
+
+
+def test_options_tells_unknown_apart_from_a_published_no():
+    lines = chat.exec_options_lines(
+        board(("agecho-agstudio1", ExecOptions("Agecho", (), supported=False).block()))
+    )
+    assert lines == ["agecho-agstudio1: does not support execution options"]
+
+
+def test_options_can_be_asked_about_one_agent():
+    menu = execopt.with_default("Autolab", [Option("agy", "antigravity")])
+    entries = board(("a", menu.block()), ("b", menu.block()))
+    assert len(chat.exec_options_lines(entries, "a")) == 3
+
+
+def test_use_posts_the_command_line_and_nothing_else(monkeypatch):
+    calls = []
+    code, out, err = run(monkeypatch, ["use", CHANNEL, TOPIC, "agy", "--to", "Forge"],
+                         Client(calls))
+    assert code == 0
+    assert ("send", CHANNEL, TOPIC, "@**Forge** use agy") in calls
+    assert "configuration only" in out
+
+
+def test_use_anchors_the_topic_so_a_refusal_can_find_us(monkeypatch):
+    monkeypatch.setenv(selfnote.HOME_VARIABLE, "front/front-1")
+    calls = []
+    run(monkeypatch, ["use", CHANNEL, TOPIC, "opus", "--to", "Forge"], Client(calls))
+    sends = [call for call in calls if call[0] == "send"]
+    assert selfnote.is_selfnote(sends[0][3])
+    assert sends[1][3] == "@**Forge** use opus"
+
+
+def test_use_refuses_a_resolved_conversation_like_send_does(monkeypatch):
+    client = Client([], messages=[message()])
+    client.holders = {f"✔ {TOPIC}": 5, TOPIC: 0}
+    code, out, err = run(monkeypatch, ["use", CHANNEL, TOPIC, "agy", "--to", "Forge"], client)
+    assert code == 1 and "resolved" in err

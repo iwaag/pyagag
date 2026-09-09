@@ -213,3 +213,87 @@ def test_roster_for_states_the_listener_s_own_routing(tmp_path):
     for prefix in found.prefixes:
         assert matches("some-other-channel", f"{prefix}thing")
     assert not matches("some-other-channel", "unrelated-topic")
+
+
+# --- execution options on the spec (ag.exec-options.v1) --------------------
+
+from agag import execopt  # noqa: E402
+from agag.execopt import Option, Selection  # noqa: E402
+
+
+def test_an_agent_that_lists_no_options_publishes_nothing(tmp_path):
+    # Unknown, deliberately: an introduction with no block says nothing, and
+    # a reader must not read that as "no".
+    assert spec(tmp_path).published_options("Agtest") is None
+
+
+def test_the_published_menu_always_starts_with_default(tmp_path):
+    s = spec(tmp_path, exec_options=(Option("agy", "antigravity", "everything"),))
+    published = s.published_options("Agtest")
+    assert published.names == ("default", "agy")
+    assert published.command_line() == "@**Agtest** use <option>"
+
+
+def test_the_option_is_the_profile_name_unless_the_agent_says_otherwise(tmp_path):
+    s = spec(tmp_path, exec_options=(Option("agy"),))
+    assert s.profile_for(Selection("agy", "topic", 3), "worker") == "agy"
+    assert s.profile_for(Selection(), "worker") is None
+    assert s.profile_for(Selection("default"), "worker") is None
+
+
+def test_an_agent_may_map_an_option_differently_per_role(tmp_path):
+    s = spec(
+        tmp_path,
+        exec_options=(Option("agy"),),
+        exec_profile=lambda option, role: None if role == "summarizer" else f"{option}-x",
+    )
+    assert s.profile_for(Selection("agy", "topic", 3), "worker") == "agy-x"
+    assert s.profile_for(Selection("agy", "topic", 3), "summarizer") is None
+
+
+def test_a_run_records_what_was_asked_for_beside_what_ran(tmp_path, monkeypatch):
+    s = spec(tmp_path, exec_options=(Option("agy"),))
+    asked = []
+    monkeypatch.setattr(
+        agent, "resolve_spec_role",
+        lambda spec, role, **kw: asked.append(kw.get("profile_override"))
+        or ResolvedAgent(role, "agy", "agy", "antigravity", "antigravity/g", {},
+                         "agy", None, {}, "Read"),
+    )
+    monkeypatch.setattr(
+        agent, "run_harness",
+        lambda a, prompt, **kw: HarnessResult(
+            "answer", 0, {"role": a.role, "profile": a.profile, "harness": a.harness,
+                          "model": a.model},
+        ),
+    )
+    _, run_record, _ = agent.run_role(
+        s, "front", "question", cwd=tmp_path, timeout=30,
+        selection=Selection("agy", "topic", 5731),
+    )
+    assert asked == ["agy"]
+    # what was asked for …
+    assert run_record["exec_option"] == "agy"
+    assert run_record["exec_source"] == "topic"
+    assert run_record["exec_message_id"] == 5731
+    # … and what actually ran.
+    assert (run_record["profile"], run_record["harness"]) == ("agy", "agy")
+
+
+def test_a_run_with_no_selection_still_says_which_default_it_was(tmp_path, monkeypatch):
+    s = spec(tmp_path, exec_options=(Option("agy"),))
+    monkeypatch.setattr(
+        agent, "resolve_spec_role",
+        lambda spec, role, **kw: ResolvedAgent(
+            role, "stub", "fake", "ollama", "ollama/test", {}, "agent", None, {}, "Read"
+        ),
+    )
+    monkeypatch.setattr(
+        agent, "run_harness",
+        lambda a, prompt, **kw: HarnessResult("answer", 0, {"profile": a.profile}),
+    )
+    _, run_record, _ = agent.run_role(
+        s, "front", "question", cwd=tmp_path, timeout=30, selection=Selection(),
+    )
+    assert run_record["exec_source"] == "default"
+    assert "exec_option" not in run_record

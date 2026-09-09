@@ -135,3 +135,40 @@ def test_an_intro_posted_without_a_roster_is_unchanged(tmp_path):
     assert intro.intro_text(source, tmp_path, "x", date(2026, 9, 6), "abc") == (
         "hello\n\n---\nPosted: 2026-09-06\nRevision: `abc`\n"
     )
+
+
+# --- the execution-options block (ag.exec-options.v1) ----------------------
+
+from agag import execopt  # noqa: E402
+
+
+def test_an_introduction_carries_the_published_options(tmp_path):
+    path = tmp_path / "intro.md"
+    path.write_text("I am {instance}.\n", encoding="utf-8")
+    options = execopt.with_default(
+        "Autolab", [execopt.Option("agy", "antigravity", "everything", "Antigravity CLI")]
+    )
+    text = intro.intro_text(path, tmp_path, "autolab-agstudio1", commit="abc1234",
+                            options=options)
+    read = intro.parse_exec_options(text)
+    assert read is not None
+    assert read.bot == "Autolab" and read.names == ("default", "agy")
+
+
+def test_an_introduction_without_options_leaves_a_reader_at_unknown(tmp_path):
+    path = tmp_path / "intro.md"
+    path.write_text("I am {instance}.\n", encoding="utf-8")
+    text = intro.intro_text(path, tmp_path, "autolab-agstudio1", commit="abc1234")
+    assert intro.parse_exec_options(text) is None
+
+
+def test_the_roster_and_the_options_blocks_do_not_read_each_other(tmp_path):
+    path = tmp_path / "intro.md"
+    path.write_text("I am {instance}.\n", encoding="utf-8")
+    roster = intro.Roster(instance="autolab-agstudio1", agent="agautolab", bot="Autolab",
+                          bot_id=11, channel="autolab-agstudio1", prefixes=("workplan-",))
+    options = execopt.with_default("Autolab", [execopt.Option("agy", "antigravity")])
+    text = intro.intro_text(path, tmp_path, "autolab-agstudio1", commit="abc1234",
+                            roster=roster, options=options)
+    assert intro.parse_roster(text).prefixes == ("workplan-",)
+    assert intro.parse_exec_options(text).names == ("default", "agy")

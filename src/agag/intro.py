@@ -44,6 +44,16 @@ The block is a fenced ```agag-roster``` section of `key: value` lines, which
 keeps it out of the prose a human reads and makes it a single-pass parse.
 `roster_block` writes one, `parse_roster` reads one, and they live beside each
 other for the same reason the harvest does.
+
+Since `runtime-profile` step2 a second block rides along on the same argument:
+`ag.exec-options.v1` (`agag.execopt`), the **execution options** this instance
+publishes — the public names a requester may ask it to run under, the usage
+pool each consumes and the work each covers. Routing vocabulary travels as
+posted content in this system; so does execution vocabulary, and for the
+sharper version of the same reason — an agent's profiles are its own
+configuration, and a requester that had to read them would be coupled to the
+recipient's implementation. `parse_exec_options` reads one back, and returns
+None for *unknown* exactly as `parse_roster` does.
 """
 
 from __future__ import annotations
@@ -54,6 +64,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from agag.execopt import ExecOptions, parse_options
 from agag.zulip import RESOLVED_TOPIC_PREFIX
 
 AGENTS_CHANNEL = "agents"
@@ -101,6 +112,7 @@ __all__ = [
     "harvest_intros",
     "intro_text",
     "intro_topic",
+    "parse_exec_options",
     "parse_roster",
     "post_intro",
     "render_agents_md",
@@ -218,6 +230,7 @@ def intro_text(
     today: date | None = None,
     commit: str | None = None,
     roster: Roster | None = None,
+    options: ExecOptions | None = None,
 ) -> str:
     """The committed Markdown, with `{instance}` filled in, plus the stamp.
 
@@ -225,25 +238,46 @@ def intro_text(
     so it never interrupts what a human came to read, and inside the post, so
     it is re-stated every time the contract is re-posted. Without a `roster`
     the post is exactly what it was before.
+
+    The execution-options block (`ag.exec-options.v1`) follows it, for the
+    same reasons and with one of its own: what an agent will run under is a
+    thing that changes with its configuration, and the introduction is the
+    one document already re-posted when configuration changes. An agent that
+    publishes nothing writes no block, and a reader is left at *unknown* —
+    which is the honest answer, and deliberately not "no".
     """
     posted = today or date.today()
     current_revision = commit if commit is not None else revision(root)
     body = intro_path.read_text(encoding="utf-8").rstrip().replace("{instance}", instance)
     if roster is not None:
         body = f"{body}\n\n{roster_block(roster)}"
+    if options is not None:
+        body = f"{body}\n\n{options.block()}"
     return f"{body}\n\n---\nPosted: {posted.isoformat()}\nRevision: `{current_revision}`\n"
 
 
 def post_intro(
-    client, *, instance: str, intro_path: Path, root: Path, roster: Roster | None = None
+    client, *, instance: str, intro_path: Path, root: Path,
+    roster: Roster | None = None, options: ExecOptions | None = None,
 ) -> str:
     """Append this instance's current introduction to the shared board.
 
     Returns the posted text, so a caller can log or test what it announced.
     """
-    text = intro_text(intro_path, root, instance, roster=roster)
+    text = intro_text(intro_path, root, instance, roster=roster, options=options)
     client.send_to_channel(AGENTS_CHANNEL, intro_topic(instance), text)
     return text
+
+
+def parse_exec_options(text: str) -> ExecOptions | None:
+    """The execution options an introduction publishes, or None for *unknown*.
+
+    Re-exported here because an introduction is where a consumer reads it,
+    and because the None-is-unknown rule is the one it shares with
+    `parse_roster`: a post with no block is an agent whose options are not
+    known, never an agent that has none.
+    """
+    return parse_options(text)
 
 
 def _agent_name(topic: str) -> str:

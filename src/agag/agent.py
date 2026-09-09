@@ -40,6 +40,7 @@ from pathlib import Path
 
 from . import selfnote
 from .agent_config import ResolvedAgent, load_config, resolve_role
+from .execopt import DEFAULT_OPTION, ExecOptions, Option, Selection, run_meta, with_default
 from .harness import run_harness, write_run_record
 from .topics import workspace_identity
 from .instance import instance_name as read_instance_name
@@ -64,6 +65,7 @@ __all__ = [
     "LOG_ONLY_ENV_VAR",
     "SWEEP_ACK",
     "chat_environment",
+    "exec_options_for",
     "intro_main",
     "is_ack",
     "listener_main",
@@ -98,6 +100,19 @@ class AgentSpec:
     `extra_prefixes` are further topic prefixes swept elsewhere, for an agent
     whose vocabulary has more than a plan and a run (autolab's `bmining-`).
     They are swept like the other two; the default guide does not name them.
+
+    `exec_options` is the public menu this agent publishes
+    (`ag.exec-options.v1`) — *without* `default`, which is always prepended.
+    An empty tuple means the agent publishes nothing and the whole contract
+    is off for it: no command is obeyed, no block is posted, and a reader of
+    its introduction correctly learns nothing rather than being told "no".
+
+    `exec_profile(option, role)` is the private half: which `agents.toml`
+    profile serves `role` under that public option. The default is the
+    identity — the option *is* the profile name — because a one-to-one
+    mapping is the honest starting point; an agent whose auxiliary roles stay
+    on another profile passes its own function and keeps that mapping to
+    itself.
     """
 
     agent: str
@@ -105,6 +120,10 @@ class AgentSpec:
     plan_prefix: str = ""
     run_prefix: str = ""
     extra_prefixes: tuple[str, ...] = ()
+    exec_options: tuple[Option, ...] = ()
+    exec_profile: Callable[[str, str], str | None] | None = field(
+        default=None, compare=False
+    )
     extra_environment: Callable[[Mapping[str, str]], Mapping[str, str]] | None = field(
         default=None, compare=False
     )
@@ -170,6 +189,32 @@ class AgentSpec:
         return read_instance_name(
             self.instance_toml, fallback=self.agent, env_var=self.instance_env_var
         )
+
+    # --- execution options ----------------------------------------------
+    def published_options(self, bot: str) -> ExecOptions | None:
+        """What this instance advertises, addressed by the name it is mentioned by.
+
+        None when it publishes nothing: the contract is off, and an
+        introduction with no block leaves a reader at *unknown*, which is the
+        honest answer for an agent that has never been asked.
+        """
+        if not self.exec_options:
+            return None
+        return with_default(bot, self.exec_options)
+
+    def profile_for(self, selection: Selection | str | None, role: str) -> str | None:
+        """The `agents.toml` profile a selection means for `role`.
+
+        None is "no override" — the role's configured default — and it is the
+        answer both for a serving nobody selected anything in and for one that
+        asked for `default`. Only the run record tells those apart.
+        """
+        option = selection.option if isinstance(selection, Selection) else selection
+        if not option or option.lower() == DEFAULT_OPTION:
+            return None
+        if self.exec_profile is not None:
+            return self.exec_profile(option, role)
+        return option
 
 
 # --- running a role --------------------------------------------------------
@@ -254,6 +299,7 @@ def run_role(
     on_event=None,
     extra_meta: Mapping[str, object] | None = None,
     agent: ResolvedAgent | None = None,
+    selection: Selection | None = None,
 ) -> tuple[str, dict, int]:
     """Resolve `role`, run it once, and return output, record, and exit code.
 
@@ -267,7 +313,16 @@ def run_role(
     that needs them (autolab's agcode budget, its permission bypass).
     `extra_meta` is stamped into the run record beside the harness's own
     facts (autolab records the project a run was for).
+
+    `selection` is the execution option this serving froze
+    (`ag.exec-options.v1`). It decides the profile when `profile` was not
+    given outright, and it is recorded beside the harness's own
+    `profile`/`harness`/`model` — the public name is what was *asked for*,
+    those are what ran. A caller that already resolved the role passes both
+    `agent` and `selection`, and only the record is affected.
     """
+    if profile is None and selection is not None:
+        profile = spec.profile_for(selection, role)
     if agent is None:
         agent = resolve_spec_role(spec, role, profile_override=profile, home=home)
     result = run_harness(
@@ -285,6 +340,8 @@ def run_role(
     # Which conversation the run was for, read from where it ran; an explicit
     # `extra_meta` wins over it.
     result.meta.update(workspace_identity(cwd))
+    if selection is not None:
+        result.meta.update(run_meta(selection))
     if extra_meta:
         result.meta.update(extra_meta)
     run_record = {"schema": "ag.agent-run.v1", **result.meta}
@@ -306,6 +363,17 @@ def log_only(spec: AgentSpec) -> bool:
         os.environ.get(spec.log_only_env_var, ""),
         os.environ.get(LOG_ONLY_ENV_VAR, ""),
     )
+
+
+def exec_options_for(spec: AgentSpec, client: ZulipClient) -> ExecOptions | None:
+    """This instance's published menu, addressed by the name it is mentioned by.
+
+    The command is `@**<bot>** use <option>`, and the bot is the Zulip *full
+    name* — chosen at provisioning time, so it is read off the account rather
+    than assumed to be the instance name (`Front` is the bot of
+    `front-agstudio1`). Same read as the roster block, same reason.
+    """
+    return spec.published_options(str(client.whoami().get("full_name") or spec.instance_name()))
 
 
 def topic_filter(spec: AgentSpec):
@@ -431,10 +499,12 @@ def roster_for(spec: AgentSpec, client: ZulipClient) -> Roster:
 def intro_main(spec: AgentSpec) -> str:
     """Append the current introduction to `#agents` for this instance."""
     client = ZulipClient.from_env(spec.zulip_env)
+    roster = roster_for(spec, client)
     return post_intro(
         client,
         instance=spec.instance_name(),
         intro_path=spec.intro_path,
         root=spec.root,
-        roster=roster_for(spec, client),
+        roster=roster,
+        options=spec.published_options(roster.bot),
     )

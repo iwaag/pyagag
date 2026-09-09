@@ -584,3 +584,124 @@ def test_workspace_identity_reads_a_generation_directory(tmp_path):
     # A project clone or a generator workspace is not a conversation.
     assert workspace_identity(tmp_path / "projects" / "pj-x") == {}
     assert workspace_identity(root / "front" / "topic" / "notanumber" / "front") == {}
+
+
+# --- execution options (ag.exec-options.v1) --------------------------------
+
+from agag import execopt  # noqa: E402
+from agag.execopt import Option  # noqa: E402
+
+MENU = execopt.with_default("Autolab", [Option("agy", "antigravity", "everything", "the Antigravity CLI")])
+
+
+def exec_command(option, bot="Autolab"):
+    return f"@**{bot}** use {option}"
+
+
+def test_a_configuration_only_post_costs_no_ack_and_no_run():
+    calls = []
+    ran = []
+    client = Client(calls, history=[message(content=exec_command("agy"), id=7)])
+    serve(client, lambda ctx: ran.append(ctx) or topics.TopicResult(["done"]),
+          exec_options=MENU)
+    assert ran == []
+    # One read, one confirmation. No "ack", no reply, no re-check.
+    assert [call[0] for call in calls] == ["history", "post"]
+    assert "Execution option set to `agy`" in calls[-1][2]
+    # A confirmation names nobody: it is not worth a run at the other end.
+    assert "@**" not in calls[-1][2]
+
+
+def test_a_configuration_only_post_is_answered_with_a_line_not_a_reaction():
+    # The owner's own post is what stops the topic matching the sweep; a
+    # reaction would leave the poster as the last speaker forever.
+    calls = []
+    client = Client(calls, history=[message(content=exec_command("default"), id=7)])
+    serve(client, lambda ctx: topics.TopicResult(["done"]), exec_options=MENU)
+    assert calls[-1][0] == "post" and "reset" in calls[-1][2]
+
+
+def test_the_selection_reaches_the_handler_frozen_at_the_servings_start():
+    seen = []
+    client = Client([], history=[message(content=exec_command("agy"), id=7),
+                                 message(content="build it", id=8)])
+    serve(client, lambda ctx: seen.append(ctx.selection) or topics.TopicResult(["done"]),
+          exec_options=MENU)
+    assert seen[0].option == "agy"
+    assert seen[0].source == "topic" and seen[0].message_id == 7
+
+
+def test_a_command_beside_work_is_applied_and_the_topic_is_still_served():
+    calls = []
+    seen = []
+    client = Client(calls, history=[message(content=exec_command("agy"), id=7),
+                                    message(content="now build it", id=8)])
+    serve(client, lambda ctx: seen.append(ctx.selection) or topics.TopicResult(["done"]),
+          exec_options=MENU)
+    assert seen and seen[0].option == "agy"
+    assert calls[1][2] == "ack"
+    assert "done" in calls[-2][2]
+
+
+def test_a_refused_name_is_posted_visibly_and_names_the_poster():
+    calls = []
+    ran = []
+    client = Client(calls, history=[message(content=exec_command("opus"), id=7)])
+    serve(client, lambda ctx: ran.append(1) or topics.TopicResult(["done"]),
+          exec_options=MENU)
+    assert ran == []
+    refusal = calls[1][2]
+    assert refusal.startswith("@**Developer**")
+    assert "`opus`" in refusal and "`agy`" in refusal
+    assert "my configured defaults" in refusal
+
+
+def test_a_refused_name_never_becomes_the_selection():
+    seen = []
+    client = Client([], history=[message(content=exec_command("agy"), id=7),
+                                 message(content=exec_command("opus"), id=8),
+                                 message(content="build it", id=9)])
+    serve(client, lambda ctx: seen.append(ctx.selection) or topics.TopicResult(["done"]),
+          exec_options=MENU)
+    assert seen[0].option == "agy"
+
+
+def test_an_agent_that_publishes_nothing_serves_exactly_as_before():
+    calls = []
+    seen = []
+    client = Client(calls, history=[message(content=exec_command("agy"), id=7)])
+    serve(client, lambda ctx: seen.append(ctx.selection) or topics.TopicResult(["done"]))
+    assert seen and seen[0] == execopt.Selection()
+    assert calls[0][2] == "ack"
+
+
+def test_a_command_arriving_during_a_run_is_handled_on_the_next_pass():
+    calls = []
+    seen = []
+
+    class Arriving(Client):
+        """The command lands while the run is in flight."""
+
+        def __init__(self, calls):
+            super().__init__(calls, history=[message(content="build it", id=8)])
+            self.reads = 0
+
+        def topic_history(self, channel, topic, num_before):
+            self.reads += 1
+            self.calls.append(("history", num_before))
+            if self.reads >= 3:
+                # Our own reply is in the topic by then, so the command is
+                # the only thing left awaiting an answer.
+                return self.history + [
+                    message(sender_id=BOT_ID, name="Autolab", content="done", id=15),
+                    message(content=exec_command("agy"), id=20),
+                ]
+            return self.history
+
+    client = Arriving(calls)
+    serve(client, lambda ctx: seen.append(ctx.selection) or topics.TopicResult(["done"]),
+          exec_options=MENU)
+    # The first serving ran under no selection — the command was not there
+    # when it was frozen — and the second pass is configuration only.
+    assert len(seen) == 1 and seen[0] == execopt.Selection()
+    assert "Execution option set to `agy`" in calls[-1][2]

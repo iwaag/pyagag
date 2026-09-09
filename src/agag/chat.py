@@ -38,6 +38,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import execopt
+from .intro import AGENTS_CHANNEL, harvest_intros, parse_exec_options
 from .selfnote import (
     Conversation,
     home_from_environment,
@@ -66,6 +68,7 @@ __all__ = [
     "client_from_environment",
     "format_messages",
     "ensure_rootchat",
+    "exec_options_lines",
     "join_and_record",
     "last_id",
     "main",
@@ -109,6 +112,14 @@ Examples
   # Mark a conversation finished, once you have read it and it is finished.
   agentchat resolve <their-channel> <topic>
 
+  # Who can be asked to run under a particular execution option, and what
+  # each of their options costs and covers.
+  agentchat options
+
+  # Ask an agent to run one conversation under one of the options it
+  # published. Post this in the topic whose work you want run that way.
+  agentchat use <their-channel> <topic> <option> --to "<their Zulip name>"
+
   The channel and the topic name are not for this tool to suggest: they are
   whatever the agent you are addressing said its entrance is. Read its
   introduction, and use the names it gave.
@@ -136,6 +147,19 @@ Notes
   Resolving is somebody's decision, not a tidying reflex. Read the
   conversation, satisfy yourself that it is over, and resolve it when you
   were asked to.
+
+  How an agent executes is a thing you may ask for, not a thing you may
+  assume. `options` prints what each agent has *published* — a public name, the
+  usage pool it consumes and the work it covers — and nothing else is
+  askable: an agent's internal profile names are its own business, and an
+  agent that published nothing is *unknown*, which is not the same as "no".
+  Say so, or ask, rather than trying a name to see what happens.
+
+  `use` posts one command line and returns. It is configuration, not a
+  request: the agent answers it with a line of its own and starts no work, so
+  post what you actually want done separately. It applies from that agent's
+  next serving of that conversation onward, so it never changes a run already
+  in flight.
 """
 
 
@@ -314,6 +338,36 @@ def ensure_rootchat(client: ZulipClient, channel: str, topic: str, out) -> None:
     _ANCHORED.add((channel, topic))
 
 
+def exec_options_lines(entries, only: str | None = None) -> list[str]:
+    """What each agent published about how it can be asked to execute.
+
+    `entries` is `agag.intro.harvest_intros`' output — the board as it
+    stands. Three answers are possible per agent and all three are printed,
+    because they are different:
+
+    - a menu, with each option's pool and coverage;
+    - `supported: no` — asked and answered;
+    - **unknown** — no block in the introduction, which is what an agent that
+      predates the contract looks like. A caller that reads that as "cannot"
+      has invented the answer; report it as unknown, or ask.
+    """
+    lines: list[str] = []
+    for name, body in entries:
+        if only and name != only:
+            continue
+        options = parse_exec_options(body)
+        if options is None:
+            lines.append(f"{name}: unknown — publishes no execution options block")
+            continue
+        if not options.supported or not options.options:
+            lines.append(f"{name}: does not support execution options")
+            continue
+        lines.append(f"{name}: {options.command_line()}")
+        for option in options.options:
+            lines.append(f"    {option.describe()}")
+    return lines
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentchat",
@@ -405,6 +459,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     resolve.add_argument("channel", help="channel name, without the leading '#'")
     resolve.add_argument("topic", help="topic name, resolved or not")
+
+    options = subcommands.add_parser(
+        "options",
+        help="what each agent published about how it can be asked to execute",
+        description=(
+            "Read the execution options each agent advertises in its own "
+            "introduction: a public name, the usage pool it consumes and the "
+            "work it covers. These names are the only ones you may ask for. "
+            "An agent that publishes no block is printed as 'unknown' — it is "
+            "not a refusal, and it is not permission to guess."
+        ),
+    )
+    options.add_argument(
+        "agent", nargs="?", default=None,
+        help="one agent's name, as it appears on the board; omit for all",
+    )
+
+    use = subcommands.add_parser(
+        "use",
+        help="ask an agent to run one conversation under one of its options",
+        description=(
+            "Post '@**<them>** use <option>' into <channel> > <topic>. That "
+            "is configuration, not a request: they answer with a line and "
+            "start no work, and it applies from their next serving of that "
+            "conversation onward. Use the name and the option exactly as "
+            "'agentchat options' printed them; 'default' undoes it."
+        ),
+    )
+    use.add_argument("channel", help="channel name, without the leading '#'")
+    use.add_argument("topic", help="topic name whose work should run this way")
+    use.add_argument("option", help="a public option name they published, or 'default'")
+    use.add_argument(
+        "--to", required=True, metavar="ZULIP_NAME",
+        help="their Zulip name, as their published command line spells it",
+    )
 
     return parser
 
@@ -500,6 +589,35 @@ def _run(args, client: ZulipClient, out) -> int:
             )
         client.resolve_topic(message_id, bare)
         print(f"resolved #{args.channel} > {bare}", file=out)
+        return 0
+    if args.command == "options":
+        lines = exec_options_lines(harvest_intros(client), args.agent)
+        if not lines:
+            who = f" for {args.agent}" if args.agent else ""
+            print(f"no introductions on #{AGENTS_CHANNEL}{who}", file=out)
+            return 0
+        print("\n".join(lines), file=out)
+        return 0
+    if args.command == "use":
+        refuse_resolved(client, args.channel, args.topic)
+        joined = join_and_record(client, args.channel, args.topic, out)
+        # Anchored like any other post of ours: a refusal names the poster,
+        # and this is what lets that refusal find the conversation we asked
+        # from. A selection nobody can hear refused is worse than none.
+        ensure_rootchat(client, args.channel, args.topic, out)
+        text = execopt.command_line(args.to, args.option)
+        message_id = client.send_to_channel(args.channel, args.topic, text)
+        print(
+            f"sent message {message_id} to #{args.channel} > {args.topic}: {text}",
+            file=out,
+        )
+        print(
+            "that is configuration only — they will confirm it and start no "
+            "work; post what you want done separately",
+            file=out,
+        )
+        if joined:
+            print(f"joined #{args.channel}", file=out)
         return 0
     if args.command == "topics":
         names = client.channel_topics(client.stream_id(args.channel))

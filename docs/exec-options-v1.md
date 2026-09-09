@@ -172,13 +172,28 @@ harness, model, profile). It gains the public half:
 | `exec_option` | the public option in force, or absent when none was selected |
 | `exec_source` | `topic` \| `inherited` \| `default` |
 | `exec_message_id` | the message the selection was frozen from, when there is one |
+| `exec_inherited_from` | the parent conversation an inherited selection came from |
 
 `profile`, `harness` and `model` keep their existing meaning, so a record
 says both what was asked for and what actually ran. That is the whole of
 "Agent ≠ Model" for this contract: the public name is a request, the record
 is the fact.
 
-## 8. Examples
+## 8. Asking for one from a run
+
+`agentchat` carries both halves, so a run never has to compose a mention or
+read a configuration file:
+
+    agentchat options                  # every agent's published menu, or "unknown"
+    agentchat options <agent>          # one agent's
+    agentchat use <channel> <topic> <option> --to "<their Zulip name>"
+
+`use` posts the one command line and returns, saying that it started no work.
+It anchors the topic with the ordinary `[selfnote][rootchat]` note first, so
+that a **refusal** — which names the poster, unlike a confirmation — reaches
+the conversation the request was made from.
+
+## 9. Examples
 
 Selection, then work:
 
@@ -209,7 +224,7 @@ Inheritance, written by autolab into a new `workrun-` topic:
 
     [selfnote][exec] agy from pj-agdev/workplan-runtime-profile#5731
 
-## 9. What this contract deliberately does not have
+## 10. What this contract deliberately does not have
 
 - No approval machinery, no per-requester permissions, no audit trail beyond
   the topic and the run record. This is a private experimental environment;

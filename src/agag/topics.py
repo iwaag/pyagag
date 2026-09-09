@@ -31,6 +31,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import execopt
+from .execopt import ExecOptions, Selection
 from .selfnote import is_selfnote
 from .zulip import (
     RESOLVED_TOPIC_PREFIX,
@@ -45,6 +47,7 @@ HISTORY_MESSAGES = 1000
 
 __all__ = [
     "GuideError",
+    "apply_exec_commands",
     "handoff_mention",
     "write_threads",
     "TopicContext",
@@ -309,6 +312,74 @@ def threads_placement(written, directory: Path | None = None) -> str:
     )
 
 
+# --- the execution command -------------------------------------------------
+
+
+def apply_exec_commands(
+    client: ZulipClient,
+    channel: str,
+    topic: str,
+    history: list[dict],
+    self_id: int,
+    options: ExecOptions,
+    *,
+    log=default_log,
+) -> bool:
+    """Answer the execution commands awaiting this bot. True = nothing else to do.
+
+    `ag.exec-options.v1` §2. Two things happen here and only here, so every
+    agent means the same by them:
+
+    - **A configuration-only post is not work.** When everything waiting for
+      this bot is a command, the setting is answered with one deterministic
+      line and no model is launched. The line is the owner's own post, which
+      is what stops the topic matching the sweep forever; a reaction would
+      leave the poster as the last speaker (the ComfyUI notifier reacts for
+      the opposite reason — it is not the owner).
+    - **A refused name is refused visibly**, and the refusal names the poster
+      so they actually learn it, because an agent that asked for `opus` and
+      heard nothing will ask again. A confirmation names nobody: it is not
+      worth a run at the other end.
+
+    A command sitting beside real work is *not* configuration-only. It is
+    applied — `execopt.resolve` reads it off the history like any other
+    directive — and the topic is served as usual; only a bad name is answered
+    here, before the run, so the refusal is not buried under the reply.
+    """
+    if not options.supported or not options.bot:
+        return False
+    pending = execopt.pending_speech(history, self_id)
+    asked = execopt.configuration_only(history, self_id, options.bot)
+    bad = [
+        name
+        for message in pending
+        for name in (execopt.split_commands(message.get("content"), options.bot) or ())
+        if name.lower() != execopt.DEFAULT_OPTION and options.get(name) is None
+    ]
+    if not pending or (asked is None and not bad):
+        return False
+    standing = execopt.resolve(history, options.bot, known=options.names)
+    poster = ""
+    for message in reversed(pending):
+        name = str(message.get("sender_full_name") or "").strip()
+        if name:
+            poster = f"@**{name}**"
+            break
+    for name in dict.fromkeys(bad):
+        log(f"refusing execution option {name!r} in {channel!r}/{topic!r}")
+        text = execopt.refusal(name, options, current=standing)
+        topic_write(topic, f"{poster} {text}" if poster else text, channel=channel, client=client)
+    if asked is None:
+        return False  # work is waiting too; serve it under the standing selection
+    good = [name for name in asked if name.lower() == execopt.DEFAULT_OPTION or options.get(name)]
+    if good:
+        chosen = good[-1]
+        option = None if chosen.lower() == execopt.DEFAULT_OPTION else chosen
+        log(f"execution option for {channel!r}/{topic!r} is now {option or 'default'}")
+        topic_write(topic, execopt.confirmation(option, options), channel=channel, client=client)
+    return True
+
+
 # --- the serving skeleton --------------------------------------------------
 
 
@@ -331,6 +402,12 @@ class TopicContext:
     #: is this topic's and the answer belongs where the question was asked.
     reply_channel: str = ""
     reply_topic: str = ""
+    #: The execution option in force for this serving, frozen from the topic
+    #: history as it stood when the serving started (`ag.exec-options.v1`).
+    #: A command posted while the run is in flight has a larger message id
+    #: and lands on the next serving. `Selection()` — nothing selected — is
+    #: what a serving of an agent that publishes no options always gets.
+    selection: Selection = field(default_factory=Selection)
 
     def __post_init__(self) -> None:
         self.reply_channel = self.reply_channel or self.channel
@@ -382,6 +459,7 @@ def serve_topic(
     reply_to: tuple[str, str] | None = None,
     handoff: bool = True,
     history_messages: int = HISTORY_MESSAGES,
+    exec_options: ExecOptions | None = None,
     log=default_log,
 ) -> None:
     """Serve one awaiting topic, and always answer it.
@@ -420,6 +498,15 @@ def serve_topic(
     topic being replied into. That is the turn-taking rule as code: whoever is
     named is served next, and a reply that names nobody ends the exchange.
 
+    `exec_options`, when given, makes this serving obey `ag.exec-options.v1`:
+    the topic's own execution commands are answered before anything else
+    (`apply_exec_commands`), and a configuration-only post returns here
+    without an ack, without a workspace and without a model. Otherwise the
+    selection is **frozen** from the history this serving read — commands
+    below `processed_up_to` only — and handed to the handler as
+    `context.selection`, so a command posted mid-run reaches the next
+    serving rather than this one.
+
     `handoff=False` posts the reply without that mention, for the serving
     that is a *record* rather than an answer — one whose requester is being
     given their turn back somewhere else. Naming them in both places starts
@@ -434,6 +521,22 @@ def serve_topic(
     replies_here = (reply_channel, reply_topic) == (channel, topic)
 
     while True:
+        # Read before the ack when there are options to obey: a
+        # configuration-only post must cost neither an ack nor a run, and the
+        # ack is our own message so nothing that matters is lost by seeing
+        # the topic a moment earlier.
+        early: list[dict] | None = None
+        if exec_options is not None:
+            try:
+                early = client.topic_history(channel, topic, num_before=history_messages)
+            except Exception as error:  # noqa: BLE001 - fall back to the ordinary path
+                log(f"could not read {channel!r}/{topic!r} for execution commands: {error!r}")
+            else:
+                if replies_here and apply_exec_commands(
+                    client, channel, topic, early, self_id, exec_options, log=log
+                ):
+                    return
+
         if replies_here:
             topic_write(topic, ack_text, channel=channel, client=client)
 
@@ -445,12 +548,17 @@ def serve_topic(
         completed = False
         try:
             context.step = "chatlog"
-            context.history = client.topic_history(
+            context.history = early if early is not None else client.topic_history(
                 channel, topic, num_before=history_messages
             )
             context.processed_up_to = max(
                 (int(m.get("id", 0)) for m in context.history), default=0
             )
+            if exec_options is not None:
+                context.selection = execopt.resolve(
+                    context.history, exec_options.bot,
+                    up_to=context.processed_up_to, known=exec_options.names,
+                )
             if empty_reply is not None and not context.humans_spoke():
                 log(f"nothing to answer in {channel!r}/{topic!r}: no messages")
                 context.post(empty_reply)

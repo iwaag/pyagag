@@ -41,6 +41,7 @@ from pathlib import Path
 from . import selfnote
 from .agent_config import ResolvedAgent, load_config, resolve_role
 from .execopt import DEFAULT_OPTION, ExecOptions, Option, Selection, run_meta, with_default
+from .execpool import OptionPools, diagnose, with_derived_pools
 from .harness import run_harness, write_run_record
 from .topics import workspace_identity
 from .instance import instance_name as read_instance_name
@@ -68,6 +69,7 @@ __all__ = [
     "exec_options_for",
     "intro_main",
     "is_ack",
+    "log_pool_diagnostics",
     "listener_main",
     "log_only",
     "resolve_spec_role",
@@ -106,6 +108,15 @@ class AgentSpec:
     An empty tuple means the agent publishes nothing and the whole contract
     is off for it: no command is obeyed, no block is posted, and a reader of
     its introduction correctly learns nothing rather than being told "no".
+    Each option's `pool` is what the agent *declares*; what is published is
+    what `exec_roles` actually resolves to (`agag.execpool`).
+
+    `exec_roles` are the roles an execution option covers — every role a
+    serving of this agent may launch. They are what the published pool is
+    derived from, so a menu cannot advertise a pool that no role spends, and
+    an agent whose roles resolve to two providers says both. Empty means the
+    pools are published as declared, which is the honest answer for an agent
+    that has not said which roles its options cover.
 
     `exec_profile(option, role)` is the private half: which `agents.toml`
     profile serves `role` under that public option. The default is the
@@ -121,6 +132,7 @@ class AgentSpec:
     run_prefix: str = ""
     extra_prefixes: tuple[str, ...] = ()
     exec_options: tuple[Option, ...] = ()
+    exec_roles: tuple[str, ...] = ()
     exec_profile: Callable[[str, str], str | None] | None = field(
         default=None, compare=False
     )
@@ -191,16 +203,76 @@ class AgentSpec:
         )
 
     # --- execution options ----------------------------------------------
+    def option_pools(
+        self, *, config_path: Path | None = None, overlay_path: Path | None = None,
+    ) -> tuple[tuple[Option, ...], tuple[OptionPools, ...]]:
+        """The menu with **derived** pools, and what each derivation found.
+
+        The declaration in `exec_options` is an assertion the agent makes;
+        this is what its own configuration and this machine's overlay say
+        will really run, role by role (`agag.execpool`). A configuration
+        that cannot be read leaves the declarations alone and finds nothing,
+        so a broken file degrades the menu's precision rather than emptying
+        it.
+        """
+        listed, findings, _ = self._pool_view()
+        return listed, findings
+
+    def _pool_view(self) -> tuple[tuple[Option, ...], tuple[OptionPools, ...], str]:
+        """`(menu, findings, why nothing could be derived)`.
+
+        The third value is not decoration: a configuration this instance
+        cannot read is why the pools came back as declared, and reporting
+        "no mismatch" for it would be the same silent pass the derivation
+        exists to end.
+        """
+        listed = with_default("", self.exec_options).options
+        if not self.exec_roles:
+            return listed, (), ""
+        try:
+            config, overlay = load_config(self.agents_config, self.agents_local_config)
+        except Exception as error:
+            return listed, (), f"{type(error).__name__}: {error}"
+        derived, findings = with_derived_pools(
+            listed, self.exec_roles, config, overlay, self.profile_for,
+        )
+        return derived, findings, ""
+
+    def pool_diagnostics(self) -> tuple[str, ...]:
+        """Every declared pool that disagrees with what actually resolves.
+
+        Empty is the normal answer. A line here means the agent is claiming
+        an account it does not spend — which is exactly the kind of wrong a
+        published menu must not be, and why what gets published is the
+        derived value rather than this one.
+        """
+        listed, findings, error = self._pool_view()
+        if error:
+            return (
+                f"the pools could not be derived, so the declared ones stand "
+                f"unchecked: {error}",
+            )
+        return diagnose(self.exec_options_with_default(), findings)
+
+    def exec_options_with_default(self) -> tuple[Option, ...]:
+        """What this agent *declares*, `default` included — the assertion."""
+        return with_default("", self.exec_options).options
+
     def published_options(self, bot: str) -> ExecOptions | None:
         """What this instance advertises, addressed by the name it is mentioned by.
 
         None when it publishes nothing: the contract is off, and an
         introduction with no block leaves a reader at *unknown*, which is the
         honest answer for an agent that has never been asked.
+
+        The pools are derived, never the declared ones: the block a requester
+        acts on is generated from the running instance precisely so it cannot
+        say something the run will not do.
         """
         if not self.exec_options:
             return None
-        return with_default(bot, self.exec_options)
+        derived, _ = self.option_pools()
+        return ExecOptions(bot, derived, True)
 
     def profile_for(self, selection: Selection | str | None, role: str) -> str | None:
         """The `agents.toml` profile a selection means for `role`.
@@ -430,6 +502,10 @@ def listener_main(
     """
     from .entrance import handle_entrance
 
+    # Said once, at startup: a wrong declaration cannot break a serving —
+    # the pool is derived — but it will keep being wrong until somebody is
+    # told, and the listener log is where somebody looks.
+    log_pool_diagnostics(spec)
     client = ZulipClient.from_env(spec.zulip_env)
     dm_client = ZulipClient.from_env(spec.zulip_env)
     routes = dict(dispatch or {})
@@ -496,8 +572,29 @@ def roster_for(spec: AgentSpec, client: ZulipClient) -> Roster:
     )
 
 
+def log_pool_diagnostics(spec: AgentSpec) -> tuple[str, ...]:
+    """Say out loud every pool this agent declares but does not spend.
+
+    Publication and every serving derive the pool, so nothing here changes
+    what is advertised — this is the *diagnosis*, and it exists because a
+    declaration and reality drifting apart is invisible otherwise: the block
+    stays correct and the tuple in the source stays wrong until somebody
+    reads it. `refactor` p3 ex1.
+    """
+    found = spec.pool_diagnostics()
+    for line in found:
+        log(f"execution-option pool declaration is wrong: {line}")
+    return found
+
+
 def intro_main(spec: AgentSpec) -> str:
-    """Append the current introduction to `#agents` for this instance."""
+    """Append the current introduction to `#agents` for this instance.
+
+    The execution block is generated here, with **derived** pools, so what
+    is posted cannot say something the run will not do. A declaration that
+    disagrees is reported before the post rather than published.
+    """
+    log_pool_diagnostics(spec)
     client = ZulipClient.from_env(spec.zulip_env)
     roster = roster_for(spec, client)
     return post_intro(

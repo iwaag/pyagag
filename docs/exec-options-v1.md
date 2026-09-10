@@ -48,12 +48,47 @@ option: agy-claude | pool: antigravity | covers: everything | Antigravity CLI, C
   | field | meaning |
   |---|---|
   | name | the public name. `default` is always present when `supported: yes` and means *no explicit selection*. |
-  | `pool: <name>` | the usage pool the option consumes — the shared account window a threshold like "70 %" is judged against. **The convention is the provider whose account the harness spends** (`agag.agent_config.HARNESS_PROVIDER`: `anthropic`, `antigravity`, `openai`, `google`), so a consumer can line an option up against a budget observation without a table of its own; `agfront.budget` prints the same name beside each harness. `-` when the agent cannot say, and a pool nobody can name is a condition that cannot be judged rather than one at 0. |
+  | `pool: <name>` | the usage pool the option consumes — the shared account window a threshold like "70 %" is judged against. **The convention is the provider whose account the harness spends** (`agag.agent_config.HARNESS_PROVIDER`: `anthropic`, `antigravity`, `openai`, `google`), so a consumer can line an option up against a budget observation without a table of its own; `agfront.budget` prints the same name beside each harness. Several pools joined by `+` when the roles the option covers spend more than one account (§1.1). `unknown` for a role whose harness has no fixed pool, and `-` when nothing could be resolved at all — a pool nobody can name is a condition that cannot be judged rather than one at 0. |
   | `covers: <work>` | what the option applies to, in the agent's own words (`everything`, or `planning, task work` when auxiliary roles stay on the default pool). |
   | explanation | free text, one short phrase. |
 
 Only options the agent intends to serve are published; the block is not a
 dump of `agents.toml`. A profile that is not published cannot be selected.
+
+### 1.1 The pool is *derived*, not declared
+
+An agent filtering its option names against its configured profiles keeps a
+name from being advertised without a profile behind it. It does nothing about
+the pool beside the name, and `refactor` p3 ex1 found four agents whose
+`pool: anthropic` was true only by coincidence — each one's roles happened to
+point at `claude_code`, and one line in a machine's `agents.local.toml` would
+have made every published default wrong while the code stayed right.
+
+So the pool a block carries is resolved, not written down. For **every role
+the option covers**:
+
+    option -> profile (the agent's private mapping, per role)
+           -> harness (`agents.toml` + this machine's overlay)
+           -> pool    (`HARNESS_PROVIDER`)
+
+`agag.execpool` is that, once, for every agent; `AgentSpec.exec_roles` is what
+each one says its options cover. Four rules follow:
+
+- **The overlay counts.** It is where a role gets moved, so it is where a
+  declaration goes wrong.
+- **Mixed is truthful, not an error.** An agent whose default plans on
+  `claude_code` and works on `agy` spends two accounts, and
+  `pool: anthropic+antigravity` says so. Forcing one name would make the menu
+  lie in the case where the lie costs the most. A consumer matching a
+  threshold treats a `+` declaration as covering each named pool.
+- **Unavailable is not invalid.** Derivation runs with availability checking
+  off: a CLI that is not installed is a runtime failure of that one option
+  (§6), never an unpublishable contract, and never a reason to take an
+  unrelated conversation down.
+- **A wrong declaration is reported.** What is published is always the derived
+  value, so the block cannot lie; the agent's own declaration is compared
+  against it and every disagreement is logged, naming the option, both pools,
+  and the role/profile/harness that produced the derived one.
 
 **A missing block is `unknown`, never "unsupported".** The same rule the
 roster block already carries, for the same reason: a consumer that

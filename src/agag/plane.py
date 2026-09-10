@@ -35,11 +35,11 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-TITLE_LIMIT = 255
-HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(?P<title>.+?)\s*#*\s*$")
+from agag.document import HEADING, TITLE_LIMIT, DocumentError, compose, split
 
 __all__ = [
     "ALREADY_COMPLETED",
+    "HEADING",
     "PLANE_ENV_VARIABLE",
     "PlaneConfig",
     "credentials_path",
@@ -186,23 +186,16 @@ def normalized_name(value: str) -> str:
 
 
 def split_document(text: str) -> tuple[str, str]:
-    """Split one Markdown file into an issue title and description.
+    """`agag.document.split`, raising this module's own error.
 
-    Title is the first heading line; without one, the first non-empty line.
-    Everything else, in file order, is the description.
+    The rule is shared with every other storage of the same document
+    (`agag.document`); what belongs to Plane is only that a failure here is a
+    `PlaneError`, because that is what this module's callers catch.
     """
-    lines = text.splitlines()
-    for index, line in enumerate(lines):
-        if match := HEADING.match(line):
-            title = match.group("title")
-            break
-        if line.strip():
-            title = line.strip()
-            break
-    else:
-        raise PlaneError("the file is empty")
-    description = "\n".join(lines[:index] + lines[index + 1 :]).strip()
-    return title[:TITLE_LIMIT], description
+    try:
+        return split(text)
+    except DocumentError as error:
+        raise PlaneError(str(error)) from error
 
 
 def description_html(description: str) -> str:
@@ -219,8 +212,7 @@ def html_to_text(value: str | None) -> str:
 
 def compose_document(name: str, description_html_value: str | None) -> str:
     """Invert `split_document`: title as `# heading`, then the description."""
-    body = html_to_text(description_html_value)
-    return f"# {name}\n\n{body}\n" if body else f"# {name}\n"
+    return compose(name, html_to_text(description_html_value))
 
 
 # --- projects --------------------------------------------------------------

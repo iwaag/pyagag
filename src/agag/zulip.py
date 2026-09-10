@@ -621,6 +621,30 @@ class ZulipClient:
         messages = self.topic_history(channel, topic, num_before=1)
         return int(messages[-1]["id"]) if messages else 0
 
+    def message(self, message_id: int) -> dict | None:
+        """One message by its id, as it stands now, or None when it is gone.
+
+        A message id is the one identifier in Zulip that no rename touches:
+        resolving a topic renames it, a topic can be renamed by hand, and a
+        message can be moved between topics and channels — through all of
+        that the id stays, and this read answers with the conversation the
+        message is in **now** (`display_recipient` and `subject`). That is
+        what makes an id usable as an anchor for a conversation whose display
+        name is reusable.
+
+        A deleted message is absent, not an error: `None` is the honest
+        answer, and it is a different answer from "a topic with that name
+        exists". Callers rely on that difference.
+        """
+        try:
+            result = self.call(
+                "GET", f"messages/{int(message_id)}", {"apply_markdown": "false"}
+            )
+        except ZulipError:
+            return None
+        message = result.get("message")
+        return message if isinstance(message, dict) else None
+
     def mentions(self, num_before: int = MENTION_HISTORY) -> list[dict]:
         """Recent messages that mention this bot, oldest last.
 

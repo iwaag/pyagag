@@ -1935,3 +1935,39 @@ def test_whoami_is_asked_once_per_client(monkeypatch):
     assert calls == ["users/me"]
     client.whoami(refresh=True)
     assert calls == ["users/me", "users/me"]
+
+
+def test_message_answers_where_an_anchor_is_now():
+    """A message id is the identity that survives every rename: the read
+    answers with the conversation the message is in *now*, not the one it was
+    posted into."""
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+    calls = []
+
+    def call(method, path, params=None, **kwargs):
+        calls.append((method, path, params))
+        return {"message": {"id": 5512, "display_recipient": "work-m1", "subject": "✔ moved"}}
+
+    client.call = call
+    assert client.message(5512) == {
+        "id": 5512, "display_recipient": "work-m1", "subject": "✔ moved"
+    }
+    assert calls == [("GET", "messages/5512", {"apply_markdown": "false"})]
+
+
+def test_message_is_absent_rather_than_an_error_when_it_is_deleted():
+    """A deleted anchor is a work record that is gone. `None` says so, and it
+    is a different answer from a topic that still carries the old name."""
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+
+    def call(method, path, params=None, **kwargs):
+        raise ZulipError("GET messages/9 -> HTTP 404: Invalid message(s)")
+
+    client.call = call
+    assert client.message(9) is None
+
+
+def test_message_without_a_message_body_is_absent():
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+    client.call = lambda *a, **k: {"result": "success"}
+    assert client.message(9) is None

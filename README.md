@@ -297,8 +297,7 @@ channel that already existed unfiled is moved into (`--folder` names another;
 `--no-folder` leaves it where it is). It
 refuses when the bot email already exists rather than regenerating a running
 bot's key. The remaining human checklist is the once-per-realm provisioner
-account, an optional per-agent Plane account, and permanent listener service
-installation. `agag init --help` and `agag provision --help` have the flags.
+account and permanent listener service installation. `agag init --help` and `agag provision --help` have the flags.
 
 ## Development
 

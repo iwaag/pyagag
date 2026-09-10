@@ -428,9 +428,27 @@ class ZulipClient:
         )
         return int(result["channel_folder_id"])
 
-    def channels(self) -> list[dict]:
-        """Public channels visible to this bot."""
-        return self.call("GET", "streams").get("streams", [])
+    def channels(self, *, include_archived: bool = False) -> list[dict]:
+        """Public channels visible to this bot.
+
+        Archived channels are excluded by default, which is what almost every
+        caller wants: an archived channel is retired and costs no sweep. Pass
+        `include_archived` to see them anyway — they keep their `folder_id`
+        and their `is_archived` flag, and a folder cannot be archived while
+        one of them is still filed in it (`archive_channel_folder`).
+        """
+        params = {"exclude_archived": "false"} if include_archived else None
+        return self.call("GET", "streams", params).get("streams", [])
+
+    def clear_channel_folder(self, stream_id: int) -> dict:
+        """Take one channel out of whatever folder it is filed in.
+
+        The counterpart of `set_channel_folder`, and the only way an
+        *archived* channel stops holding its folder open. Verified against
+        Zulip 12.2 (feature level 500): an archived channel still accepts
+        this PATCH.
+        """
+        return self.call("PATCH", f"streams/{int(stream_id)}", {"folder_id": None})
 
     def subscriptions(self) -> list[dict]:
         """Channels to which this bot is currently subscribed."""
@@ -487,9 +505,13 @@ class ZulipClient:
     def archive_channel_folder(self, folder_id: int) -> dict:
         """Archive one channel folder; the channels it held are not touched.
 
-        Zulip refuses to archive a folder that still holds an unarchived
-        channel, so retire the channels first. Organization administrators
-        only — the same principal that files channels it did not create.
+        Zulip refuses to archive a folder that still holds **any** channel,
+        archived ones included — and an archived channel is not in
+        `channels()`, so a caller that only looks there sees an empty folder
+        and a 400 it cannot explain (`refactor` p3 ex1, six orphaned folders
+        deep). Retire the channels, then `clear_channel_folder` each one, and
+        only then archive the folder. Organization administrators only — the
+        same principal that files channels it did not create.
         """
         return self.call(
             "PATCH", f"channel_folders/{int(folder_id)}", {"is_archived": True}

@@ -221,6 +221,26 @@ def test_resolve_topic_skips_an_already_resolved_topic():
     assert len(calls) == 1 and calls[0][0] == "PATCH"
 
 
+def test_rename_topic_moves_the_whole_conversation():
+    """A rename releases the display name and keeps the conversation: one
+    PATCH with `change_all`, and no "moved here" notice to serve anybody."""
+    calls = []
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+    client.call = lambda *a, **k: calls.append(a) or {}
+    client.rename_topic(77, "retired-workplan-trend-m5512")
+    assert calls == [
+        (
+            "PATCH",
+            "messages/77",
+            {
+                "topic": "retired-workplan-trend-m5512",
+                "propagate_mode": "change_all",
+                "send_notification_to_new_thread": False,
+            },
+        )
+    ]
+
+
 def test_add_reaction_acknowledges_without_posting_a_message():
     """The ack must not be a post: a bot message in a run topic re-serves
     its owner, so `seen` has to travel as a reaction."""

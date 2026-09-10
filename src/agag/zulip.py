@@ -714,19 +714,35 @@ class ZulipClient:
         result = self.call("GET", f"users/me/{stream_id}/topics")
         return [str(row["name"]) for row in result.get("topics", [])]
 
+    def rename_topic(self, message_id: int, new_name: str) -> None:
+        """Rename a whole topic, moving every message in it.
+
+        One PATCH on any message of the topic with `change_all`, which this
+        realm permits a bot even for other senders' messages. `resolve_topic`
+        is the special case where the new name is the `\u2714 ` one.
+
+        A rename is how a *display name* is released while the conversation
+        keeps its identity: a message id survives it, so anything anchored to
+        the conversation still finds it, and the freed name is available to
+        whatever work comes next. Zulip has one topic per name in a channel,
+        so the old name must be released **before** the new work claims it —
+        otherwise the two conversations merge into one.
+        """
+        self.call(
+            "PATCH", f"messages/{int(message_id)}",
+            {
+                "topic": new_name,
+                "propagate_mode": "change_all",
+                "send_notification_to_new_thread": False,
+            },
+        )
+
     def resolve_topic(self, message_id: int, topic: str) -> None:
         """Mark a topic resolved (Zulip's ✔ rename), moving every message in
         it — other senders' included, which this realm permits for bots."""
         if topic.startswith(RESOLVED_TOPIC_PREFIX):
             return
-        self.call(
-            "PATCH", f"messages/{message_id}",
-            {
-                "topic": f"{RESOLVED_TOPIC_PREFIX}{topic}",
-                "propagate_mode": "change_all",
-                "send_notification_to_new_thread": False,
-            },
-        )
+        self.rename_topic(message_id, f"{RESOLVED_TOPIC_PREFIX}{topic}")
 
 
 def _safe_topic_component(value: str, label: str) -> str:

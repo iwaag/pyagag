@@ -283,3 +283,21 @@ def test_a_cancelled_work_and_a_childless_one_are_both_refused():
     assert plane.reason_not_completed(issue("s-cancel", ident="p"), [], GROUPS) == "cancelled"
     assert plane.reason_not_completed(issue("s-run", ident="p"), [], GROUPS) == (
         "no sub-work: this is not a mission")
+
+
+def test_the_plane_client_is_not_loaded_by_importing_the_package():
+    """An optional dependency should look optional. Re-exporting `PlaneConfig`
+    from `agag` meant `import agag.selfnote` loaded the Plane HTTP client, and
+    an agent whose record is entirely in Zulip could not prove it never
+    reaches Plane."""
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys, agag, agag.selfnote, agag.zulip, agag.topics; "
+        "print('agag.plane' in sys.modules)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+    assert result.stdout.strip() == "False"

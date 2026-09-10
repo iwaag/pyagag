@@ -2,7 +2,7 @@
 
 `agforge` is the agent; `agforge-agstudio1` is *this running instance of it*
 (`<agent>-<instance label><N>`, the label being the host for now). The name is
-what the Zulip and Plane accounts, the instance's own channel, and the
+what the Zulip account, the instance's own channel, and the
 `intro-<name>` topic all agree on, so every agent keeps it in one file rather
 than repeating it at each use site.
 

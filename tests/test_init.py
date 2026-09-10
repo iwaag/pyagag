@@ -79,7 +79,7 @@ def test_cli_generates_and_prints_the_checklist_without_touching_git(tmp_path, c
     assert code == 0
     out = capsys.readouterr().out
     assert "Human checklist" in out and "AGAG_ZULIP_ADMIN_ENV" in out
-    assert "Plane" in out and "launchd or" in out and "agag provision" in out
+    assert "launchd or" in out and "agag provision" in out
     assert "Settings" not in out and "ZULIP_API_KEY=<api key>" not in out
     root = tmp_path / "agecho"
     assert not (root / ".git").exists()  # version control is the caller's

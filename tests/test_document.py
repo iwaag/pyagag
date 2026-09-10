@@ -1,6 +1,5 @@
 import pytest
 
-from agag import plane
 from agag.document import TITLE_LIMIT, DocumentError, compose, split
 
 
@@ -33,10 +32,3 @@ def test_compose_inverts_split():
     assert compose("Bare", "   ") == "# Bare\n"
 
 
-def test_plane_keeps_the_same_rules_under_its_own_error():
-    """The Plane storage re-exports the document rules, so a document keeps
-    its title whichever of the two storages holds it."""
-    assert plane.split_document("# Ship it\n\nbody") == split("# Ship it\n\nbody")
-    assert plane.TITLE_LIMIT == TITLE_LIMIT
-    with pytest.raises(plane.PlaneError):
-        plane.split_document("")

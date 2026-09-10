@@ -198,9 +198,7 @@ Human checklist for {plan.instance}:
 
  1. Once per realm: create the dedicated provisioner account and put its
     owner-class credentials in the path named by AGAG_ZULIP_ADMIN_ENV.
- 2. Plane (only if this agent will register Work): create an account for it and
-    AGAG_PLANE_ENV or {root / '.local' / 'plane-credentials.env'}.
- 3. To keep the listener running permanently, install it with launchd or
+ 2. To keep the listener running permanently, install it with launchd or
     Ansible after the foreground/background trial.
 
 Agent-side next step (unless --provision was used):

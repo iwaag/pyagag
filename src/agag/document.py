@@ -4,12 +4,13 @@ A plan, a task description, a report — every one of them is a Markdown file
 whose first heading is its title and whose remainder is its content. That
 split predates this module: it lived in `agag.plane`, because the only
 consumer stored the two halves in an issue's `name` and `description_html`.
+That client is gone (`refactor` p3); this rule is what survived it.
 
 A work record kept in **Zulip** stores the same two halves as Markdown, with
-no HTML anywhere near them, and an agent that has no Plane credential must
-not have to import the Plane client to split a heading off a file. So the
-document rules live here, `agag.plane` re-exports them, and both storages
-agree on what the title of a file is.
+no HTML anywhere near them, and an agent that has no Plane credential must not
+have to import a Plane client to split a heading off a file. So the document
+rules live here, and every record — autolab's, forge's, cagent's — agrees on
+what the title of a file is.
 """
 
 from __future__ import annotations

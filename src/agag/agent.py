@@ -482,6 +482,7 @@ def listener_main(
     entrance: Callable[[ZulipClient, str, str], None] | None = None,
     dm_handler=None,
     on_mention: Callable[[ZulipClient, str, str], None] | None = None,
+    on_sweep: Callable[[ZulipClient], None] | None = None,
 ) -> None:
     """Run the pull-sweep listener for `spec` until interrupted.
 
@@ -494,7 +495,9 @@ def listener_main(
     `dm_handler(client, message, self_id)` serves DMs on a side thread;
     without one DMs are logged and left. `on_mention(client, channel, topic)`
     enables `sweep_serve`'s mention route for an agent that is served by being
-    named in topics it does not own (front's shape).
+    named in topics it does not own (front's shape). `on_sweep(client)` runs
+    after each completed full sweep, for recovery no sweep can express —
+    work this agent owes in conversations where it is itself the last speaker.
 
     Under `<AGENT>_ZULIP_LOG_ONLY=1` every route is replaced by a logger.
     """
@@ -518,13 +521,16 @@ def listener_main(
         answer(client, channel, topic)
 
     if passive:
-        topic_handler, dm_route, mention_route = _observe_topic, _observe_message, None
+        topic_handler, dm_route, mention_route, sweep_route = (
+            _observe_topic, _observe_message, None, None
+        )
     else:
         topic_handler = route
         dm_route = dm_handler or _observe_message
         mention_route = (
             (lambda ch, t: on_mention(client, ch, t)) if on_mention is not None else None
         )
+        sweep_route = (lambda: on_sweep(client)) if on_sweep is not None else None
     threading.Thread(
         target=serve, args=(dm_client, dm_route), kwargs={"accept": is_dm_for_us},
         daemon=True,
@@ -537,7 +543,8 @@ def listener_main(
     )
     try:
         sweep_serve(
-            client, topic_handler, topic_filter=topic_filter(spec), on_mention=mention_route
+            client, topic_handler, topic_filter=topic_filter(spec),
+            on_mention=mention_route, on_sweep=sweep_route,
         )
     except KeyboardInterrupt:
         log("stopped")

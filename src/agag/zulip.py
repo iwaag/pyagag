@@ -1339,6 +1339,7 @@ def sweep_serve(
     *,
     topic_filter: TopicFilter,
     on_mention=None,
+    on_sweep=None,
     mention_messages: int = MENTION_HISTORY,
     log=log,
     status=None,
@@ -1360,6 +1361,17 @@ def sweep_serve(
     sweep, with no queue persistence involved. That pass is expensive
     (`1 + channels + matching topics` calls), so it waits for the quota window
     to slide when fewer than `SWEEP_BUDGET_RESERVE` requests are left.
+
+    **The third trigger.** `on_sweep()`, when given, is called once after each
+    completed full sweep — startup and every queue re-registration. A full
+    sweep recovers what the *sweeps* can see: a topic somebody else spoke in
+    last, and a mention. An agent may owe work that neither can see, because
+    it is the last speaker everywhere it matters — `agfront`'s handoff back to
+    a request whose routine run has reported is exactly that. Those agents
+    recover at process start today, so a queue expiry, which is downtime by
+    another name, leaves the work owed until somebody restarts the process.
+    This is the hook that makes the two kinds of recovery the same kind.
+    Anything it raises is logged; recovery must not end the loop.
 
     **The second trigger.** `on_mention(channel, topic)`, when given, is
     called for a topic this bot was *mentioned* in but does not own. That is
@@ -1440,6 +1452,11 @@ def sweep_serve(
                         f"{len(mentioned)} mentioning, {spent} calls spent, "
                         f"{'unknown' if left is None else f'{left:.0f}'} left in the window"
                     )
+                    if on_sweep is not None:
+                        try:
+                            on_sweep()
+                        except Exception as error:  # noqa: BLE001
+                            log(f"post-sweep recovery failed: {error!r}")
             while pending or pending_mentions:
                 # Peeked, not popped: a rate limit inside the check leaves this
                 # entry — and every other one — pending for after the backoff.

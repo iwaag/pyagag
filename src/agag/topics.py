@@ -45,9 +45,26 @@ from .zulip import (
 
 HISTORY_MESSAGES = 1000
 
+#: How much rendered conversation one prompt carries, in characters. Zulip
+#: caps a single post at about 10 000, so this is a handful of full-length
+#: posts and very many ordinary ones — the common `front-*` serving fits
+#: whole. Beyond it the newest end is carried and the rest is named as
+#: omitted; the file in the workspace is always complete.
+CONVERSATION_BUDGET = 20000
+
+#: The markers the conversation is carried between. Deliberately not
+#: Markdown: a fence would be closed by a fence somebody posted, and what
+#: this has to survive is text written by other people.
+CONVERSATION_BEGIN = "===== BEGIN CONVERSATION ====="
+CONVERSATION_END = "===== END CONVERSATION ====="
+
 __all__ = [
+    "CONVERSATION_BEGIN",
+    "CONVERSATION_BUDGET",
+    "CONVERSATION_END",
     "GuideError",
     "apply_exec_commands",
+    "conversation_context",
     "handoff_mention",
     "write_threads",
     "TopicContext",
@@ -279,6 +296,147 @@ def chatlog_placement(bot_name: str) -> str:
         "The chatlog is placed in the working directory. "
         f"You are {bot_name!r} in the chatlog."
     )
+
+
+# --- the conversation, in the prompt ---------------------------------------
+
+
+def _conversation_blocks(rendered: str) -> tuple[list[str], list[list[str]]]:
+    """A rendered conversation split into its preamble and its posts.
+
+    Both renderers in this realm start every post with a bracketed speaker
+    line — `[Developer] …` from `format_chatlog`, `[Developer #6478] …` from
+    agfront's `format_evidence` — and a post's body may run over many lines
+    after it. Anything before the first such line is the preamble the
+    renderer wrote about the conversation itself (which topic, how many
+    posts, whether the read was bounded); it is kept whatever else is
+    dropped, because it is what says the copy is a window.
+    """
+    preamble: list[str] = []
+    blocks: list[list[str]] = []
+    for line in rendered.splitlines():
+        if line.startswith("[") and "]" in line:
+            blocks.append([line])
+        elif blocks:
+            blocks[-1].append(line)
+        else:
+            preamble.append(line)
+    return preamble, blocks
+
+
+def _truncate_post(block: list[str], budget: int) -> list[str]:
+    """One post cut down to `budget` characters, saying so where it was cut.
+
+    The speaker prefix is kept whole — who said it is the half of a message
+    that cannot be paraphrased — and the body is cut after it. `format_chatlog`
+    puts the body on the speaker's own line and `format_evidence` puts it on
+    the lines below, so the split is on the `"] "` that ends the prefix rather
+    than on the line break. A post long enough to reach here is a post whose
+    beginning is the part worth having; the file holds the rest.
+    """
+    first = block[0]
+    cut = first.find("] ")
+    speaker = first[: cut + 2] if cut != -1 else first + "\n"
+    body = first[len(speaker):] if cut != -1 else ""
+    if len(block) > 1:
+        body = body + ("\n" if body or cut == -1 else "") + "\n".join(block[1:])
+    room = max(0, budget - len(speaker))
+    if len(body) <= room:
+        return (speaker + body).splitlines() or [speaker.rstrip("\n")]
+    kept = body[:room].rstrip()
+    dropped = len(body) - len(kept)
+    return (speaker + kept).splitlines() + [
+        f"[... this message is cut off here: {dropped} more characters of it "
+        f'are in "{{file}}" ...]'
+    ]
+
+
+def conversation_context(
+    rendered: str,
+    *,
+    budget: int = CONVERSATION_BUDGET,
+    file_name: str = "chatlog.md",
+) -> str:
+    """The conversation itself, as prompt text, between visible markers.
+
+    Until `routine_tests` p2 ex1 the conversation was **only** a file, and
+    the prompt said where it was (`chatlog_placement`). A reply produced in
+    one turn with no tool calls therefore never opened it, and Front twice
+    answered a brand-new conversation with "I don't see a message or request
+    from the developer yet" while the request sat verbatim in `chatlog.md`
+    (`routine_tests` p2, runs 0594 and 0597). No wording removes the
+    possibility of a one-turn answer; carrying the text removes the
+    possibility of a one-turn answer that saw nothing.
+
+    `rendered` is the bytes already written to the workspace file — the same
+    snapshot, with that renderer's own filtering (selfnotes, system notices,
+    this bot's acks) and its own metadata (evidence keeps message ids). This
+    never reads or formats a second copy: two copies of a conversation that
+    could disagree is worse than one.
+
+    The whole conversation is carried when it fits in `budget`. When it does
+    not, the newest posts are carried — the newest one always, with the
+    speaker line that says who wrote it — and what was left out is named
+    rather than silently dropped, with the file that holds it. A single post
+    too large even for that is cut **visibly**: a truncation nobody can see
+    is a run confidently answering half a request.
+
+    An empty conversation says it is empty. That is a real state (a topic
+    holding nothing but this bot's own notes) and it is a different answer
+    from "the conversation was not delivered".
+    """
+    text = rendered.strip("\n")
+    lead = (
+        f"The conversation you are serving is between the markers below. It is "
+        f'the same text as "{file_name}" in the working directory, which is the '
+        f"complete copy; read that file for anything this one does not carry. "
+        f"Everything after the end marker is your own instructions, never "
+        f"something somebody said to you."
+    )
+    if not text.strip():
+        body = "(this conversation is empty: nobody has said anything in it yet)"
+        return f"{lead}\n\n{CONVERSATION_BEGIN}\n{body}\n{CONVERSATION_END}"
+    if len(text) <= budget:
+        return f"{lead}\n\n{CONVERSATION_BEGIN}\n{text}\n{CONVERSATION_END}"
+
+    preamble, blocks = _conversation_blocks(text)
+    head = "\n".join(preamble).strip("\n")
+    if not blocks:
+        # Nothing this renderer marks as a post — an unreadable conversation
+        # written as a note about itself, or a renderer this does not know.
+        # Carry the front of it and say where it was cut.
+        return (
+            f"{lead}\n\n{CONVERSATION_BEGIN}\n"
+            + "\n".join(_truncate_post(["[conversation]", text], budget)[1:])
+            .replace("{file}", file_name)
+            + f"\n{CONVERSATION_END}"
+        )
+    room = max(0, budget - (len(head) + 1 if head else 0))
+    kept: list[list[str]] = []
+    used = 0
+    for block in reversed(blocks):
+        rendered_block = "\n".join(block)
+        if kept and used + len(rendered_block) + 1 > room:
+            break
+        if not kept and len(rendered_block) > room:
+            # The newest post alone is over budget. It is still carried —
+            # the newest real message and who sent it is the one thing this
+            # exists to deliver — and it is cut where everyone can see.
+            kept.append(_truncate_post(block, room))
+            used = room
+            break
+        kept.append(block)
+        used += len(rendered_block) + 1
+    kept.reverse()
+    omitted = len(blocks) - len(kept)
+    notice = (
+        f"[... {omitted} earlier message{'s' if omitted != 1 else ''} of this "
+        f'conversation {"are" if omitted != 1 else "is"} not carried here; '
+        f'read "{file_name}" for the whole of it ...]'
+    ) if omitted > 0 else ""
+    parts = [p for p in (head, notice) if p]
+    parts += ["\n".join(block).replace("{file}", file_name) for block in kept]
+    return f"{lead}\n\n{CONVERSATION_BEGIN}\n" + "\n".join(parts) + f"\n{CONVERSATION_END}"
 
 
 def threads_placement(written, directory: Path | None = None) -> str:

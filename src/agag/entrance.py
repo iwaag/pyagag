@@ -27,6 +27,7 @@ from .topics import (
     TopicResult,
     chatlog_path,
     chatlog_placement,
+    conversation_context,
     format_chatlog,
     generation_dir,
     guide as read_guide,
@@ -108,17 +109,24 @@ def entrance_guide(spec: AgentSpec) -> str:
     return default_guide(spec)
 
 
-def entrance_prompt(spec: AgentSpec, bot_name: str) -> str:
-    """The chatlog placement, this instance's own name, then the guide.
+def entrance_prompt(spec: AgentSpec, bot_name: str, conversation: str = "") -> str:
+    """The conversation, the chatlog placement, this instance's own name, then
+    the guide.
 
     Naming the channel is not routing knowledge handed out: it is this
     agent's own name for its own entrance, which it would otherwise have to
     guess at from the chatlog.
+
+    `conversation` is the rendered chatlog of this serving, carried in the
+    prompt by `conversation_context` since `routine_tests` p2 ex1. The
+    entrance had the same file-only shape Front's did — the question was a
+    file the run had to decide to open — so it is repaired at the same time
+    and in the same way. The file stays and is complete.
     """
-    return prompt_with_guide(
-        [chatlog_placement(bot_name), f"Your own channel is {spec.instance_name()!r}."],
-        entrance_guide(spec),
-    )
+    lines = [chatlog_placement(bot_name), f"Your own channel is {spec.instance_name()!r}."]
+    if conversation:
+        lines += ["", conversation]
+    return prompt_with_guide(lines, entrance_guide(spec))
 
 
 def serve_entrance(spec: AgentSpec, context) -> TopicResult:
@@ -130,15 +138,15 @@ def serve_entrance(spec: AgentSpec, context) -> TopicResult:
     )
 
     context.step = "chatlog placement"
-    chatlog_path(workspace).write_text(
-        format_chatlog(context.history, context.self_id, drop=is_ack), encoding="utf-8"
-    )
+    # One rendering: the file and the prompt's copy are the same bytes.
+    chatlog = format_chatlog(context.history, context.self_id, drop=is_ack)
+    chatlog_path(workspace).write_text(chatlog, encoding="utf-8")
 
     context.step = ROLE
     output, _, exit_code = run_role(
         spec,
         ROLE,
-        entrance_prompt(spec, context.bot_name),
+        entrance_prompt(spec, context.bot_name, conversation_context(chatlog)),
         cwd=workspace,
         timeout=ENTRANCE_TIMEOUT_SECONDS,
         record=next_record_path(spec.records_root / "entrance_front"),

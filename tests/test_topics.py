@@ -264,6 +264,117 @@ def test_prompt_is_the_placement_lines_then_the_guide():
     )
 
 
+# --- the conversation, carried in the prompt -------------------------------
+#
+# `routine_tests` p2 ex1 step 2. Until this, a conversation reached a run only
+# as `chatlog.md`: a file it had to decide to open. Two of the first two
+# requests of p2 were answered in one turn with no tool calls and the answer
+# was "I don't see a message or request from the developer yet", with the
+# request sitting verbatim in that file. These pin the delivery, not the
+# reading — what a model then does with the text is not a property this can
+# assert.
+
+
+def rendered(*posts: str) -> str:
+    return "".join(f"{post}\n" for post in posts)
+
+
+def carried(context: str) -> str:
+    """Just what lies between the markers."""
+    start = context.index(topics.CONVERSATION_BEGIN) + len(topics.CONVERSATION_BEGIN)
+    return context[start:context.index(topics.CONVERSATION_END)].strip("\n")
+
+
+def test_a_small_conversation_is_carried_whole():
+    text = rendered("[Developer] I want a title image.", "[Front (you)] On it.")
+    context = topics.conversation_context(text)
+    assert carried(context) == text.strip("\n")
+    # …and it is fenced off from the guide that follows it, in words as well
+    # as in markers, because the next thing in the prompt is an instruction.
+    assert topics.CONVERSATION_BEGIN in context and topics.CONVERSATION_END in context
+    assert "never something somebody said to you" in context
+
+
+def test_the_file_is_named_as_the_complete_copy():
+    """The prompt's copy is bounded; the file is not, and the prompt says
+    which is which. It names only the chatlog: whether this run has threads
+    beside it is `threads_placement`'s sentence to write or to leave out."""
+    context = topics.conversation_context(rendered("[Developer] hello"))
+    assert '"chatlog.md"' in context and "complete copy" in context
+    assert "threads" not in context
+
+
+def test_a_long_conversation_keeps_the_newest_message_and_its_sender():
+    old = [f"[Developer] older request number {n}" for n in range(200)]
+    text = rendered(*old, "[Developer] the newest request, which is the one to answer")
+    context = topics.conversation_context(text, budget=400)
+    body = carried(context)
+    assert "the newest request, which is the one to answer" in body
+    assert "[Developer]" in body
+    # What was left out is said, with the file that still holds it.
+    assert "earlier messages of this conversation are not carried here" in body
+    assert '"chatlog.md"' in body
+    assert "older request number 3" not in body
+    assert len(body) <= 400 + len(
+        "[... 196 earlier messages of this conversation are not carried here; "
+        'read "chatlog.md" for the whole of it ...]'
+    )
+
+
+def test_an_oversized_single_message_is_cut_where_it_can_be_seen():
+    """The one case where the newest message itself does not fit. It is still
+    carried — who wrote it and how it begins — and the cut is visible, because
+    a truncation nobody can see is a run confidently answering half a
+    request."""
+    text = rendered("[Developer] " + "detail " * 2000)
+    context = topics.conversation_context(text, budget=300)
+    body = carried(context)
+    assert body.startswith("[Developer] detail detail")
+    assert "this message is cut off here" in body
+    assert 'are in "chatlog.md"' in body
+    assert len(body) < 600
+
+
+def test_a_genuinely_empty_conversation_says_so():
+    """A real state — a topic holding nothing but this bot's own notes — and a
+    different answer from "the conversation was not delivered"."""
+    for empty in ("", "\n", "   \n\n"):
+        body = carried(topics.conversation_context(empty))
+        assert body == "(this conversation is empty: nobody has said anything in it yet)"
+
+
+def test_the_bytes_carried_are_the_bytes_of_the_file():
+    """No second read and no second rendering: whatever the renderer filtered
+    out of the file — selfnotes, system notices, this bot's acks — is absent
+    from the prompt for exactly the same reason."""
+    history = [
+        message(content="[selfnote][rootchat] front/front-1", id=1),
+        message(sender_id=BOT_ID, name="Front", content="Message received.", id=2),
+        message(content="the real request", id=3),
+    ]
+    text = topics.format_chatlog(history, BOT_ID, drop=lambda c: c == "Message received.")
+    assert carried(topics.conversation_context(text)) == text.strip("\n")
+    assert "selfnote" not in text and "Message received." not in text
+
+
+def test_an_evidence_rendering_keeps_its_header_when_it_is_bounded():
+    """agfront's Front Desk and run servings render with message ids and a
+    header saying the read was a window. That header is what tells a run the
+    copy is bounded, so it survives the bounding."""
+    text = (
+        "# #front > front-desk-1\n"
+        "201 posts, oldest first, each cited as `#front > front-desk-1 #<id>`.\n"
+        "**Only the newest 1000 messages were fetched**; older posts exist.\n"
+        "\n"
+        + "".join(f"[Developer #{n}] sender 8\nolder line {n}\n\n" for n in range(200))
+        + "[Developer #999] sender 8\nthe newest one\n"
+    )
+    body = carried(topics.conversation_context(text, budget=500))
+    assert body.startswith("# #front > front-desk-1")
+    assert "Only the newest 1000 messages were fetched" in body
+    assert "[Developer #999] sender 8" in body and "the newest one" in body
+
+
 # --- the turn, handed over -------------------------------------------------
 
 

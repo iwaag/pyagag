@@ -187,6 +187,92 @@ prefix on purpose: where to write is what the addressed agent's own
 introduction says, and an example a caller can copy would quietly become the
 source of that knowledge.
 
+### The conversation is in the prompt, not only on disk
+
+A serving writes the conversation to `chatlog.md` and **also carries it in
+the prompt** (`agag.topics.conversation_context`). It was only the file until
+`routine_tests` p2 ex1, and two of that trial's first two requests were
+answered — in one turn, with no tool calls — with *"I don't see a message or
+request from the developer yet in this conversation"*, while the request sat
+verbatim in the file. A reply produced in one turn never opens a file, and no
+amount of "read the chatlog first" removes the possibility of a one-turn
+reply.
+
+The helper renders nothing of its own: it takes the bytes the caller has
+already written to the workspace, so one serving has one snapshot and one set
+of filters, and there is no second copy to disagree with the file. The whole
+conversation is carried when it fits the budget; past it the newest posts
+are, the newest one always with the speaker line that says who wrote it, and
+what was left out is named along with the file that still holds it. A single
+post too large even for that is cut **visibly**. An empty conversation says
+it is empty — a different answer from "the conversation was not delivered".
+
+`agag.entrance` carries it too, so every standardized agent's own-channel
+entrance is repaired by the same line.
+
+### Retiring a conversation is a rename, and a rename moves everybody's notes
+
+This sentence has now cost two episodes, so it is written down: **retiring a
+plan renames its topic, and renaming a topic moves every message in it —
+including the root notes other agents wrote there.** The replacement then
+takes over the freed display name, which is the point of retiring. A third
+party anchored in the retired conversation therefore finds nothing of its own
+under the reused name.
+
+Nobody may repair that by copying a note: a root note is identified by its
+**sender**, so a note the retiring agent writes is the retiring agent's note,
+and a forged one would make the record lie about who is party to what. The
+reader side carries it instead, through a relation the replacing agent
+already writes:
+
+    [selfnote][replaces] <message id>
+
+naming the retired work's own anchor **by id**, because an id is the one
+identifier no rename touches. When a topic holds no root note of this
+agent's, `rootchat_home` reads that pointer, resolves the id to the
+conversation it is in *now*, and looks for this agent's own note there —
+**one hop, then stop**. The note found must still be this agent's own; a
+missing, malformed or deleted pointer produces no anchor, and nothing is ever
+guessed from the reused display name, which is the one conversation the
+pointer certainly does not mean. `replaced_anchor` deliberately does **not**
+filter the relation to the reader's own sender id: it is written by the
+replacing agent and read by the third parties it exists for.
+
+The topic that called is also placed in `threads/` whether or not a note of
+ours names it (`serve_topic(extra_threads=…)`) — in the inherited case
+nothing else can discover that the answer is in there.
+
+### Correcting an anchor, deliberately
+
+The default is that **a topic is anchored once**: `own_rootchat` takes the
+earliest of this agent's root notes, so a later repeat cannot redirect a live
+conversation. That is right, and it left no way to say a topic was anchored
+*wrongly* — `routine_tests` p2 wrote a second ordinary root note by hand and
+the callback still went to the conversation the first note named, correctly.
+
+    [selfnote][rootchat-moved] <channel>/<topic>
+
+is the correction, and `effective_rootchat` is the **one rule every routing
+reader asks**: the newest valid explicit move written by this agent wins;
+otherwise its earliest ordinary root note wins. Newest, because a correction
+is not identity — an agent that gets it wrong twice must be able to say so
+twice. Only an agent's own move moves its own anchor, which is the exact
+opposite of the `replaces` relation and for the opposite reason.
+
+One rule means one behaviour everywhere: the callback lookup, the inherited
+lookup one hop away, `rootchat_notes` and therefore `remotes_for_home` and
+`sweep_rootchats`, and the served mark that stops a restart replaying an
+answered callback. A corrected delegate appears under its new home, in
+`threads/` and in recovery alike.
+
+`agentchat anchor <channel> <topic> [--home <channel>/<topic>]` writes it as
+the authenticated agent. It refuses a resolved topic — a post under the bare
+name of a resolved conversation opens an empty twin beside it — and refuses a
+conversation anchored to itself. Ordinary `send` still anchors automatically
+and unchanged; the correction is for when the anchor is known to be wrong,
+not a habit. The move is a selfnote, so it is hidden from every chatlog and
+buys nobody a run.
+
 ### Project channels: subscription is the routing decision
 
 A project channel (`#pj-<name>` in the agag realm) is a room, and **who is

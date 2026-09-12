@@ -41,6 +41,7 @@ from agag.selfnote import (
     last_real_sender,
     own_rootchat,
     parse_rootchat,
+    replaced_anchor,
     parse_served,
     served_note,
 )
@@ -1090,6 +1091,76 @@ def topic_history_across_resolve(
         return []
 
 
+def conversation_of(client: ZulipClient, message_id: int) -> Conversation | None:
+    """Where a message is **now**, or None when it is gone.
+
+    A message id is the one identifier no rename touches, so this is how a
+    conversation whose display name is reusable stays findable. The topic is
+    returned exactly as it stands — including a `\u2714 ` prefix — because
+    that is the name it can be read under; stripping it would name a topic
+    that may not exist.
+
+    Deleted is **absent**. A caller must not fall back to a topic of the
+    remembered name: that name may have been taken over by work this id knows
+    nothing about, which is the whole reason identity is an id.
+    """
+    message = client.message(int(message_id))
+    if message is None:
+        return None
+    channel = channel_name(message)
+    topic = message.get("subject")
+    if not channel or not isinstance(topic, str) or not topic.strip():
+        return None
+    return Conversation(channel, topic)
+
+
+def inherited_rootchat(
+    client: ZulipClient,
+    history: list[dict],
+    self_id: int,
+    num_before: int = ROOTCHAT_HISTORY,
+) -> Conversation | None:
+    """This bot's anchor, found through **one** replacement hop.
+
+    `routine_tests` p2 ex1, problem A. Retiring a plan renames its whole
+    topic — `retire_conversation` moves every message in it, other agents'
+    root notes included — and the replacement then takes the freed display
+    name. A third party anchored in the retired conversation therefore finds
+    no note of its own in the live topic and, before this, ignored the
+    mention: p2 watched autolab name Front correctly, twice, and Front refuse
+    both while its anchor sat in `\u2714 retired-…`.
+
+    Nobody has to forge a note to fix it, because the replacing agent already
+    writes the relation: `[selfnote][replaces] <message id>` names the
+    retired work's anchor by id, and a message id survives a rename. So: read
+    that pointer (whoever wrote it — see `replaced_anchor`), resolve the id to
+    the conversation it is in now, and look **there** for this bot's own root
+    note. The note found must still be this bot's own; an anchor belonging to
+    somebody else is not this bot's business.
+
+    **One hop, then stop.** A replacement of a replacement is not followed:
+    the relation is a fact about the conversation that wrote it, and chaining
+    it would turn a bounded lookup into a walk whose length nobody declared.
+
+    A missing pointer, a malformed one, a deleted target, or a target with no
+    note of ours all produce `None`. None of them falls back to a topic of the
+    remembered name — the reused display name is precisely what cannot be
+    trusted here.
+    """
+    anchor_id = replaced_anchor(history)
+    if anchor_id is None:
+        return None
+    previous = conversation_of(client, anchor_id)
+    if previous is None:
+        return None
+    return own_rootchat(
+        topic_history_across_resolve(
+            client, previous.channel, previous.topic, num_before
+        ),
+        self_id,
+    )
+
+
 def rootchat_home(
     client: ZulipClient,
     channel: str,
@@ -1102,14 +1173,22 @@ def rootchat_home(
     The callback's whole lookup: a run that was named in somebody else's
     topic reads that topic, finds the root note it wrote there itself, and
     that note is the conversation to serve. `None` for a topic this bot never
-    anchored — a mention that is somebody else's business.
+    anchored and never inherited — a mention that is somebody else's business.
 
     Read across the resolve rename, because the post that names an agent is
     very often the post that finishes the conversation.
+
+    **This topic's own anchor always wins.** Only when there is none is the
+    `replaces` relation followed, one hop, into the conversation this one was
+    opened to replace (`inherited_rootchat`). An inherited anchor is a
+    fallback for a conversation that has not been anchored yet, never an
+    override of one that has.
     """
-    return own_rootchat(
-        topic_history_across_resolve(client, channel, topic, num_before), self_id
-    )
+    history = topic_history_across_resolve(client, channel, topic, num_before)
+    home = own_rootchat(history, self_id)
+    if home is not None:
+        return home
+    return inherited_rootchat(client, history, self_id, num_before)
 
 
 def served_marks(

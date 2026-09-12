@@ -560,6 +560,15 @@ class TopicContext:
     #: is this topic's and the answer belongs where the question was asked.
     reply_channel: str = ""
     reply_topic: str = ""
+    #: Conversations to place beside the chatlog **in addition** to the ones
+    #: this bot's own root notes name. One case needs it: a callback from a
+    #: topic this bot has never posted in, reached through the `replaces`
+    #: relation (`agag.zulip.inherited_rootchat`). Its text is why the run is
+    #: happening, and `remotes_for_home` cannot know about it, because the
+    #: note that would have named it is in the conversation that was retired.
+    #: Handlers that build `threads/` merge these in; everything else ignores
+    #: the field.
+    extra_threads: tuple[tuple[str, str], ...] = ()
     #: The execution option in force for this serving, frozen from the topic
     #: history as it stood when the serving started (`ag.exec-options.v1`).
     #: A command posted while the run is in flight has a larger message id
@@ -615,6 +624,7 @@ def serve_topic(
     ack_text: str,
     empty_reply: str | None = None,
     reply_to: tuple[str, str] | None = None,
+    extra_threads: tuple[tuple[str, str], ...] = (),
     handoff: bool = True,
     history_messages: int = HISTORY_MESSAGES,
     exec_options: ExecOptions | None = None,
@@ -665,6 +675,12 @@ def serve_topic(
     `context.selection`, so a command posted mid-run reaches the next
     serving rather than this one.
 
+    `extra_threads` names conversations the handler should place beside the
+    chatlog on top of the ones it works out itself. The one caller is a
+    callback reached through the `replaces` relation: the topic that named
+    this bot holds no note of ours, so nothing else can discover that its
+    text is what this serving is about.
+
     `handoff=False` posts the reply without that mention, for the serving
     that is a *record* rather than an answer — one whose requester is being
     given their turn back somewhere else. Naming them in both places starts
@@ -701,6 +717,7 @@ def serve_topic(
         context = TopicContext(
             client, channel, topic, self_id, bot_name,
             reply_channel=reply_channel, reply_topic=reply_topic,
+            extra_threads=tuple(extra_threads),
         )
         result = TopicResult()
         completed = False

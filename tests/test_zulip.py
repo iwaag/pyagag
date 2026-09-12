@@ -558,6 +558,8 @@ class SweepClient(FakeClient):
         self.posted = []
         #: {(channel, topic): content of its last post}, when it matters.
         self.last_content = {}
+        #: Every id looked up by `message()`, in order.
+        self.message_calls = []
 
     def mentions(self, num_before=50):
         self.calls += 1
@@ -611,6 +613,16 @@ class SweepClient(FakeClient):
     #: {(channel, topic): [message, ...]} for the tests that care about what
     #: the messages *are* — a selfnote is not somebody speaking.
     histories: dict = {}
+
+    #: {message id: message} — what `GET messages/<id>` answers. A message id
+    #: is the one identifier no rename touches, so this is how a conversation
+    #: is found after its display name was given to somebody else.
+    messages_by_id: dict = {}
+
+    def message(self, message_id):
+        self.calls += 1
+        self.message_calls.append(int(message_id))
+        return self.messages_by_id.get(int(message_id))
 
 
 def mention_event(event_id, sender_id, channel, topic, message_id=1, flags=("mentioned",)):
@@ -1748,6 +1760,174 @@ def test_the_mark_is_written_at_home_and_names_the_post_it_answered():
         ("pj-demo", "workplan-a",
          "[selfnote][served] agforge-x/assetplan-a 40"),
     ]
+
+
+# --- an anchor inherited through one replacement (routine_tests p2 ex1) ------
+#
+# Retiring a plan renames its whole topic, and a rename moves every message in
+# it — other agents' root notes included. The replacement then takes the freed
+# display name, so a third party anchored in the retired conversation finds no
+# note of its own in the live topic. p2 watched autolab name Front correctly
+# twice and Front refuse both:
+#
+#   mention in 'pj-studyuspolitics'/'workplan-collect-and-analyze-contributions'
+#   carries no root note of ours; ignoring
+#
+# Nobody forges a note to fix it. The replacing agent already writes
+# `[selfnote][replaces] <message id>`, by id, because ids survive renames.
+
+FRONT, AUTOLAB, OTHER = 15, 11, 20
+LIVE = ("pj-study", "workplan-contributions")
+RETIRED = ("pj-study", f"{RESOLVED_TOPIC_PREFIX}retired-workplan-contributions-m6371")
+
+
+def replacement_realm(*, replaces=6371, retired=RETIRED, anchor_sender=FRONT,
+                      retired_anchor_present=True, target_exists=True):
+    """The realm p2 left behind: a retired conversation holding Front's root
+    note, and a live replacement of the same display name that does not."""
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    live_history = [
+        {"id": 6400, "sender_id": AUTOLAB,
+         "content": "[selfnote][mission] studyuspolitics"},
+        {"id": 6401, "sender_id": AUTOLAB, "content": f"[selfnote][replaces] {replaces}"},
+        {"id": 6402, "sender_id": AUTOLAB, "content": "Carrying forward the publication work."},
+        {"id": 6450, "sender_id": AUTOLAB, "content": "@**Front** the plan is ready; may I start?"},
+    ]
+    retired_history = [
+        {"id": 6371, "sender_id": AUTOLAB, "content": "[selfnote][mission] studyuspolitics"},
+    ]
+    if retired_anchor_present:
+        retired_history.append(
+            {"id": 6367, "sender_id": anchor_sender,
+             "content": "[selfnote][rootchat] front/front-uspolitics"}
+        )
+    client.histories = {LIVE: live_history, retired: retired_history}
+    if target_exists:
+        client.messages_by_id = {
+            6371: {"id": 6371, "type": "stream", "sender_id": AUTOLAB,
+                   "display_recipient": retired[0], "subject": retired[1],
+                   "content": "[selfnote][mission] studyuspolitics"},
+        }
+    return client
+
+
+def test_a_mention_from_the_replacement_reaches_the_run_that_was_anchored():
+    """The whole of problem A. Front never posted in the live topic; its
+    anchor went with the rename. One hop through `replaces` finds it."""
+    client = replacement_realm()
+    assert rootchat_home(client, *LIVE, FRONT) == Conversation("front", "front-uspolitics")
+    # The pointer was read, and it was resolved by id — not by the name the
+    # replacement is now using.
+    assert client.message_calls == [6371]
+
+
+def test_the_relation_is_read_whoever_wrote_it():
+    """It is written by the *replacing* agent. Filtering it to the reader's
+    own sender id would reproduce the bug exactly: Front had written nothing
+    in the replacement, which is why it had nothing to find."""
+    client = replacement_realm()
+    assert all(m["sender_id"] != FRONT for m in client.histories[LIVE])
+    assert rootchat_home(client, *LIVE, FRONT) is not None
+
+
+def test_the_recovered_note_must_still_be_our_own():
+    """An anchor belonging to somebody else is not this bot's business, one
+    hop away any more than in the topic itself."""
+    client = replacement_realm(anchor_sender=OTHER)
+    assert rootchat_home(client, *LIVE, FRONT) is None
+
+
+def test_this_topic_s_own_anchor_wins_over_an_inherited_one():
+    """A conversation this bot has already anchored is anchored. The
+    inherited one is a fallback for a topic with no note of ours, never an
+    override of one that has."""
+    client = replacement_realm()
+    client.histories[LIVE] = client.histories[LIVE] + [
+        {"id": 6480, "sender_id": FRONT, "content": "[selfnote][rootchat] front/front-new"},
+    ]
+    assert rootchat_home(client, *LIVE, FRONT) == Conversation("front", "front-new")
+    assert client.message_calls == []  # no hop was needed, so none was made
+
+
+def test_a_moved_target_is_followed_to_where_it_is_now():
+    """The point of using an id: the retired conversation may have been moved
+    to another channel entirely since it was anchored."""
+    moved = ("archive-study", "old-contributions")
+    client = replacement_realm(retired=moved)
+    client.messages_by_id = {
+        6371: {"id": 6371, "type": "stream", "sender_id": AUTOLAB,
+               "display_recipient": moved[0], "subject": moved[1], "content": "x"},
+    }
+    assert rootchat_home(client, *LIVE, FRONT) == Conversation("front", "front-uspolitics")
+
+
+def test_a_deleted_target_is_absent_and_never_guessed_from_the_name():
+    """Deleted is absent. Falling back to a topic of the remembered name
+    would read the replacement itself, which is the one conversation the
+    pointer certainly does not mean."""
+    client = replacement_realm(target_exists=False)
+    assert rootchat_home(client, *LIVE, FRONT) is None
+
+
+def test_a_malformed_or_missing_pointer_produces_no_anchor():
+    for content in ("[selfnote][replaces] not-a-number", "[selfnote][replaces]",
+                    "[selfnote][mission] studyuspolitics"):
+        client = replacement_realm()
+        client.histories[LIVE] = [
+            {"id": 6401, "sender_id": AUTOLAB, "content": content},
+            {"id": 6450, "sender_id": AUTOLAB, "content": "@**Front** ready"},
+        ]
+        assert rootchat_home(client, *LIVE, FRONT) is None, content
+
+
+def test_a_target_carrying_no_note_of_ours_produces_no_anchor():
+    client = replacement_realm(retired_anchor_present=False)
+    assert rootchat_home(client, *LIVE, FRONT) is None
+
+
+def test_only_one_hop_is_followed():
+    """A replacement of a replacement is deliberately not walked: the
+    relation is a fact about the conversation that wrote it, and chaining it
+    would turn a bounded lookup into a walk whose length nobody declared."""
+    first = ("pj-study", f"{RESOLVED_TOPIC_PREFIX}retired-workplan-contributions-m6200")
+    client = replacement_realm()
+    # The retired conversation was itself a replacement, and *its* predecessor
+    # is where Front's note is.
+    client.histories[RETIRED] = [
+        {"id": 6371, "sender_id": AUTOLAB, "content": "[selfnote][mission] x"},
+        {"id": 6372, "sender_id": AUTOLAB, "content": "[selfnote][replaces] 6200"},
+    ]
+    client.histories[first] = [
+        {"id": 6100, "sender_id": FRONT, "content": "[selfnote][rootchat] front/front-first"},
+    ]
+    client.messages_by_id[6200] = {
+        "id": 6200, "type": "stream", "sender_id": AUTOLAB,
+        "display_recipient": first[0], "subject": first[1], "content": "x",
+    }
+    assert rootchat_home(client, *LIVE, FRONT) is None
+    assert client.message_calls == [6371]  # the second pointer was never read
+
+
+def test_the_hop_costs_nothing_when_a_topic_carries_our_own_note():
+    """The ordinary callback is unchanged: one history read, no pointer read,
+    no extra call. Every mention in the realm goes through this lookup."""
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    client.histories = {
+        ("work-x", "workrun-task2"): [
+            {"id": 5, "sender_id": FRONT, "content": "[selfnote][rootchat] front/front-a"},
+            {"id": 7, "sender_id": AUTOLAB, "content": "@**Front** done"},
+        ],
+    }
+    before = client.calls
+    assert rootchat_home(client, "work-x", "workrun-task2", FRONT) == Conversation(
+        "front", "front-a"
+    )
+    assert client.calls - before == 1
+    assert client.message_calls == []
 
 
 # --- the resolve rename (agent_standardize p9) -----------------------------

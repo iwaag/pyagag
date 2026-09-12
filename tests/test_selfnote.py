@@ -24,7 +24,10 @@ from agag.selfnote import (
     parse_conversation,
     parse_note,
     parse_rootchat,
+    parse_replaces,
     parse_served,
+    replaced_anchor,
+    replaces_note,
     rootchat_note,
     served_note,
     without_selfnotes,
@@ -224,3 +227,51 @@ def test_an_unresolve_notice_does_not_hand_the_owner_a_turn():
 def test_a_topic_holding_only_notices_awaits_nobody():
     assert last_real_sender([notice(id=1)]) is None
     assert last_real_message([notice(id=1)]) is None
+
+
+# --- the replacement relation (routine_tests p2 ex1) ------------------------
+
+
+def test_a_replaces_note_names_an_anchor_by_id():
+    assert replaces_note(6371) == "[selfnote][replaces] 6371"
+    assert parse_replaces(replaces_note(6371)) == 6371
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[selfnote][replaces]",
+        "[selfnote][replaces] workplan-contributions",
+        "[selfnote][replaces] 63 71",
+        "[selfnote][rootchat] front/front-a",
+        "replaces 6371",
+        "",
+    ],
+)
+def test_anything_else_is_not_a_replaces_note(content):
+    assert parse_replaces(content) is None
+
+
+def test_the_relation_is_read_whoever_wrote_it():
+    """It is written by the agent that opens the replacement — autolab — and
+    read by every third party that was anchored in the conversation whose
+    name the replacement took. Filtering it to the reader's own id would
+    leave exactly the agent it exists for unable to read it."""
+    history = [message(11, replaces_note(6371), id=6401)]
+    assert replaced_anchor(history) == 6371
+
+
+def test_the_earliest_valid_relation_wins():
+    """Identity-shaped: a conversation replaces one thing, decided when it
+    was opened. A later note is a repeat, not a redirection."""
+    history = [
+        message(11, "opening the replacement", id=1),
+        message(11, replaces_note(6371), id=2),
+        message(11, replaces_note(9999), id=3),
+    ]
+    assert replaced_anchor(history) == 6371
+
+
+def test_a_conversation_with_no_relation_has_none():
+    assert replaced_anchor([message(11, "hello")]) is None
+    assert replaced_anchor([]) is None

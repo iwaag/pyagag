@@ -58,6 +58,12 @@ SELFNOTE_MARKER = "[selfnote]"
 ROOTCHAT_TAG = "rootchat"
 #: The tag of the note that says a callback has already been answered.
 SERVED_TAG = "served"
+#: The tag of the relation naming the work a conversation was opened to
+#: replace, by the message id of that work's own anchor. Shared since
+#: `routine_tests` p2 ex1: it is written by the *replacing* agent (autolab
+#: today) and read by every agent that was anchored in the conversation the
+#: replacement took the name of.
+REPLACES_TAG = "replaces"
 
 #: The conversation a run is serving. The listener sets it; `agentchat`
 #: reads it and writes the root note from it. A run without it posts without
@@ -66,6 +72,7 @@ HOME_VARIABLE = "AGENTCHAT_HOME"
 
 __all__ = [
     "HOME_VARIABLE",
+    "REPLACES_TAG",
     "ROOTCHAT_TAG",
     "SELFNOTE_MARKER",
     "SERVED_TAG",
@@ -78,8 +85,11 @@ __all__ = [
     "own_rootchat",
     "parse_conversation",
     "parse_note",
+    "parse_replaces",
     "parse_rootchat",
     "parse_served",
+    "replaced_anchor",
+    "replaces_note",
     "rootchat_note",
     "served_note",
     "without_selfnotes",
@@ -160,6 +170,50 @@ def rootchat_note(home: Conversation) -> str:
 def parse_rootchat(content) -> Conversation | None:
     """The conversation a root note names, or None if this is not one."""
     return parse_conversation(parse_note(content, ROOTCHAT_TAG))
+
+
+def replaces_note(anchor_id: int) -> str:
+    """`[selfnote][replaces] <message id>` — what this conversation replaced.
+
+    Written once, by the agent that opens the replacement, naming the retired
+    work's own anchor **by id**. By id because the replacement usually takes
+    over the retired conversation's display name — releasing that name is the
+    point of retiring it — so a name would point at the replacement itself.
+    """
+    return note(REPLACES_TAG, str(int(anchor_id)))
+
+
+def parse_replaces(content) -> int | None:
+    """The anchor id a replaces note names, or None for anything else."""
+    value = parse_note(content, REPLACES_TAG)
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except ValueError:
+        return None
+
+
+def replaced_anchor(messages) -> int | None:
+    """The anchor id this conversation replaces, whoever wrote the relation.
+
+    Deliberately **not** filtered to one sender. The relation is written by
+    the replacing agent — autolab, when it retires a mission and opens the
+    successor under the freed name — and every third party that was anchored
+    in the retired conversation has to be able to read it. Filtering it to
+    the reader's own id would reproduce `routine_tests` p2's defect exactly:
+    Front was anchored in the retired topic and had written nothing in the
+    replacement, which is why it had nothing to find.
+
+    The earliest valid note wins: a conversation replaces one thing, decided
+    when it was opened. A malformed one is not a note of this kind and is
+    skipped, which is the only error handling a one-line convention needs.
+    """
+    for message in messages:
+        anchor = parse_replaces(message.get("content"))
+        if anchor is not None:
+            return anchor
+    return None
 
 
 def served_note(remote: Conversation, message_id: int) -> str:

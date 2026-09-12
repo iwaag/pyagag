@@ -24,10 +24,14 @@ from agag.selfnote import (
     parse_conversation,
     parse_note,
     parse_rootchat,
+    effective_rootchat,
+    own_rootchat_moved,
     parse_replaces,
+    parse_rootchat_moved,
     parse_served,
     replaced_anchor,
     replaces_note,
+    rootchat_moved_note,
     rootchat_note,
     served_note,
     without_selfnotes,
@@ -275,3 +279,96 @@ def test_the_earliest_valid_relation_wins():
 def test_a_conversation_with_no_relation_has_none():
     assert replaced_anchor([message(11, "hello")]) is None
     assert replaced_anchor([]) is None
+
+
+# --- the effective anchor (routine_tests p2 ex1, B2) ------------------------
+#
+# "A topic is anchored once" is right and is kept. What was missing was any
+# way to say a topic was anchored *wrongly*: p2's manual repair wrote a second
+# ordinary root note into the delegation topic (message 6500) and the
+# completion callback still went to the Front Desk, because a repeat loses —
+# correctly. p1 wanted the same capability four times.
+
+
+DESK = Conversation("front", "front-desk-20260912-1636")
+RUN = Conversation("routine-publish", "routinerun-20260912T1636Z")
+OTHER_ID = 11
+
+
+def test_a_move_note_names_a_conversation():
+    assert rootchat_moved_note(RUN) == f"[selfnote][rootchat-moved] {RUN}"
+    assert parse_rootchat_moved(rootchat_moved_note(RUN)) == RUN
+    assert is_selfnote(rootchat_moved_note(RUN))
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[selfnote][rootchat-moved]",
+        "[selfnote][rootchat-moved] no-slash-here",
+        "[selfnote][rootchat-moved] /topic",
+        "[selfnote][rootchat] front/front-a",
+        "rootchat-moved routine-publish/routinerun-1",
+    ],
+)
+def test_anything_else_is_not_a_move(content):
+    assert parse_rootchat_moved(content) is None
+
+
+def test_the_whole_sequence_p2_would_have_needed():
+    """Desk anchor, ordinary run anchor repeat, explicit run correction,
+    another ordinary repeat. Only the explicit correction moves the home."""
+    desk = message(15, rootchat_note(DESK), id=6482)
+    repeat = message(15, rootchat_note(RUN), id=6500)
+    correction = message(15, rootchat_moved_note(RUN), id=6520)
+    later = message(15, rootchat_note(Conversation("front", "front-other")), id=6540)
+
+    assert effective_rootchat([desk], 15) == DESK
+    assert effective_rootchat([desk, repeat], 15) == DESK  # a repeat loses
+    assert effective_rootchat([desk, repeat, correction], 15) == RUN
+    assert effective_rootchat([desk, repeat, correction, later], 15) == RUN
+
+
+def test_a_second_correction_supersedes_the_first():
+    """A correction is not identity: an agent that got it wrong twice must be
+    able to say so twice, and the last thing it said is what it means."""
+    history = [
+        message(15, rootchat_note(DESK), id=1),
+        message(15, rootchat_moved_note(RUN), id=2),
+        message(15, rootchat_moved_note(Conversation("front", "front-final")), id=3),
+    ]
+    assert effective_rootchat(history, 15) == Conversation("front", "front-final")
+
+
+def test_a_move_written_by_somebody_else_moves_nothing_of_ours():
+    """The one place the sender filter is the whole point — unlike the
+    `replaces` relation, which exists precisely to be read by others."""
+    history = [
+        message(15, rootchat_note(DESK), id=1),
+        message(OTHER_ID, rootchat_moved_note(RUN), id=2),
+    ]
+    assert effective_rootchat(history, 15) == DESK
+    assert own_rootchat_moved(history, 15) is None
+
+
+def test_a_malformed_move_is_not_a_move():
+    history = [
+        message(15, rootchat_note(DESK), id=1),
+        message(15, "[selfnote][rootchat-moved] nonsense", id=2),
+    ]
+    assert effective_rootchat(history, 15) == DESK
+
+
+def test_a_correction_alone_anchors_a_topic_that_had_no_note():
+    assert effective_rootchat([message(15, rootchat_moved_note(RUN), id=1)], 15) == RUN
+
+
+def test_a_move_is_hidden_from_the_conversation_like_every_other_note():
+    """It is a correction between an agent and itself. Nobody is served by
+    it, and nobody reads it."""
+    history = [
+        message(8, "please publish the study", id=1),
+        message(15, rootchat_moved_note(RUN), id=2),
+    ]
+    assert [m["id"] for m in without_selfnotes(history)] == [1]
+    assert last_real_sender(history) == 8

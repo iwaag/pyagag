@@ -35,6 +35,7 @@ from agag.zulip import (
     read_env,
     remotes_for_home,
     rootchat_home,
+    rootchat_notes,
     served_marks,
     topic_history_across_resolve,
     serve,
@@ -551,6 +552,9 @@ class SweepClient(FakeClient):
         #: What the `sender:me search:rootchat` narrow answers with — the
         #: startup recovery for topics this bot anchored.
         self.rootchat_messages = []
+        #: What the `sender:me search:rootchat-moved` narrow answers with —
+        #: the anchors this bot deliberately corrected.
+        self.moved_messages = []
         #: What the `sender:me search:served` narrow answers with — the
         #: callbacks this bot has already answered, and up to which message.
         self.served_messages = []
@@ -569,6 +573,10 @@ class SweepClient(FakeClient):
     def own_rootchat_notes(self, num_before=200):
         self.calls += 1
         return list(self.rootchat_messages)
+
+    def own_moved_notes(self, num_before=200):
+        self.calls += 1
+        return list(self.moved_messages)
 
     def own_served_notes(self, num_before=200):
         self.calls += 1
@@ -1760,6 +1768,151 @@ def test_the_mark_is_written_at_home_and_names_the_post_it_answered():
         ("pj-demo", "workplan-a",
          "[selfnote][served] agforge-x/assetplan-a 40"),
     ]
+
+
+# --- the effective anchor, everywhere (routine_tests p2 ex1, B2) ------------
+#
+# p2's `publish` run: the `front` role opened the run and delegated in the
+# same serving, so the delegation topic's root note named the Front **Desk**.
+# A second ordinary note written into the same topic by hand (message 6500)
+# changed nothing, correctly — a repeat must not redirect a live
+# conversation. `[selfnote][rootchat-moved]` is how the correction is said on
+# purpose, and every routing reader asks the same effective-anchor rule.
+
+MOVED_DESK = "front/front-desk-20260912-1636"
+MOVED_RUN = "routine-publish/routinerun-20260912T1636Z"
+DELEGATE = ("pj-studyuspolitics", "workplan-publish-studyuspolitics")
+
+
+def moved_note_message(sender_id, channel, topic, home, message_id=1):
+    return {
+        "id": message_id,
+        "type": "stream",
+        "sender_id": sender_id,
+        "content": f"[selfnote][rootchat-moved] {home}",
+        "display_recipient": channel,
+        "subject": topic,
+    }
+
+
+def corrected_realm(*, correction=True, correction_sender=15):
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    history = [
+        {"id": 6482, "sender_id": 15, "content": f"[selfnote][rootchat] {MOVED_DESK}"},
+        {"id": 6484, "sender_id": 11, "content": "Plan registered."},
+        {"id": 6500, "sender_id": 15, "content": f"[selfnote][rootchat] {MOVED_RUN}"},
+    ]
+    if correction:
+        history.append({
+            "id": 6520, "sender_id": correction_sender,
+            "content": f"[selfnote][rootchat-moved] {MOVED_RUN}",
+        })
+    history.append({"id": 6560, "sender_id": 11, "content": "@**Front** task complete"})
+    client.histories = {DELEGATE: history}
+    client.rootchat_messages = [
+        rootchat_note_message(15, DELEGATE[0], DELEGATE[1], MOVED_DESK, 6482),
+        rootchat_note_message(15, DELEGATE[0], DELEGATE[1], MOVED_RUN, 6500),
+    ]
+    if correction:
+        client.moved_messages = [
+            moved_note_message(15, DELEGATE[0], DELEGATE[1], MOVED_RUN, 6520),
+        ]
+    return client
+
+
+def test_the_callback_lookup_follows_a_deliberate_correction():
+    assert rootchat_home(corrected_realm(), *DELEGATE, 15) == Conversation(
+        "routine-publish", "routinerun-20260912T1636Z"
+    )
+
+
+def test_without_the_correction_the_ordinary_repeat_still_loses():
+    """Which is p2's result, and is the right default: the topic was opened
+    for the Desk as far as an ordinary note can say."""
+    assert rootchat_home(corrected_realm(correction=False), *DELEGATE, 15) == Conversation(
+        "front", "front-desk-20260912-1636"
+    )
+
+
+def test_somebody_else_s_correction_does_not_move_our_anchor():
+    client = corrected_realm(correction_sender=11)
+    assert rootchat_home(client, *DELEGATE, 15) == Conversation(
+        "front", "front-desk-20260912-1636"
+    )
+
+
+def test_the_note_search_lists_a_corrected_topic_under_its_new_home():
+    """`rootchat_notes` is what `remotes_for_home` and `sweep_rootchats` are
+    both built on, so aligning it is what puts a corrected delegate beside
+    the run that owns it rather than beside the conversation that opened it
+    by mistake."""
+    client = corrected_realm()
+    assert rootchat_notes(client) == [
+        (DELEGATE, Conversation("routine-publish", "routinerun-20260912T1636Z")),
+    ]
+    assert remotes_for_home(client, "routine-publish", "routinerun-20260912T1636Z") == [
+        Conversation(*DELEGATE),
+    ]
+    assert remotes_for_home(client, "front", "front-desk-20260912-1636") == []
+
+
+def test_an_uncorrected_topic_is_listed_under_its_earliest_note():
+    client = corrected_realm(correction=False)
+    assert remotes_for_home(client, "front", "front-desk-20260912-1636") == [
+        Conversation(*DELEGATE),
+    ]
+    assert remotes_for_home(client, "routine-publish", "routinerun-20260912T1636Z") == []
+
+
+def test_recovery_attributes_a_corrected_callback_to_the_run_that_owns_it():
+    """The sweep that recovers callbacks after a restart reads the same
+    effective anchor, so a correction survives a listener restart."""
+    client = corrected_realm()
+    client.last_sender = {DELEGATE: 11}
+    client.last_content = {DELEGATE: "@**Front** task complete"}
+    assert sweep_rootchats(client, 15, "Front") == [DELEGATE]
+
+
+def test_a_corrected_callback_already_answered_is_not_swept_again():
+    """The served mark is written into **home**, and after a correction home
+    is the run. A restart must not replay a delegation the run has already
+    answered — where that is a routine run, replaying is the work twice."""
+    client = corrected_realm()
+    client.served_messages = [
+        served_note_message(
+            15, MOVED_RUN, DELEGATE[0], DELEGATE[1], 6560, message_id=6600,
+        ),
+    ]
+    assert sweep_rootchats(client, 15, "Front") == []
+
+
+def test_a_correction_in_an_inherited_conversation_is_read_too():
+    """A's hop and B2's rule are one lookup: the conversation reached through
+    `replaces` is read under the same effective-anchor rule as this one."""
+    live = ("pj-study", "workplan-contributions")
+    retired = ("pj-study", f"{RESOLVED_TOPIC_PREFIX}retired-workplan-contributions-m6371")
+    client = SweepClient(
+        whoami_results=[], poll_results=[], topics_by_channel={}, last_sender={},
+    )
+    client.histories = {
+        live: [
+            {"id": 6401, "sender_id": 11, "content": "[selfnote][replaces] 6371"},
+            {"id": 6450, "sender_id": 11, "content": "@**Front** ready"},
+        ],
+        retired: [
+            {"id": 6367, "sender_id": 15, "content": f"[selfnote][rootchat] {MOVED_DESK}"},
+            {"id": 6369, "sender_id": 15, "content": f"[selfnote][rootchat-moved] {MOVED_RUN}"},
+        ],
+    }
+    client.messages_by_id = {
+        6371: {"id": 6371, "type": "stream", "sender_id": 11,
+               "display_recipient": retired[0], "subject": retired[1], "content": "x"},
+    }
+    assert rootchat_home(client, *live, 15) == Conversation(
+        "routine-publish", "routinerun-20260912T1636Z"
+    )
 
 
 # --- an anchor inherited through one replacement (routine_tests p2 ex1) ------

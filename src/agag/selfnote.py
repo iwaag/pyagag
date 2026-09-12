@@ -58,6 +58,9 @@ SELFNOTE_MARKER = "[selfnote]"
 ROOTCHAT_TAG = "rootchat"
 #: The tag of the note that says a callback has already been answered.
 SERVED_TAG = "served"
+#: The tag of a **deliberate** correction of a topic's anchor. See
+#: `effective_rootchat` for the one rule that reads it.
+MOVED_TAG = "rootchat-moved"
 #: The tag of the relation naming the work a conversation was opened to
 #: replace, by the message id of that work's own anchor. Shared since
 #: `routine_tests` p2 ex1: it is written by the *replacing* agent (autolab
@@ -72,11 +75,13 @@ HOME_VARIABLE = "AGENTCHAT_HOME"
 
 __all__ = [
     "HOME_VARIABLE",
+    "MOVED_TAG",
     "REPLACES_TAG",
     "ROOTCHAT_TAG",
     "SELFNOTE_MARKER",
     "SERVED_TAG",
     "Conversation",
+    "effective_rootchat",
     "home_from_environment",
     "is_selfnote",
     "last_real_message",
@@ -84,12 +89,15 @@ __all__ = [
     "note",
     "own_rootchat",
     "parse_conversation",
+    "own_rootchat_moved",
     "parse_note",
     "parse_replaces",
+    "parse_rootchat_moved",
     "parse_rootchat",
     "parse_served",
     "replaced_anchor",
     "replaces_note",
+    "rootchat_moved_note",
     "rootchat_note",
     "served_note",
     "without_selfnotes",
@@ -243,11 +251,16 @@ def parse_served(content) -> tuple[Conversation, int] | None:
 
 
 def own_rootchat(messages, self_id: int) -> Conversation | None:
-    """The home this bot anchored this topic to, reading its history.
+    """The home this bot's **ordinary** root notes anchor this topic to.
 
     The **earliest** of our own root notes wins. A topic is anchored once, by
     the run that opened it; a later note would be a repeat, and the first one
-    is the conversation the topic was actually opened for.
+    is the conversation the topic was actually opened for. That rule is what
+    stops a repeat redirecting a live conversation, and it is kept exactly.
+
+    A pure history selector: no network, no correction. `effective_rootchat`
+    is the one that reads a deliberate move as well, and it is what every
+    routing lookup asks.
     """
     for message in messages:
         if message.get("sender_id") != self_id:
@@ -256,6 +269,64 @@ def own_rootchat(messages, self_id: int) -> Conversation | None:
         if home is not None:
             return home
     return None
+
+
+def rootchat_moved_note(home: Conversation) -> str:
+    """`[selfnote][rootchat-moved] <channel>/<topic>` — a deliberate move.
+
+    `routine_tests` p2 ex1, problem B2. "A topic is anchored once" is the
+    right default — a bare repeat must not redirect a live conversation —
+    but until now there was no way to say a topic was anchored *wrongly*,
+    and p1 and p2 between them wanted one six times. p2's manual repair
+    wrote an ordinary root note into the delegation topic and it changed
+    nothing, correctly, because a repeat loses.
+
+    This note is not a repeat. It says, in its own tag, that the agent is
+    correcting the anchor on purpose, and only an agent's own move moves its
+    own anchor. Still a selfnote: hidden from every chatlog and thread file,
+    and never enough on its own to buy anybody a run.
+    """
+    return note(MOVED_TAG, str(home))
+
+
+def parse_rootchat_moved(content) -> Conversation | None:
+    """The conversation a move note names, or None if this is not one."""
+    return parse_conversation(parse_note(content, MOVED_TAG))
+
+
+def own_rootchat_moved(messages, self_id: int) -> Conversation | None:
+    """The newest deliberate move **this bot** wrote in this topic.
+
+    Newest, not earliest: unlike an anchor, a correction is not identity. An
+    agent that gets it wrong twice must be able to say so twice, and the
+    last thing it said is what it means. A move written by somebody else is
+    somebody else's anchor and is ignored here — this is the one place the
+    sender filter is the whole point, which is why it is not the reader of
+    the `replaces` relation.
+    """
+    for message in reversed(list(messages)):
+        if message.get("sender_id") != self_id:
+            continue
+        home = parse_rootchat_moved(message.get("content"))
+        if home is not None:
+            return home
+    return None
+
+
+def effective_rootchat(messages, self_id: int) -> Conversation | None:
+    """Where this bot's answers for this topic belong, all rules applied.
+
+    **One rule, everywhere**: the newest valid explicit move written by this
+    agent wins; otherwise its earliest ordinary root note wins. A later
+    ordinary repeat never redirects the topic.
+
+    This is what every routing lookup asks — the callback route, the note
+    search, the thread placement and the recovery sweeps — so a correction
+    lands in all of them at once, and a corrected delegate appears under its
+    new home rather than its old one.
+    """
+    moved = own_rootchat_moved(messages, self_id)
+    return moved if moved is not None else own_rootchat(messages, self_id)
 
 
 # --- who spoke last, for real ---------------------------------------------

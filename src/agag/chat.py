@@ -45,6 +45,8 @@ from .selfnote import (
     home_from_environment,
     is_selfnote,
     own_rootchat,
+    parse_conversation,
+    rootchat_moved_note,
     rootchat_note,
 )
 from .zulip import (
@@ -120,6 +122,10 @@ Examples
   # published. Post this in the topic whose work you want run that way.
   agentchat use <their-channel> <topic> <option> --to "<their Zulip name>"
 
+  # A conversation of yours is anchored to the wrong one of your own
+  # conversations: say so, on purpose, and the answers come back to this one.
+  agentchat anchor <their-channel> <topic>
+
   The channel and the topic name are not for this tool to suggest: they are
   whatever the agent you are addressing said its entrance is. Read its
   introduction, and use the names it gave.
@@ -154,6 +160,22 @@ Notes
   askable: an agent's internal profile names are its own business, and an
   agent that published nothing is *unknown*, which is not the same as "no".
   Say so, or ask, rather than trying a name to see what happens.
+
+  Every topic you `send` into is anchored to the conversation you are
+  serving, automatically and once. That is nearly always right, and a second
+  ordinary post never changes it: a repeat must not be able to redirect a
+  live conversation. So when it is *wrong* — you asked somebody for something
+  on behalf of a conversation that is not the one that should hear the
+  answer — saying it again does not help, and `anchor` is how you say it
+  deliberately instead. It writes one hidden note into that topic, naming
+  this conversation; from then on that topic's answers are served here. Only
+  your own move moves your own anchor, the newest one you wrote is the one
+  that counts, and the note is a selfnote — nobody is served by it and
+  nothing is posted that anybody reads.
+
+  Use it when you know the anchor is wrong, not as a habit: the automatic
+  one is right for every ordinary delegation, and a correction that was not
+  needed is a conversation quietly answering somewhere nobody is reading.
 
   `use` posts one command line and returns. It is configuration, not a
   request: the agent answers it with a line of its own and starts no work, so
@@ -495,6 +517,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="their Zulip name, as their published command line spells it",
     )
 
+    anchor = subcommands.add_parser(
+        "anchor",
+        help="correct which of your conversations a topic answers to",
+        description=(
+            "Write one hidden note into <channel> > <topic> saying that its "
+            "answers belong to the conversation you are serving. Posting "
+            "anchors a topic automatically and a second ordinary post never "
+            "changes that, so this is the only way to correct an anchor that "
+            "is wrong. Nobody is served by the note and nothing readable is "
+            "posted. The newest correction you wrote is the one that counts, "
+            "and only your own moves your own."
+        ),
+    )
+    anchor.add_argument("channel", help="channel name, without the leading '#'")
+    anchor.add_argument("topic", help="the topic whose answers are coming back wrongly")
+    anchor.add_argument(
+        "--home", default=None, metavar="CHANNEL/TOPIC",
+        help=(
+            "the conversation of yours the answers belong to; "
+            "defaults to the one this run is serving"
+        ),
+    )
+
     return parser
 
 
@@ -614,6 +659,41 @@ def _run(args, client: ZulipClient, out) -> int:
         print(
             "that is configuration only — they will confirm it and start no "
             "work; post what you want done separately",
+            file=out,
+        )
+        if joined:
+            print(f"joined #{args.channel}", file=out)
+        return 0
+    if args.command == "anchor":
+        home = (
+            parse_conversation(args.home) if args.home else home_from_environment()
+        )
+        if home is None:
+            raise AgentChatError(
+                "there is no conversation to anchor to: this run is not "
+                "serving one, so pass --home <channel>/<topic>"
+                if not args.home
+                else f"--home {args.home!r} is not a <channel>/<topic> pair"
+            )
+        if home.as_pair() == (args.channel, args.topic):
+            raise AgentChatError(
+                "a conversation is not anchored to itself; name the topic "
+                "whose answers should come here, not this one"
+            )
+        refuse_resolved(client, args.channel, args.topic)
+        joined = join_and_record(client, args.channel, args.topic, out)
+        message_id = client.send_to_channel(
+            args.channel, args.topic, rootchat_moved_note(home)
+        )
+        print(
+            f"anchored #{args.channel} > {args.topic} to {home} "
+            f"(note {message_id})",
+            file=out,
+        )
+        print(
+            "answers there will be served in this conversation from now on; "
+            "nobody was notified, because that note is not a message anybody "
+            "reads",
             file=out,
         )
         if joined:

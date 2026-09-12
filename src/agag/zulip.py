@@ -33,14 +33,17 @@ from pathlib import Path
 from typing import Callable
 
 from agag.selfnote import (
+    MOVED_TAG,
     ROOTCHAT_TAG,
     SERVED_TAG,
     Conversation,
+    effective_rootchat,
     is_selfnote,
     last_real_message,
     last_real_sender,
     own_rootchat,
     parse_rootchat,
+    parse_rootchat_moved,
     replaced_anchor,
     parse_served,
     served_note,
@@ -720,6 +723,16 @@ class ZulipClient:
         """
         return self.own_notes(ROOTCHAT_TAG, num_before)
 
+    def own_moved_notes(self, num_before: int = ROOTCHAT_HISTORY) -> list[dict]:
+        """Recent deliberate anchor corrections written by this bot.
+
+        Its own narrow rather than a filter over the `rootchat` one: whether
+        a full-text search for `rootchat` also matches `rootchat-moved`
+        depends on how the server tokenizes a hyphen, and a routing lookup is
+        not the place to depend on that. One extra call per recovery sweep.
+        """
+        return self.own_notes(MOVED_TAG, num_before)
+
     def own_served_notes(self, num_before: int = ROOTCHAT_HISTORY) -> list[dict]:
         """Recent served notes written by this bot, oldest first.
 
@@ -998,12 +1011,28 @@ def rootchat_notes(
     second, the callback run got no thread for it, read "post there to start
     it" as the latest word, and posted a second start into a topic that no
     longer existed under that name.
+
+    **The effective anchor decides, not the first note found**
+    (`routine_tests` p2 ex1, B2): a topic this bot deliberately corrected
+    with `[selfnote][rootchat-moved]` is listed under the home it was moved
+    to, so a corrected delegate appears beside its real home in `threads/`
+    and its callback recovery is attributed to the run that owns it — and
+    not, as p2's manual repair found, still to the conversation that opened
+    it by mistake.
     """
-    anchored: list[tuple[tuple[str, str], Conversation]] = []
-    seen: set[tuple[str, str]] = set()
-    for message in client.own_rootchat_notes(num_before):
-        home = parse_rootchat(message.get("content"))
-        if home is None or message.get("type") != "stream":
+    ordinary: dict[tuple[str, str], Conversation] = {}
+    moved: dict[tuple[str, str], tuple[int, Conversation]] = {}
+    order: list[tuple[str, str]] = []
+    for message in list(client.own_rootchat_notes(num_before)) + list(
+        client.own_moved_notes(num_before)
+    ):
+        if message.get("type") != "stream":
+            continue
+        correction = parse_rootchat_moved(message.get("content"))
+        home = correction if correction is not None else parse_rootchat(
+            message.get("content")
+        )
+        if home is None:
             continue
         topic = str(message.get("subject") or "")
         channel = channel_name(message)
@@ -1013,11 +1042,22 @@ def rootchat_notes(
             if not include_resolved:
                 continue
             topic = topic[len(RESOLVED_TOPIC_PREFIX):]
-        if (channel, topic) in seen:
-            continue  # the earliest note anchors the topic; later ones repeat
-        seen.add((channel, topic))
-        anchored.append(((channel, topic), home))
-    return anchored
+        key = (channel, topic)
+        if key not in ordinary and key not in moved:
+            order.append(key)
+        if correction is not None:
+            # The newest correction wins; a correction is not identity.
+            message_id = int(message.get("id") or 0)
+            if message_id >= moved.get(key, (-1, None))[0]:
+                moved[key] = (message_id, home)
+        elif key not in ordinary:
+            # The earliest ordinary note anchors; later ones repeat.
+            ordinary[key] = home
+    return [
+        (key, moved[key][1] if key in moved else ordinary[key])
+        for key in order
+        if key in moved or key in ordinary
+    ]
 
 
 def remotes_for_home(
@@ -1153,7 +1193,7 @@ def inherited_rootchat(
     previous = conversation_of(client, anchor_id)
     if previous is None:
         return None
-    return own_rootchat(
+    return effective_rootchat(
         topic_history_across_resolve(
             client, previous.channel, previous.topic, num_before
         ),
@@ -1185,7 +1225,7 @@ def rootchat_home(
     override of one that has.
     """
     history = topic_history_across_resolve(client, channel, topic, num_before)
-    home = own_rootchat(history, self_id)
+    home = effective_rootchat(history, self_id)
     if home is not None:
         return home
     return inherited_rootchat(client, history, self_id, num_before)

@@ -589,3 +589,87 @@ def test_use_refuses_a_resolved_conversation_like_send_does(monkeypatch):
     client.holders = {f"✔ {TOPIC}": 5, TOPIC: 0}
     code, out, err = run(monkeypatch, ["use", CHANNEL, TOPIC, "agy", "--to", "Forge"], client)
     assert code == 1 and "resolved" in err
+
+
+# --- correcting an anchor on purpose (routine_tests p2 ex1, B2) -------------
+
+
+def test_anchor_writes_the_move_as_this_agent_naming_its_own_conversation(monkeypatch):
+    """One hidden note, nothing else. Nobody is told, because the note is not
+    a message anybody reads — and a post that served somebody would be a
+    correction that costs a run."""
+    calls = []
+    monkeypatch.setenv(selfnote.HOME_VARIABLE, "routine-publish/routinerun-20260912T1636Z")
+    code, out, err = run(monkeypatch, ["anchor", CHANNEL, TOPIC], Client(calls))
+    assert code == 0 and err == ""
+    assert [call for call in calls if call[0] == "send"] == [
+        ("send", CHANNEL, TOPIC,
+         "[selfnote][rootchat-moved] routine-publish/routinerun-20260912T1636Z"),
+    ]
+    assert "anchored" in out and "routinerun-20260912T1636Z" in out
+
+
+def test_anchor_can_name_the_conversation_explicitly(monkeypatch):
+    calls = []
+    monkeypatch.delenv(selfnote.HOME_VARIABLE, raising=False)
+    code, _, err = run(
+        monkeypatch,
+        ["anchor", CHANNEL, TOPIC, "--home", "front/front-a"],
+        Client(calls),
+    )
+    assert code == 0 and err == ""
+    assert calls[-1] == ("send", CHANNEL, TOPIC, "[selfnote][rootchat-moved] front/front-a")
+
+
+def test_anchor_without_a_conversation_to_name_says_so(monkeypatch):
+    calls = []
+    monkeypatch.delenv(selfnote.HOME_VARIABLE, raising=False)
+    code, _, err = run(monkeypatch, ["anchor", CHANNEL, TOPIC], Client(calls))
+    assert code == 1 and "--home" in err
+    assert [call for call in calls if call[0] == "send"] == []
+
+
+def test_anchor_refuses_a_conversation_anchored_to_itself(monkeypatch):
+    calls = []
+    monkeypatch.setenv(selfnote.HOME_VARIABLE, f"{CHANNEL}/{TOPIC}")
+    code, _, err = run(monkeypatch, ["anchor", CHANNEL, TOPIC], Client(calls))
+    assert code == 1 and "not anchored to itself" in err
+    assert [call for call in calls if call[0] == "send"] == []
+
+
+def test_anchor_refuses_a_resolved_topic(monkeypatch):
+    """Posting under the bare name of a resolved conversation opens an empty
+    twin beside it; a correction written into a twin corrects nothing."""
+    calls = []
+    monkeypatch.setenv(selfnote.HOME_VARIABLE, "front/front-a")
+
+    class Resolved(Client):
+        holders = {f"\u2714 {TOPIC}": 77}
+
+    code, _, err = run(monkeypatch, ["anchor", CHANNEL, TOPIC], Resolved(calls))
+    assert code == 1
+    assert [call for call in calls if call[0] == "send"] == []
+
+
+def test_ordinary_send_still_anchors_automatically(monkeypatch):
+    """The correction is an addition, not a replacement: nothing about the
+    automatic anchoring changes, because it is right for every ordinary
+    delegation."""
+    calls = []
+    monkeypatch.setenv(selfnote.HOME_VARIABLE, "front/front-title-image")
+    code, _, _ = run(monkeypatch, ["send", CHANNEL, TOPIC, "please draw"], Client(calls))
+    assert code == 0
+    assert [call for call in calls if call[0] == "send"] == [
+        ("send", CHANNEL, TOPIC, "[selfnote][rootchat] front/front-title-image"),
+        ("send", CHANNEL, TOPIC, "please draw"),
+    ]
+
+
+def test_the_tool_documentation_explains_when_to_correct_an_anchor():
+    """A powerful command handed over with a bare synopsis is an Unexplained
+    Chainsaw; `--help` is this tool's documentation."""
+    doc = chat.USAGE_DOC
+    assert "agentchat anchor" in doc
+    assert "ordinary post never changes it" in doc
+    assert "not as a habit" in doc
+    assert "nobody is served by it" in doc

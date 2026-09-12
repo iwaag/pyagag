@@ -245,18 +245,25 @@ def test_an_agent_that_names_no_roles_publishes_what_it_declares(tmp_path):
     assert spec.pool_diagnostics() == ()
 
 
-def test_an_unreadable_config_leaves_the_declarations_alone_and_says_so(tmp_path):
-    """Degrading is fine; degrading silently is not.
-
-    A configuration this instance cannot read is why the pools came back as
-    declared, and reporting "no mismatch" for it would be the same silent
-    pass the derivation exists to end.
-    """
-    spec = write_spec(tmp_path, config_text="this is not toml {{{")
+@pytest.mark.parametrize("failure", ["invalid_config", "missing_config", "invalid_overlay"])
+def test_unreadable_config_publishes_unknown_pools_and_recovers(tmp_path, failure):
+    """Keep the menu, but never give a requester an unchecked usage pool."""
+    spec = write_spec(tmp_path)
+    if failure == "invalid_config":
+        (tmp_path / "agents.toml").write_text("this is not toml {{{")
+    elif failure == "missing_config":
+        (tmp_path / "agents.toml").unlink()
+    else:
+        (tmp_path / ".local/agents.local.toml").write_text("this is not toml {{{")
     published = spec.published_options("Demo")
-    assert published.get("default").pool == "anthropic"
+    assert published.names == ("default", "agy")
+    assert all(option.pool == UNKNOWN for option in published.options)
     lines = spec.pool_diagnostics()
-    assert len(lines) == 1 and "could not be derived" in lines[0]
+    assert len(lines) == 1 and "published as unknown" in lines[0]
+    write_spec(tmp_path)
+    assert spec.published_options("Demo").get("default").pool == "anthropic"
+    assert spec.published_options("Demo").get("agy").pool == "antigravity"
+    assert spec.pool_diagnostics() == ()
 
 
 @pytest.mark.parametrize("role_list", [("front",), ("front", "worker")])

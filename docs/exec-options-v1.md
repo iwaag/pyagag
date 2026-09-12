@@ -90,6 +90,11 @@ each one says its options cover. Four rules follow:
   against it and every disagreement is logged, naming the option, both pools,
   and the role/profile/harness that produced the derived one.
 
+If configuration cannot be read or validated, the menu retains its options
+but publishes their pools as `unknown`. A diagnostic explains the failure;
+an unchecked declared pool is never presented as a resolved observation.
+Repairing the configuration restores derivation on the next menu read.
+
 **A missing block is `unknown`, never "unsupported".** The same rule the
 roster block already carries, for the same reason: a consumer that
 substitutes a default has invented the answer. A requester that finds no

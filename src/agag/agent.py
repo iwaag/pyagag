@@ -41,7 +41,7 @@ from pathlib import Path
 from . import selfnote
 from .agent_config import ResolvedAgent, load_config, resolve_role
 from .execopt import DEFAULT_OPTION, ExecOptions, Option, Selection, run_meta, with_default
-from .execpool import OptionPools, diagnose, with_derived_pools
+from .execpool import UNKNOWN, OptionPools, diagnose, with_derived_pools
 from .harness import run_harness, write_run_record
 from .topics import workspace_identity
 from .instance import instance_name as read_instance_name
@@ -211,9 +211,8 @@ class AgentSpec:
         The declaration in `exec_options` is an assertion the agent makes;
         this is what its own configuration and this machine's overlay say
         will really run, role by role (`agag.execpool`). A configuration
-        that cannot be read leaves the declarations alone and finds nothing,
-        so a broken file degrades the menu's precision rather than emptying
-        it.
+        that cannot be read retains the options with unknown pools, so the
+        requester can distinguish an unchecked pool from a resolved one.
         """
         listed, findings, _ = self._pool_view()
         return listed, findings
@@ -222,7 +221,7 @@ class AgentSpec:
         """`(menu, findings, why nothing could be derived)`.
 
         The third value is not decoration: a configuration this instance
-        cannot read is why the pools came back as declared, and reporting
+        cannot read is why the pools came back as unknown, and reporting
         "no mismatch" for it would be the same silent pass the derivation
         exists to end.
         """
@@ -232,7 +231,7 @@ class AgentSpec:
         try:
             config, overlay = load_config(self.agents_config, self.agents_local_config)
         except Exception as error:
-            return listed, (), f"{type(error).__name__}: {error}"
+            return tuple(replace(option, pool=UNKNOWN) for option in listed), (), f"{type(error).__name__}: {error}"
         derived, findings = with_derived_pools(
             listed, self.exec_roles, config, overlay, self.profile_for,
         )
@@ -249,8 +248,7 @@ class AgentSpec:
         listed, findings, error = self._pool_view()
         if error:
             return (
-                f"the pools could not be derived, so the declared ones stand "
-                f"unchecked: {error}",
+                f"the pools could not be derived and are published as unknown: {error}",
             )
         return diagnose(self.exec_options_with_default(), findings)
 

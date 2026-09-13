@@ -118,7 +118,7 @@ captures a cost report rather than a run. `on_event` still implies it.
 
 ### A run is one reply; waiting is just not being your turn
 
-There is no `wait`. An agent does one piece of work, says something, and its
+There is no `agentchat wait`. An agent does one piece of work, says something, and its
 run ends; when a post addressed to it arrives it is served again, with that
 conversation in front of it. Three pieces carry that:
 
@@ -294,6 +294,27 @@ conversation anchored to itself. Ordinary `send` still anchors automatically
 and unchanged; the correction is for when the anchor is known to be wrong,
 not a habit. The move is a selfnote, so it is hidden from every chatlog and
 buys nobody a run.
+
+### Notices, and waiting from outside a run
+
+A watcher's notification is speech — it is the requester's turn — but a
+program waiting for it needs to know it by more than "something was posted".
+`agag.notice` gives the notification a fixed **first line** only a program
+writes:
+
+    [notice][watch] <watch name> <outcome>
+
+`notice_line` builds it (agobserver puts it first in every `met` post) and
+`parse_notice` recognizes it: first line, exact match, so a notice quoted in
+prose is not one. Everything after it is for people, the model's evidence
+included.
+
+`agag wait <channel> <topic> --watch <name> [--since <id>] [--timeout]
+[--interval]` blocks until that notice is in the conversation, prints the
+message and exits 0, or exits 3 on timeout. Other posts and failed reads do
+not end it. It is in `agag`, not `agentchat`, on purpose: a run is one reply,
+and this is for a session outside the realm's listeners — an interactive
+coding session that wants to be woken — which has nothing else to wake it.
 
 ### Project channels: subscription is the routing decision
 

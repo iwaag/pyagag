@@ -92,7 +92,8 @@ ROSTER_PREAMBLE = (
 HEADING = "# Other agents"
 PREAMBLE = (
     "Each section below is one agent's own introduction, copied verbatim from\n"
-    "the shared `#agents` board in Zulip. Talk to them with `agentchat`."
+    "the shared `#agents` board in Zulip. Talk to them with `agentchat`;\n"
+    "`agentchat intro <agent>` reads one again as it is posted now."
 )
 NO_AGENTS = (
     "No agent has introduced itself on the `#agents` board, so there is "

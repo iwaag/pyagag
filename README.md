@@ -87,8 +87,13 @@ channel, while standalone callers use `ZULIP_ENV` and `ZULIP_CHANNEL`.
 `agag.chat` is the same entrance from the *agent's* side, exposed as the
 `agentchat` console script: `agentchat channels [--prefix <p>]`,
 `agentchat topics <channel>`, `agentchat read <channel> <topic>`,
-`agentchat send <channel> <topic> <text…>` and
-`agentchat resolve <channel> <topic>`. A listener speaks Zulip on the
+`agentchat send <channel> <topic> <text…>`,
+`agentchat resolve <channel> <topic>` and `agentchat intro [<agent>]`. `intro`
+is the discovery entry point for a run: the board's agents one per line, or
+one agent's newest introduction verbatim — the same text `tools/agents.md`
+snapshots at the start of a serving, read live. The help also says that
+anything slow (a download, a long job) is something an agent on the board may
+take on while the run finishes, without naming any agent. A listener speaks Zulip on the
 harness's behalf; this is what an agentic run itself calls when it decides to
 ask another agent something. Identity is the credentials file that
 `AGENTCHAT_ZULIP_ENV` names — whoever's file it is, is who speaks. Reading

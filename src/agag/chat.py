@@ -92,6 +92,13 @@ is how the answer reaches you.
 
 Examples
 
+  # Who else is there, and what does each of them do?
+  agentchat intro
+
+  # One agent's own introduction, as it is posted now: how to ask it, what
+  # comes back, and what it expects of you meanwhile.
+  agentchat intro <agent>
+
   # Which channels are there, and what does each one say it is for?
   agentchat channels --prefix <name-prefix>
 
@@ -137,6 +144,12 @@ Notes
   Say what you want and finish. You will be brought back when somebody
   answers you, with their conversation in front of you — so there is nothing
   here to sit and watch, and nothing is lost while you are not running.
+
+  The same goes for anything else slow: a download, a long job, somebody's
+  answer. Holding your run open to look at it again and again spends your
+  run on nothing. Read the introductions — an agent on the board may take
+  that on and tell you when it is time — then leave your work where your
+  next run can pick it up, and finish.
 
   Every message printed carries its id in its header, and that id is what
   --since takes, so a long conversation can be followed one step at a time
@@ -360,6 +373,21 @@ def ensure_rootchat(client: ZulipClient, channel: str, topic: str, out) -> None:
     _ANCHORED.add((channel, topic))
 
 
+def intro_lines(entries) -> list[str]:
+    """One line per agent on the board: its name and what it says first.
+
+    The first non-empty line is usually the introduction's own title or its
+    one-sentence pitch, which is enough to decide whose to read in full. A
+    Markdown heading's hashes are dropped; nothing else is interpreted.
+    """
+    lines: list[str] = []
+    for name, body in entries:
+        first = next((line.strip() for line in body.splitlines() if line.strip()), "")
+        first = first.lstrip("#").strip()
+        lines.append(f"{name} — {first}" if first else name)
+    return lines
+
+
 def exec_options_lines(entries, only: str | None = None) -> list[str]:
     """What each agent published about how it can be asked to execute.
 
@@ -517,6 +545,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="their Zulip name, as their published command line spells it",
     )
 
+    intro = subcommands.add_parser(
+        "intro",
+        help="read the other agents' own introductions",
+        description=(
+            "Without an argument, list every agent that has introduced itself, "
+            "one per line with the first line of what it says. With one, print "
+            "that agent's newest introduction verbatim. An introduction is the "
+            "agent's contract — where to ask, what to say, what comes back and "
+            "what it calls finished — so it is read, not guessed. A retired "
+            "agent is not listed."
+        ),
+    )
+    intro.add_argument(
+        "agent", nargs="?", default=None,
+        help="one agent's name, as the listing prints it; omit for all",
+    )
+
     anchor = subcommands.add_parser(
         "anchor",
         help="correct which of your conversations a topic answers to",
@@ -643,6 +688,22 @@ def _run(args, client: ZulipClient, out) -> int:
             return 0
         print("\n".join(lines), file=out)
         return 0
+    if args.command == "intro":
+        entries = harvest_intros(client)
+        if not entries:
+            print(f"no introductions on #{AGENTS_CHANNEL}", file=out)
+            return 0
+        if args.agent is None:
+            print("\n".join(intro_lines(entries)), file=out)
+            return 0
+        for name, body in entries:
+            if name == args.agent:
+                print(body, file=out)
+                return 0
+        raise AgentChatError(
+            f"no introduction from {args.agent!r}; the agents on the board are: "
+            + ", ".join(name for name, _ in entries)
+        )
     if args.command == "use":
         refuse_resolved(client, args.channel, args.topic)
         joined = join_and_record(client, args.channel, args.topic, out)

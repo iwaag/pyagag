@@ -566,6 +566,60 @@ def test_options_can_be_asked_about_one_agent():
     assert len(chat.exec_options_lines(entries, "a")) == 3
 
 
+# --- introductions ---------------------------------------------------------
+
+
+def intro_board(monkeypatch, rows):
+    monkeypatch.setattr(chat, "harvest_intros", lambda client: list(rows))
+    return Client([])
+
+
+def test_intro_lists_every_agent_with_what_it_says_first(monkeypatch):
+    client = intro_board(monkeypatch, [
+        ("waiter-host1", "# waiter\n\nI wait, so you do not have to."),
+        ("maker-host1", "\n\nI make things."),
+    ])
+    code, out, err = run(monkeypatch, ["intro"], client)
+    assert code == 0 and not err
+    assert out.splitlines() == ["waiter-host1 — waiter", "maker-host1 — I make things."]
+
+
+def test_intro_prints_one_agents_introduction_verbatim(monkeypatch):
+    body = "# waiter\n\nOpen a topic in my channel.\n\n```agag-roster\nx: y\n```"
+    client = intro_board(monkeypatch, [("waiter-host1", body), ("maker-host1", "hi")])
+    code, out, _ = run(monkeypatch, ["intro", "waiter-host1"], client)
+    assert code == 0
+    assert out == body + "\n"
+
+
+def test_intro_of_an_agent_not_on_the_board_names_who_is(monkeypatch):
+    client = intro_board(monkeypatch, [("waiter-host1", "hi"), ("maker-host1", "hi")])
+    code, out, err = run(monkeypatch, ["intro", "nobody"], client)
+    assert code == 1 and not out
+    assert "nobody" in err and "waiter-host1" in err and "maker-host1" in err
+
+
+def test_intro_on_an_empty_board_says_so_rather_than_failing(monkeypatch):
+    client = intro_board(monkeypatch, [])
+    code, out, _ = run(monkeypatch, ["intro"], client)
+    assert code == 0 and "no introductions" in out
+
+
+def test_intro_only_reads(monkeypatch):
+    """Reading the board must never post, subscribe or anchor anything."""
+    client = intro_board(monkeypatch, [("waiter-host1", "hi")])
+    run(monkeypatch, ["intro", "waiter-host1"], client)
+    assert client.calls == []
+
+
+def test_help_offers_the_board_for_anything_slow(capsys):
+    with pytest.raises(SystemExit):
+        chat.build_parser().parse_args(["--help"])
+    text = " ".join(capsys.readouterr().out.split())
+    assert "agentchat intro <agent>" in text
+    assert "an agent on the board may take that on" in text
+
+
 def test_use_posts_the_command_line_and_nothing_else(monkeypatch):
     calls = []
     code, out, err = run(monkeypatch, ["use", CHANNEL, TOPIC, "agy", "--to", "Forge"],

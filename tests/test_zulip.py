@@ -21,11 +21,13 @@ from agag.zulip import (
     RateLimited,
     ZulipClient,
     ZulipError,
+    ZulipRejected,
     ZulipTimeout,
     rate_limit_backoff,
     retry_after_seconds,
     SWEEP_BUDGET_RESERVE,
     channel_name,
+    conversation_of,
     dm_partners,
     is_channel_message_for_us,
     is_dm_for_us,
@@ -2324,3 +2326,75 @@ def test_message_without_a_message_body_is_absent():
     client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
     client.call = lambda *a, **k: {"result": "success"}
     assert client.message(9) is None
+
+
+# --- answered versus unanswered (observer p1 ex1 step 1) --------------------
+
+
+def test_a_refused_call_is_rejected_and_a_failing_server_is_not(monkeypatch):
+    """The line everything that reads absence out of failure stands on.
+
+    A 4xx is Zulip answering: no such message, not your channel. A 5xx is
+    Zulip failing to answer, and the object asked about may be perfectly
+    fine — so it must not arrive as the same class.
+    """
+    client = client_whose_calls_raise(
+        http_error(400, '{"result":"error","code":"BAD_REQUEST","msg":"Invalid message(s)"}'),
+        monkeypatch,
+    )
+    with pytest.raises(ZulipRejected):
+        client.call("GET", "messages/9")
+
+    client = client_whose_calls_raise(http_error(502, "bad gateway"), monkeypatch)
+    with pytest.raises(ZulipError) as error:
+        client.call("GET", "messages/9")
+    assert not isinstance(error.value, ZulipRejected)
+
+
+def test_a_strict_message_read_separates_gone_from_unreadable():
+    """`None` under `strict` means Zulip said so, and nothing else does."""
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+
+    def refuse(*args, **kwargs):
+        raise ZulipRejected("GET messages/9 -> HTTP 400: Invalid message(s)")
+
+    client.call = refuse
+    assert client.message(9, strict=True) is None
+
+    def time_out(*args, **kwargs):
+        raise ZulipTimeout("GET messages/9 timed out after 30s")
+
+    client.call = time_out
+    assert client.message(9) is None                 # lenient: unchanged
+    with pytest.raises(ZulipTimeout):
+        client.message(9, strict=True)
+
+
+def test_a_strict_conversation_lookup_raises_rather_than_reporting_absence():
+    client = ZulipClient("https://zulip.example.invalid", "bot@example.invalid", "key")
+
+    def time_out(*args, **kwargs):
+        raise ZulipTimeout("timed out")
+
+    client.call = time_out
+    assert conversation_of(client, 5512) is None     # lenient: unchanged
+    with pytest.raises(ZulipTimeout):
+        conversation_of(client, 5512, strict=True)
+
+
+def test_a_strict_history_read_raises_rather_than_returning_an_empty_topic():
+    """An empty list must mean empty, or a caller reads an outage as absence."""
+
+    class Failing:
+        def topic_history(self, channel, topic, num_before=50):
+            raise ZulipTimeout("timed out")
+
+    assert topic_history_across_resolve(Failing(), "front", "front-x", 1) == []
+    with pytest.raises(ZulipTimeout):
+        topic_history_across_resolve(Failing(), "front", "front-x", 1, strict=True)
+
+    class Refusing:
+        def topic_history(self, channel, topic, num_before=50):
+            raise ZulipRejected("no such channel")
+
+    assert topic_history_across_resolve(Refusing(), "front", "front-x", 1, strict=True) == []

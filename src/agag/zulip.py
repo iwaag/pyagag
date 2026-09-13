@@ -100,7 +100,24 @@ class ZulipError(Exception):
     """A Zulip API call failed for a reason the caller cannot ignore."""
 
 
-class QueueExpired(ZulipError):
+class ZulipRejected(ZulipError):
+    """Zulip received the call, understood it, and refused it (HTTP 4xx).
+
+    The distinction this class exists for is **answered** versus
+    **unanswered**. A refusal is a statement about the object — no such
+    message, not a channel you may read — and a caller may act on it as a
+    fact. A timeout, a dropped connection, a 429 or a 5xx is not a statement
+    about anything: the object may be perfectly fine and the call simply
+    never got an answer.
+
+    Anything that reads absence out of a failure needs that line drawn, or
+    one bad minute of network reads as "everything you were pointing at is
+    gone". 429 is deliberately *not* a rejection — it is `RateLimited`, and
+    it means wait, which is the opposite of a fact about the object.
+    """
+
+
+class QueueExpired(ZulipRejected):
     """The event queue is gone (BAD_EVENT_QUEUE_ID). Re-register and continue."""
 
 
@@ -260,11 +277,15 @@ class ZulipClient:
                     f"{method} {path} -> HTTP 429: {detail} (retry after {delay:.0f}s)",
                     retry_after=delay,
                 ) from error
+            # An answered 4xx is a refusal; a 5xx is the server failing to
+            # answer at all, and stays an ordinary error nobody may read as
+            # a fact about the object asked for.
+            refused = ZulipRejected if 400 <= error.code < 500 else ZulipError
             if parsed is None:
-                raise ZulipError(f"{method} {path} -> HTTP {error.code}: {body[:200]}") from error
+                raise refused(f"{method} {path} -> HTTP {error.code}: {body[:200]}") from error
             if parsed.get("code") == "BAD_EVENT_QUEUE_ID":
                 raise QueueExpired(parsed.get("msg", "bad event queue id")) from error
-            raise ZulipError(f"{method} {path} -> HTTP {error.code}: {parsed.get('msg')}") from error
+            raise refused(f"{method} {path} -> HTTP {error.code}: {parsed.get('msg')}") from error
         except TimeoutError as error:
             raise ZulipTimeout(f"{method} {path} timed out after {timeout}s") from error
         except urllib.error.URLError as error:
@@ -647,7 +668,7 @@ class ZulipClient:
         messages = self.topic_history(channel, topic, num_before=1)
         return int(messages[-1]["id"]) if messages else 0
 
-    def message(self, message_id: int) -> dict | None:
+    def message(self, message_id: int, *, strict: bool = False) -> dict | None:
         """One message by its id, as it stands now, or None when it is gone.
 
         A message id is the one identifier in Zulip that no rename touches:
@@ -661,12 +682,25 @@ class ZulipClient:
         A deleted message is absent, not an error: `None` is the honest
         answer, and it is a different answer from "a topic with that name
         exists". Callers rely on that difference.
+
+        `strict=True` narrows `None` to mean *only* that: Zulip answered and
+        refused (`ZulipRejected`). A call that never got an answer — a
+        timeout, a dropped connection, a 429, a 5xx — is raised instead of
+        being flattened into absence, because a caller that is about to do
+        something terminal must be able to tell "it is gone" from "I could
+        not look". The default stays lenient so that readers for whom an
+        unreadable message and a missing one are the same thing keep
+        working.
         """
         try:
             result = self.call(
                 "GET", f"messages/{int(message_id)}", {"apply_markdown": "false"}
             )
+        except ZulipRejected:
+            return None
         except ZulipError:
+            if strict:
+                raise
             return None
         message = result.get("message")
         return message if isinstance(message, dict) else None
@@ -1102,7 +1136,7 @@ def live_topic_name(client: ZulipClient, channel: str, topic: str) -> str:
 
 
 def topic_history_across_resolve(
-    client: ZulipClient, channel: str, topic: str, num_before: int
+    client: ZulipClient, channel: str, topic: str, num_before: int, *, strict: bool = False
 ) -> list[dict]:
     """A topic's history, found under its `\u2714 ` name when it was renamed.
 
@@ -1116,10 +1150,20 @@ def topic_history_across_resolve(
 
     `agentchat wait` and `read --since` have followed the rename since pyagag
     `5bda102`; this is the same rule for the callback lookup.
+
+    `strict=True` re-raises a read that never got an answer, so an empty list
+    means the conversation really is empty under both names rather than
+    "something went wrong and here is a list anyway". A refusal
+    (`ZulipRejected` — no such channel, not yours to read) is still an answer
+    and still returns `[]`.
     """
     try:
         history = client.topic_history(channel, topic, num_before=num_before)
+    except ZulipRejected:
+        history = []
     except ZulipError:
+        if strict:
+            raise
         history = []
     if history or topic.startswith(RESOLVED_TOPIC_PREFIX):
         return history
@@ -1127,11 +1171,17 @@ def topic_history_across_resolve(
         return client.topic_history(
             channel, f"{RESOLVED_TOPIC_PREFIX}{topic}", num_before=num_before
         )
+    except ZulipRejected:
+        return []
     except ZulipError:
+        if strict:
+            raise
         return []
 
 
-def conversation_of(client: ZulipClient, message_id: int) -> Conversation | None:
+def conversation_of(
+    client: ZulipClient, message_id: int, *, strict: bool = False
+) -> Conversation | None:
     """Where a message is **now**, or None when it is gone.
 
     A message id is the one identifier no rename touches, so this is how a
@@ -1143,8 +1193,19 @@ def conversation_of(client: ZulipClient, message_id: int) -> Conversation | None
     Deleted is **absent**. A caller must not fall back to a topic of the
     remembered name: that name may have been taken over by work this id knows
     nothing about, which is the whole reason identity is an id.
+
+    `strict=True` is passed straight through to `ZulipClient.message`: with
+    it, `None` means Zulip said the message is not there, and a lookup that
+    never got an answer raises instead. Use it wherever `None` is about to
+    become a terminal decision.
     """
-    message = client.message(int(message_id))
+    # Only passed when it was asked for: the lenient path stays the exact
+    # call it has always been, so every stand-in client written against the
+    # old signature keeps working and only a strict caller needs the new one.
+    message = (
+        client.message(int(message_id), strict=True) if strict
+        else client.message(int(message_id))
+    )
     if message is None:
         return None
     channel = channel_name(message)

@@ -242,6 +242,23 @@ The topic that called is also placed in `threads/` whether or not a note of
 ours names it (`serve_topic(extra_threads=…)`) — in the inherited case
 nothing else can discover that the answer is in there.
 
+### Answered, or never answered at all
+
+A lookup that fails is not a statement about what it was looking for. `call`
+therefore raises **`ZulipRejected`** (a `ZulipError`) when Zulip answered and
+refused — any 4xx other than 429 — and a plain `ZulipError` when the call
+never got an answer: a timeout, a dropped connection, a 5xx. 429 stays
+`RateLimited`, because it means *wait*, which is the opposite of a fact about
+the object.
+
+`client.message(id)`, `conversation_of` and `topic_history_across_resolve`
+keep their lenient behaviour by default — absent and unreadable arrive the
+same way, which is all most readers need. Pass **`strict=True`** wherever
+`None` or `[]` is about to become a terminal decision: then absence means
+Zulip said so, and a call that got no answer is raised instead of being
+flattened into "it is gone". That distinction is what lets a caller retry an
+outage and stop only on a real deletion.
+
 ### Correcting an anchor, deliberately
 
 The default is that **a topic is anchored once**: `own_rootchat` takes the

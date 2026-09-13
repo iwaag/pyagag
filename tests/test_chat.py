@@ -576,12 +576,17 @@ def intro_board(monkeypatch, rows):
 
 def test_intro_lists_every_agent_with_what_it_says_first(monkeypatch):
     client = intro_board(monkeypatch, [
-        ("waiter-host1", "# waiter\n\nI wait, so you do not have to."),
+        ("waiter-host1", "# waiter\n\nI wait, so you do not\nhave to. Tell me a condition.\n\n## How"),
         ("maker-host1", "\n\nI make things."),
+        ("bare-host1", "# only a title"),
     ])
     code, out, err = run(monkeypatch, ["intro"], client)
     assert code == 0 and not err
-    assert out.splitlines() == ["waiter-host1 — waiter", "maker-host1 — I make things."]
+    assert out.splitlines() == [
+        "waiter-host1 — I wait, so you do not have to.",
+        "maker-host1 — I make things.",
+        "bare-host1 — only a title",
+    ]
 
 
 def test_intro_prints_one_agents_introduction_verbatim(monkeypatch):

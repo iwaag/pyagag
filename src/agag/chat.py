@@ -376,14 +376,26 @@ def ensure_rootchat(client: ZulipClient, channel: str, topic: str, out) -> None:
 def intro_lines(entries) -> list[str]:
     """One line per agent on the board: its name and what it says first.
 
-    The first non-empty line is usually the introduction's own title or its
-    one-sentence pitch, which is enough to decide whose to read in full. A
-    Markdown heading's hashes are dropped; nothing else is interpreted.
+    An introduction usually opens with a heading that is only the agent's
+    name again, and then its one-sentence pitch — the pitch is what decides
+    whose to read in full, so the first line of prose is shown, running to
+    its first sentence. A body that is nothing but headings shows its first.
     """
     lines: list[str] = []
     for name, body in entries:
-        first = next((line.strip() for line in body.splitlines() if line.strip()), "")
-        first = first.lstrip("#").strip()
+        rows = [line.strip() for line in body.splitlines() if line.strip()]
+        prose = next((row for row in rows if not row.startswith("#")), None)
+        if prose is None:
+            first = rows[0].lstrip("#").strip() if rows else ""
+        else:
+            paragraph = []
+            for row in rows[rows.index(prose):]:
+                if row.startswith(("#", "```", "-", "*")) and paragraph:
+                    break
+                paragraph.append(row)
+            text = " ".join(paragraph)
+            end = text.find(". ")
+            first = text if end < 0 else text[: end + 1]
         lines.append(f"{name} — {first}" if first else name)
     return lines
 

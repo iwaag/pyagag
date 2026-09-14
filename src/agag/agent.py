@@ -485,6 +485,7 @@ def listener_main(
     dm_handler=None,
     on_mention: Callable[[ZulipClient, str, str], None] | None = None,
     on_recover: Callable[[ZulipClient], None] | None = None,
+    mirror: Mirror | None = None,
 ) -> None:
     """Run the listener for `spec` until interrupted.
 
@@ -509,6 +510,10 @@ def listener_main(
     while intake goes on. Nothing is swept; a restart resumes the mirror's
     queue and the listener's own, and reads the realm only when the mirror's
     event queue has expired.
+
+    `mirror` lets an agent that runs a second reader of the realm (the
+    Observer's worker) share one mirror with the listener instead of holding
+    two copies on one credential; without it the listener opens its own.
 
     Under `<AGENT>_ZULIP_LOG_ONLY=1` every route is replaced by a logger.
     """
@@ -546,7 +551,8 @@ def listener_main(
         target=serve, args=(dm_client, dm_route), kwargs={"accept": is_dm_for_us},
         daemon=True,
     ).start()
-    mirror = Mirror.open(spec.zulip_env, spec.local / "mirror", log=log)
+    if mirror is None:
+        mirror = Mirror.open(spec.zulip_env, spec.local / "mirror", log=log)
     listener = Listener(
         mirror, client, topic_filter=topic_filter(spec), handler=topic_handler,
         on_mention=mention_route, on_recover=recover_route, is_ack=is_ack, log=log,

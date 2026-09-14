@@ -23,6 +23,7 @@ import random
 import shlex
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -213,6 +214,164 @@ def read_env(path: Path) -> dict[str, str]:
     return env
 
 
+class Budget:
+    """One credential's share of the realm's quota, coordinated.
+
+    `better_zulip_call` p1 step 6. Zulip limits **per credential**, and a
+    process (or a host) often holds several clients on one credential: the
+    relay's mirror poller and reader, a listener's serving client and its
+    mirror, every `agentchat` a run spawns. A 429 answered to one of them is
+    a fact about all of them, so the pause it asks for is kept **here**, keyed
+    by the credential's email, and every client on that email waits it out
+    before its next call — one pause, honoured once, instead of each client
+    discovering the same refusal and each backing off on its own schedule.
+
+    Two more things the boundary does, because they are cheapest here:
+
+    - **single flight**: an identical `GET` already in flight on this
+      credential is joined, not repeated. Two board readers asking the same
+      page at the same moment cost one call;
+    - **spacing after a pause**: when the pause ends, calls are released a
+      few tens of milliseconds apart rather than all at once, so the callers
+      that queued up do not arrive as the wave that earns the next 429.
+
+    The coordination is also written **beside the credentials file**
+    (`<env path>.ratelimit`) when the client was built from one, so another
+    process on the same credential — the relay writing as the Developer, an
+    `agentchat` in a shell — sees the pause too. A tool that does not go
+    through this module (the web app in a browser, `curl`) is outside it;
+    that is a limitation, and the file is a best effort, not a lock.
+    """
+
+    #: How far apart calls are released right after a pause ends.
+    SPACING_SECONDS = 0.05
+    #: How long the post-pause spacing stays in force.
+    SPACING_WINDOW_SECONDS = 2.0
+
+    _all: dict[str, "Budget"] = {}
+    _registry_lock = threading.Lock()
+
+    @classmethod
+    def for_credential(cls, email: str, sidecar: Path | None = None) -> "Budget":
+        with cls._registry_lock:
+            found = cls._all.get(email)
+            if found is None:
+                found = cls._all[email] = Budget(email)
+            if sidecar is not None and found.sidecar is None:
+                found.sidecar = sidecar
+            return found
+
+    @classmethod
+    def forget_all(cls) -> None:
+        """For tests: no pause outlives the test that caused it."""
+        with cls._registry_lock:
+            cls._all.clear()
+
+    def __init__(self, email: str):
+        self.email = email
+        self.sidecar: Path | None = None
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self.pause_until = 0.0
+        self.spacing_until = 0.0
+        self._next_slot = 0.0
+        self._inflight: dict[tuple[str, str], threading.Event] = {}
+        self._results: dict[tuple[str, str], tuple[dict | None, BaseException | None]] = {}
+        #: Counters a measurement reads: how often a caller waited for a
+        #: pause, how many 429s were received, how many GETs were joined.
+        self.waits = 0
+        self.refusals = 0
+        self.joined = 0
+
+    # -- the pause -------------------------------------------------------------------
+
+    def pause(self, seconds: float, *, now: float | None = None) -> float:
+        """Honour the server's guidance: nobody on this credential calls
+        before `now + seconds` (jittered a little, so processes sharing the
+        credential do not resynchronise)."""
+        now = time.time() if now is None else now
+        seconds = max(float(seconds), 1.0)
+        until = now + seconds + random.uniform(0.0, seconds * RATE_LIMIT_JITTER_FRACTION)
+        with self._lock:
+            self.refusals += 1
+            self.pause_until = max(self.pause_until, until)
+            self.spacing_until = self.pause_until + self.SPACING_WINDOW_SECONDS
+            self._next_slot = self.pause_until
+            self._condition.notify_all()
+        self._write_sidecar(self.pause_until)
+        return self.pause_until
+
+    def _read_sidecar(self) -> float:
+        if self.sidecar is None:
+            return 0.0
+        try:
+            return float(self.sidecar.read_text(encoding="utf-8").strip() or 0.0)
+        except (OSError, ValueError):
+            return 0.0
+
+    def _write_sidecar(self, until: float) -> None:
+        if self.sidecar is None:
+            return
+        try:
+            self.sidecar.write_text(f"{until:.3f}\n", encoding="utf-8")
+        except OSError:
+            pass
+
+    def wait_turn(self, *, now_fn=None, sleep=None) -> float:
+        """Block until this credential may call again. Returns how long it
+        waited (0 when it did not)."""
+        now_fn = now_fn or time.time
+        sleep = sleep or time.sleep
+        waited = 0.0
+        while True:
+            now = now_fn()
+            with self._lock:
+                outside = self._read_sidecar()
+                if outside > self.pause_until:
+                    self.pause_until = outside
+                    self.spacing_until = outside + self.SPACING_WINDOW_SECONDS
+                    self._next_slot = max(self._next_slot, outside)
+                if now < self.pause_until:
+                    delay = self.pause_until - now
+                elif now < self.spacing_until:
+                    slot = max(self._next_slot, now)
+                    self._next_slot = slot + self.SPACING_SECONDS
+                    delay = slot - now
+                    if delay <= 0:
+                        return waited
+                else:
+                    return waited
+                if waited == 0.0:
+                    self.waits += 1
+            sleep(delay)
+            waited += delay
+
+    # -- single flight -------------------------------------------------------------------
+
+    def join_or_lead(self, key: tuple[str, str]):
+        """For a GET: `(True, None)` when this caller leads the call, or
+        `(False, event)` when an identical one is in flight to be joined."""
+        with self._lock:
+            found = self._inflight.get(key)
+            if found is not None:
+                self.joined += 1
+                return False, found
+            event = threading.Event()
+            self._inflight[key] = event
+            return True, event
+
+    def finish(self, key: tuple[str, str], result: dict | None, error: BaseException | None) -> None:
+        with self._lock:
+            event = self._inflight.pop(key, None)
+            self._results[key] = (result, error)
+        if event is not None:
+            event.set()
+
+    def joined_result(self, key: tuple[str, str]) -> tuple[dict | None, BaseException | None]:
+        with self._lock:
+            return self._results.get(key, (None, None))
+
+
 class ZulipClient:
     """HTTP Basic bot client. One instance is safe for one polling thread."""
 
@@ -242,6 +401,9 @@ class ZulipClient:
         #: measurement can say what a call was *for*, not only where it went.
         self.purpose = ""
         self.ledger: dict[tuple[str, str, str], int] = {}
+        #: Shared with every client on this credential in the process (and,
+        #: through the sidecar, on the host): the pause a 429 asked for.
+        self.budget = Budget.for_credential(email)
         if ca_bundle:
             self._ssl = ssl.create_default_context(cafile=ca_bundle)
         else:
@@ -261,10 +423,14 @@ class ZulipClient:
         missing = [k for k in ("ZULIP_URL", "ZULIP_EMAIL", "ZULIP_API_KEY") if not env.get(k)]
         if missing:
             raise ZulipError(f"{path} is missing {', '.join(missing)}")
-        return cls(
+        client = cls(
             env["ZULIP_URL"], env["ZULIP_EMAIL"], env["ZULIP_API_KEY"],
             ca_bundle=env.get("ZULIP_CA_BUNDLE") or None,
         )
+        # The pause file lives beside the credentials, which is the one path
+        # every process on this credential already knows.
+        client.budget = Budget.for_credential(env["ZULIP_EMAIL"], Path(path).with_name(Path(path).name + ".ratelimit"))
+        return client
 
     def call(
         self, method: str, path: str, params: dict | None = None, timeout: float = 30
@@ -282,9 +448,38 @@ class ZulipClient:
         request.add_header("Authorization", f"Basic {self._auth}")
         if data is not None:
             request.add_header("Content-Type", "application/x-www-form-urlencoded")
+        # The pause a 429 asked for is honoured by every client on this
+        # credential; a GET identical to one in flight is joined, not repeated.
+        self.budget.wait_turn()
+        flight: tuple[str, str] | None = (method, url) if method == "GET" and not path.startswith("events") else None
+        if flight is not None:
+            lead, event = self.budget.join_or_lead(flight)
+            if not lead:
+                event.wait(timeout)
+                result, error = self.budget.joined_result(flight)
+                if error is not None:
+                    raise error
+                if result is not None:
+                    return result
         self.calls += 1
-        key = (self.purpose, method, endpoint_template(path))
+        # A write is a write whatever phase set the purpose; a read with no
+        # purpose is an ordinary read. The measurement step 6 asks for keeps
+        # polling, hydration, verification and writes apart by this key.
+        purpose = "write" if method != "GET" else (self.purpose or "read")
+        key = (purpose, method, endpoint_template(path))
         self.ledger[key] = self.ledger.get(key, 0) + 1
+        try:
+            answer = self._send(request, timeout)
+        except BaseException as error:
+            if flight is not None:
+                self.budget.finish(flight, None, error)
+            raise
+        if flight is not None:
+            self.budget.finish(flight, answer, None)
+        return answer
+
+    def _send(self, request, timeout: float) -> dict:
+        method, path = request.get_method(), request.full_url
         try:
             with urllib.request.urlopen(request, timeout=timeout, context=self._ssl) as response:
                 self._record_budget(response.headers)
@@ -297,8 +492,10 @@ class ZulipClient:
             except json.JSONDecodeError:
                 parsed = None
             if error.code == 429:
-                # Its own class: the caller must wait, not reconnect.
+                # Its own class: the caller must wait, not reconnect — and
+                # the wait is shared with everything on this credential.
                 delay = retry_after_seconds(error.headers, parsed)
+                self.budget.pause(delay)
                 detail = (parsed or {}).get("msg") or body[:200]
                 raise RateLimited(
                     f"{method} {path} -> HTTP 429: {detail} (retry after {delay:.0f}s)",

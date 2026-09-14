@@ -373,3 +373,35 @@ def test_refresh_listing_catches_what_events_have_not_delivered_yet(tmp_path):
     assert realm.calls == before + 1
     assert mirror.refresh_listing("old-archive") == [] and mirror.refresh_listing("nope") == []
     mirror.close()
+
+
+def test_a_rate_limit_leaves_the_copy_readable_and_marks_it_stale(tmp_path, monkeypatch):
+    """Inject a 429 on the poll: the mirror keeps its last good copy, says it
+    is stale and why, waits what the server asked, and comes back live."""
+    from agag.zulip import RateLimited
+
+    monkeypatch.setattr("agag.mirror.rate_limit_backoff", lambda retry_after, strikes: 0.3)
+    realm = realm_with_history()
+    mirror = open_mirror(realm, tmp_path)
+    mirror.start()
+    wait_live(mirror)
+    held = [m.content for m in mirror.messages("pj-demo", "workplan-a")]
+    poll = realm._poll
+    hits = []
+
+    def limited_poll(queue_id, last_event_id, dont_block):
+        if len(hits) < 1:
+            hits.append(1)
+            raise RateLimited("GET events -> HTTP 429", retry_after=0.3)
+        return poll(queue_id, last_event_id, dont_block)
+
+    realm._poll = limited_poll
+    wait_until(lambda: mirror.health()["state"] == "stale", what="the stale mark")
+    health = mirror.health()
+    assert "rate limited" in health["reason"] and health["stale_since"] is not None
+    # The copy is still there and still answers.
+    assert [m.content for m in mirror.messages("pj-demo", "workplan-a")] == held
+    assert mirror.topics() and mirror.intros()
+    wait_until(lambda: mirror.health()["state"] == "live", what="live again after the pause")
+    assert mirror.health()["resyncs"] == 1, "the queue was kept; no resync"
+    mirror.close()

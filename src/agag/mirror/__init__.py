@@ -565,8 +565,14 @@ class Mirror:
                 key = f"{purpose or '-'} {method} {endpoint}"
                 ledger[key] = ledger.get(key, 0) + n
         counts = self.store.counts()
+        budget = getattr(self._poller, "budget", None)
         return {
             "state": "live" if live else "stale",
+            # The credential's shared budget: how often a caller on it had to
+            # wait, how many 429s it received, how many identical GETs were
+            # joined, and until when it is paused (0 when it is not).
+            "budget": ({"waits": budget.waits, "refusals": budget.refusals, "joined": budget.joined,
+                        "pause_until": budget.pause_until} if budget is not None else None),
             "reason": reason,
             "stale_since": stale_since,
             "queue": queue_id,

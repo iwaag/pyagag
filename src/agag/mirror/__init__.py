@@ -580,6 +580,10 @@ class Mirror:
             "bot": self.bot_name,
             "counts": counts,
             "calls": sum((getattr(c, "calls", 0) or 0) for c in (self._poller, self._reader) if c is not None),
+            # The reader's alone: hydrations, verifies, listing refreshes —
+            # what a consumer's question cost, apart from the ingest thread's
+            # own polling and filling.
+            "read_calls": int(getattr(self._reader, "calls", 0) or 0) if self._reader is not None else 0,
             "ledger": dict(sorted(ledger.items())),
         }
 

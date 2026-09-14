@@ -14,7 +14,7 @@ from agag.zulip import QueueExpired, RESOLVED_TOPIC_PREFIX
 
 SELF = {"user_id": 42, "full_name": "Mirror Bot", "email": "mirror-bot@example"}
 
-__all__ = ["SELF", "FakeRealm"]
+__all__ = ["SELF", "Facet", "FakeRealm"]
 
 
 class FakeRealm:
@@ -120,6 +120,16 @@ class FakeRealm:
                       if m["stream_id"] == stream["stream_id"] and m["subject"] == topic)
 
     # -- the transport --------------------------------------------------------------
+    #
+    # `FakeRealm` is itself a transport, so a test that passes it as the
+    # mirror's client factory works. But a mirror holds *two* clients — the
+    # poller and the reader — and their call ledgers are what a test of "what
+    # did this question cost" reads; `facet()` hands out a client with its
+    # own counters over the same realm, so the poller's polls never land in
+    # the reader's ledger.
+
+    def facet(self) -> "Facet":
+        return Facet(self)
 
     def _count(self, name: str) -> None:
         self.calls += 1
@@ -129,10 +139,16 @@ class FakeRealm:
 
     def whoami(self, refresh: bool = False) -> dict:
         self._count("users/me")
+        return self._whoami()
+
+    def _whoami(self) -> dict:
         return dict(SELF)
 
     def register(self, event_types=None, *, all_public_streams=False, fetch_event_types=None):
         self._count("register")
+        return self._register(event_types, all_public_streams=all_public_streams)
+
+    def _register(self, event_types, *, all_public_streams):
         assert all_public_streams is True
         assert set(event_types) == set(EVENT_TYPES)
         with self._condition:
@@ -145,6 +161,9 @@ class FakeRealm:
 
     def poll(self, queue_id: str, last_event_id: int, *, dont_block: bool = False) -> list[dict]:
         self._count("events")
+        return self._poll(queue_id, last_event_id, dont_block)
+
+    def _poll(self, queue_id: str, last_event_id: int, dont_block: bool) -> list[dict]:
         with self._condition:
             if self.expired or queue_id != self.queue_id:
                 raise QueueExpired("BAD_EVENT_QUEUE_ID")
@@ -161,10 +180,16 @@ class FakeRealm:
 
     def channels(self, *, include_archived: bool = False) -> list[dict]:
         self._count("streams")
+        return self._channels(include_archived)
+
+    def _channels(self, include_archived: bool) -> list[dict]:
         return [dict(c) for c in self.channels_by_id.values() if include_archived or not c["is_archived"]]
 
     def channel_topics_detail(self, stream_id: int) -> list[dict]:
         self._count("topics")
+        return self._channel_topics_detail(stream_id)
+
+    def _channel_topics_detail(self, stream_id: int) -> list[dict]:
         rows: dict[str, int] = {}
         for message in self.messages.values():
             if message["stream_id"] == stream_id:
@@ -173,6 +198,9 @@ class FakeRealm:
 
     def messages_page(self, narrow, *, anchor="newest", num_before=0, num_after=0, include_anchor=True) -> dict:
         self._count("messages")
+        return self._messages_page(narrow, anchor, num_before, include_anchor)
+
+    def _messages_page(self, narrow, anchor, num_before, include_anchor) -> dict:
         if self.on_first_page is not None:
             hook, self.on_first_page = self.on_first_page, None
             hook()
@@ -192,5 +220,60 @@ class FakeRealm:
 
     def message(self, message_id: int, *, strict: bool = False) -> dict | None:
         self._count("message")
+        return self._message(message_id)
+
+    def _message(self, message_id: int) -> dict | None:
         found = self.messages.get(message_id)
         return dict(found) if found else None
+
+
+class Facet:
+    """One client over a shared `FakeRealm`: its own `calls`, `purpose` and
+    `ledger`, the realm's state and log."""
+
+    def __init__(self, realm: FakeRealm):
+        self.realm = realm
+        self.calls = 0
+        self.purpose = ""
+        self.ledger: dict = {}
+        self.rate_limit_remaining = None
+        self.rate_limit_reset = None
+
+    @property
+    def base_url(self) -> str:
+        return str(getattr(self.realm, "base_url", "") or "")
+
+    def _count(self, name: str) -> None:
+        self.calls += 1
+        key = (self.purpose, "GET", name)
+        self.ledger[key] = self.ledger.get(key, 0) + 1
+        self.realm.calls += 1
+        self.realm.log.append(name)
+
+    def whoami(self, refresh: bool = False) -> dict:
+        self._count("users/me")
+        return self.realm._whoami()
+
+    def register(self, event_types=None, *, all_public_streams=False, fetch_event_types=None):
+        self._count("register")
+        return self.realm._register(event_types, all_public_streams=all_public_streams)
+
+    def poll(self, queue_id: str, last_event_id: int, *, dont_block: bool = False) -> list[dict]:
+        self._count("events")
+        return self.realm._poll(queue_id, last_event_id, dont_block)
+
+    def channels(self, *, include_archived: bool = False) -> list[dict]:
+        self._count("streams")
+        return self.realm._channels(include_archived)
+
+    def channel_topics_detail(self, stream_id: int) -> list[dict]:
+        self._count("topics")
+        return self.realm._channel_topics_detail(stream_id)
+
+    def messages_page(self, narrow, *, anchor="newest", num_before=0, num_after=0, include_anchor=True) -> dict:
+        self._count("messages")
+        return self.realm._messages_page(narrow, anchor, num_before, include_anchor)
+
+    def message(self, message_id: int, *, strict: bool = False) -> dict | None:
+        self._count("message")
+        return self.realm._message(message_id)

@@ -360,6 +360,9 @@ class Store:
         return found if include_archived else [c for c in found if not c.archived]
 
     def channel(self, name: str) -> Channel | None:
+        """The channel of that name — the live one when one exists, else an
+        archived one (the store knows both; a caller that must not act on an
+        archived channel checks `archived`)."""
         with self._lock:
             row = self._db.execute("SELECT * FROM channels WHERE name = ? ORDER BY archived LIMIT 1", (name,)).fetchone()
         return Channel(int(row["stream_id"]), row["name"], row["folder_id"], bool(row["archived"]), row["description"]) if row else None

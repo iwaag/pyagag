@@ -326,3 +326,25 @@ def test_changes_feed_says_when_it_forgot(tmp_path):
     assert store.changes(0) is None
     assert [c.detail["n"] for c in store.changes(store.revision() - 3)] == [27, 28, 29]
     store.close()
+
+
+def test_an_archived_channels_topic_is_hydrated_once_on_demand(tmp_path):
+    realm = realm_with_history()
+    realm.post("old-archive", "workrun-1", "[selfnote][task] 1#1", quiet=True)
+    realm.post("old-archive", "workrun-1", "done here", quiet=True)
+    realm.resolve("old-archive", "workrun-1", quiet=True)
+    mirror = open_mirror(realm, tmp_path)
+    mirror.start()
+    wait_live(mirror)
+    # The resync did not read it: the channel is archived.
+    assert mirror.messages("old-archive", "workrun-1") == []
+    before = realm.calls
+    found = mirror.messages("old-archive", "workrun-1", hydrate=True)
+    assert [m.content for m in found] == ["[selfnote][task] 1#1", "done here"]
+    assert realm.log[before:].count("messages") == 2  # the bare name (empty) and the ✔ name
+    # Both answers are kept, the empty one included: a second ask reads nothing.
+    again = realm.calls
+    mirror.messages("old-archive", "workrun-1", hydrate=True)
+    assert realm.calls == again
+    assert mirror.live_name("old-archive", "workrun-1") == "✔ workrun-1"
+    mirror.close()

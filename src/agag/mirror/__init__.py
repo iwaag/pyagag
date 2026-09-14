@@ -664,9 +664,13 @@ class Mirror:
         for name in names:
             if hydrate:
                 coverage = self.store.coverage(found.stream_id, name)
-                if not (coverage and coverage.complete) and any(
-                    t.live_name == name for t in self.topic(channel, name)
-                ):
+                # A listed topic without complete coverage, or any topic of
+                # an archived channel: the resync never reads archived
+                # channels (there are more of them than live ones and nothing
+                # changes in them), so their conversations are hydrated the
+                # first time somebody asks and kept for good.
+                listed = any(t.live_name == name for t in self.topic(channel, name))
+                if not (coverage and coverage.complete) and (listed or found.archived):
                     self.hydrate(channel, name)
             for message in self.store.messages(found.stream_id, name, since_id=since_id):
                 merged[message.id] = message
@@ -764,6 +768,11 @@ class Mirror:
                                             oldest_id=min(ids), newest_id=max(ids), at=at)
                 else:
                     self.store.refresh_topic_row(found.stream_id, topic)
+                    if found.archived:
+                        # Nothing there, and nothing can ever be: remember
+                        # the empty answer so the name is not read again.
+                        self.store.set_coverage(found.stream_id, topic, complete=True,
+                                                oldest_id=0, newest_id=0, at=at)
             self._notify()
             return self.store.coverage(*key)
         finally:

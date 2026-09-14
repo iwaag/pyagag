@@ -46,7 +46,9 @@ from .harness import run_harness, write_run_record
 from .topics import workspace_identity
 from .instance import instance_name as read_instance_name
 from .intro import Roster, post_intro
-from .zulip import ZulipClient, channel_name, dm_partners, is_dm_for_us, log, serve, sweep_serve
+from .listen import Listener
+from .mirror import Mirror
+from .zulip import ZulipClient, channel_name, dm_partners, is_dm_for_us, log, serve
 
 #: The common sweep ack, shared wording across agents. Posted synchronously
 #: on a topic match: it makes this bot the last poster, so the pull loop stops
@@ -482,9 +484,9 @@ def listener_main(
     entrance: Callable[[ZulipClient, str, str], None] | None = None,
     dm_handler=None,
     on_mention: Callable[[ZulipClient, str, str], None] | None = None,
-    on_sweep: Callable[[ZulipClient], None] | None = None,
+    on_recover: Callable[[ZulipClient], None] | None = None,
 ) -> None:
-    """Run the pull-sweep listener for `spec` until interrupted.
+    """Run the listener for `spec` until interrupted.
 
     `dispatch` maps a topic prefix to `handler(client, channel, topic)`; the
     longest matching prefix wins. A swept topic matching no prefix is in the
@@ -494,10 +496,19 @@ def listener_main(
 
     `dm_handler(client, message, self_id)` serves DMs on a side thread;
     without one DMs are logged and left. `on_mention(client, channel, topic)`
-    enables `sweep_serve`'s mention route for an agent that is served by being
-    named in topics it does not own (front's shape). `on_sweep(client)` runs
-    after each completed full sweep, for recovery no sweep can express —
-    work this agent owes in conversations where it is itself the last speaker.
+    enables the mention route for an agent that is served by being named in
+    topics it does not own (front's shape). `on_recover(client)` runs after
+    each recovery — startup, and every time the mirror re-reads the realm —
+    for the obligations no last-speaker check can see: work this agent owes
+    in conversations where it is itself the last speaker.
+
+    Since `better_zulip_call` p1 step 5 the listening is `agag.listen`: a
+    mirror of the realm on this instance's own credential (`.local/mirror/`),
+    an intake that follows its change feed into a durable queue
+    (`.local/mirror/listener.sqlite`), and one executor that serves the queue
+    while intake goes on. Nothing is swept; a restart resumes the mirror's
+    queue and the listener's own, and reads the realm only when the mirror's
+    event queue has expired.
 
     Under `<AGENT>_ZULIP_LOG_ONLY=1` every route is replaced by a logger.
     """
@@ -521,7 +532,7 @@ def listener_main(
         answer(client, channel, topic)
 
     if passive:
-        topic_handler, dm_route, mention_route, sweep_route = (
+        topic_handler, dm_route, mention_route, recover_route = (
             _observe_topic, _observe_message, None, None
         )
     else:
@@ -530,24 +541,29 @@ def listener_main(
         mention_route = (
             (lambda ch, t: on_mention(client, ch, t)) if on_mention is not None else None
         )
-        sweep_route = (lambda: on_sweep(client)) if on_sweep is not None else None
+        recover_route = (lambda: on_recover(client)) if on_recover is not None else None
     threading.Thread(
         target=serve, args=(dm_client, dm_route), kwargs={"accept": is_dm_for_us},
         daemon=True,
     ).start()
+    mirror = Mirror.open(spec.zulip_env, spec.local / "mirror", log=log)
+    listener = Listener(
+        mirror, client, topic_filter=topic_filter(spec), handler=topic_handler,
+        on_mention=mention_route, on_recover=recover_route, is_ack=is_ack, log=log,
+    )
     log(
         f"{spec.agent} zulip listener starting"
         f"{' (log only)' if passive else ''} "
-        f"(pull sweep: all topics in {spec.instance_name()!r}, "
+        f"(mirror in {spec.local / 'mirror'}; all topics in {spec.instance_name()!r}, "
         f"prefixes {spec.sweep_prefixes} elsewhere, routes {sorted(routes)} + DM thread)"
     )
     try:
-        sweep_serve(
-            client, topic_handler, topic_filter=topic_filter(spec),
-            on_mention=mention_route, on_sweep=sweep_route,
-        )
+        listener.run()
     except KeyboardInterrupt:
         log("stopped")
+    finally:
+        listener.stop()
+        mirror.stop()
 
 
 # --- the introduction ------------------------------------------------------

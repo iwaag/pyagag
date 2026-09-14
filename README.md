@@ -138,9 +138,9 @@ conversation in front of it. Three pieces carry that:
   rendered `chatlog.md`, every `threads/` file and `agentchat read` unless
   `--all` asks for it — from its own author too, because an agent that reads
   its own notes starts composing them. **And a selfnote is never somebody
-  speaking**: every "who spoke last" check — the sweep, the event path, the
-  mention test, `serve_topic`'s post-run re-check — goes through
-  `last_real_sender`. Miss one and a note an agent wrote to itself buys the
+  speaking**: every "who spoke last" check — the listener's evaluation, the
+  mirror's index, `serve_topic`'s post-run re-check — goes through
+  `last_real_sender` (`is_speech`). Miss one and a note an agent wrote to itself buys the
   other agent a run, which is the ack loop of `agent_standardize` p7 in a
   new coat. **Zulip's own notices are not speech either**: a post from the
   `zulipinternal` realm (Notification Bot's "has marked this topic as
@@ -148,14 +148,21 @@ conversation in front of it. Three pieces carry that:
   *about* the conversation, and `last_real_sender` skips it the same way —
   un-resolving a topic used to buy its owner a run to answer the notice
   (`operation_room` p8).
-- **Two triggers, not one.** `sweep_serve(..., on_mention=…)` serves the
-  *owner* of a topic on anybody else's post in it, and a *participant* only
-  when a post names it. Mentions come off the event stream's `mentioned`
-  flag and are recovered at startup through Zulip's `is:mentioned` narrow and
-  through `sweep_rootchats` — the `sender:me search:rootchat` narrow, which
-  lists every topic this agent anchored and asks which of them is waiting on
-  it. So a mention that arrived while the listener was down is no more lost
-  than a swept topic is.
+- **Two triggers, not one.** `agag.listen` serves the *owner* of a topic on
+  anybody else's post in it, and a *participant* only when a post names it.
+  Since `better_zulip_call` p1 a listener is a **mirror** of the realm's
+  public conversations on the instance's own credential (`agag.mirror`, one
+  event queue for all public channels, persisted in `.local/mirror/`), an
+  intake that follows the mirror's change feed into a durable queue
+  (`.local/mirror/listener.sqlite`), and one executor that serves the queue
+  while intake goes on — a long run no longer stops the polling, a burst on
+  one conversation is one serving, and a post that lands during a run is
+  looked at when the run ends. Nothing is swept: recovery at startup and
+  after a resync reads the mirror's index (every open topic this bot owns
+  whose last real speaker is somebody else; every open topic that names it
+  past its served mark), and a restart within Zulip's queue lifetime reads
+  the realm not at all. So a mention that arrived while the listener was
+  down is no more lost than an owned topic is.
 - **And a callback answered once is not answered again.** After serving a
   callback the listener calls `note_served`, which writes into *home*:
 
@@ -168,10 +175,9 @@ conversation in front of it. Three pieces carry that:
   Recovery needs it because the reply goes home: this agent never becomes the
   last poster in the topic that named it, so "somebody else spoke there and
   named me" is true forever and every restart would re-serve every exchange
-  the agent ever had. **Both recovery routes** consult it —
-  `sweep_rootchats` and `sweep_mentions` alike — skipping a topic whose newest
-  naming post is at or below its mark and serving it the moment a newer one
-  arrives. The mention route needs it for the same reason: it used to silence
+  the agent ever had. The listener's recovery consults it — skipping a
+  topic whose newest naming post is at or below its mark and serving it the
+  moment a newer one arrives. The mention route needs it for the same reason: it used to silence
   itself, because answering a mention meant posting where it was made.
 - **The turn is handed over mechanically.** `serve_topic` prefixes every
   reply with `@**<name>**` of the last other speaker in the topic it is
@@ -180,7 +186,7 @@ conversation in front of it. Three pieces carry that:
   ask an agent to address the requester; the code does it.
 
 A serving that answers in somebody else's topic posts **once**, and posts no
-ack. An ack is how a bot's own sweep skips a topic it is already serving; in
+ack. An ack is how a bot's own listener skips a topic it is already serving; in
 a topic it does not own it buys nothing and costs the owner a whole serving —
 triggered by "Message received", against a conversation that does not yet
 hold the reply being acknowledged.

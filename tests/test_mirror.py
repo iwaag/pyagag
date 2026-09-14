@@ -348,3 +348,28 @@ def test_an_archived_channels_topic_is_hydrated_once_on_demand(tmp_path):
     assert realm.calls == again
     assert mirror.live_name("old-archive", "workrun-1") == "✔ workrun-1"
     mirror.close()
+
+
+def test_refresh_listing_catches_what_events_have_not_delivered_yet(tmp_path):
+    realm = realm_with_history()
+    mirror = open_mirror(realm, tmp_path)
+    mirror.start()
+    wait_live(mirror)
+    # Event lag: a post, a resolve and a new topic the queue has not carried.
+    late = realm.post("pj-demo", "chat", "late post", quiet=True)
+    realm.resolve("pj-demo", "workplan-a", quiet=True)
+    child = realm.post("pj-demo", "workrun-new", "[selfnote][task] 1#1", quiet=True)
+    before = realm.calls
+    changed = mirror.refresh_listing("pj-demo")
+    assert sorted(changed) == [("pj-demo", "chat"), ("pj-demo", "workplan-a"), ("pj-demo", "workrun-new"),
+                               ("pj-demo", "✔ workplan-a")]
+    assert realm.log[before:].count("topics") == 1
+    assert mirror.message(late) is not None and mirror.message(child) is not None
+    assert mirror.live_name("pj-demo", "workplan-a") == "✔ workplan-a"
+    assert not [t for t in mirror.topic("pj-demo", "workplan-a") if not t.resolved]
+    # Nothing changed: one call, nothing hydrated.
+    before = realm.calls
+    assert mirror.refresh_listing("pj-demo") == []
+    assert realm.calls == before + 1
+    assert mirror.refresh_listing("old-archive") == [] and mirror.refresh_listing("nope") == []
+    mirror.close()

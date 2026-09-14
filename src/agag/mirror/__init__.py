@@ -713,6 +713,34 @@ class Mirror:
         self._notify()
         return None if found is None else self.store.message(int(message_id))
 
+    def refresh_listing(self, channel: str) -> list[tuple[str, str]]:
+        """One targeted read of a channel's topic listing, folded in.
+
+        The pre-write check a completion makes (`better_zulip_call` p1 step
+        4): event lag is possible, and an unchanged local revision proves
+        nothing about the realm. One call answers every topic's name and
+        newest id; a name whose newest id moved on, a name that appeared and
+        a name that vanished are hydrated, so the store catches up on exactly
+        what changed. Returns the `(channel, topic)` pairs that did.
+        """
+        found = self.store.channel(channel)
+        if found is None or found.archived:
+            return []
+        client = self._reader_client()
+        client.purpose = "verify"
+        rows = self._patient(client, client.channel_topics_detail, found.stream_id)
+        before = self.store.listing(found.stream_id)
+        now = {str(row["name"]): int(row.get("max_id") or 0) for row in rows}
+        changed = [name for name, newest in now.items() if before.get(name) != newest]
+        changed += [name for name in before if name not in now]
+        with self.store.transaction():
+            self.store.put_topics(found.stream_id, rows)
+        for name in changed:
+            self.hydrate(channel, name)
+        if changed:
+            self._notify()
+        return [(channel, name) for name in changed]
+
     def hydrate(self, channel: str, topic: str) -> Coverage | None:
         """Read one topic whole from Zulip under exactly the name given.
 

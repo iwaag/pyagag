@@ -707,6 +707,16 @@ class Store:
             row = self._db.execute("SELECT MAX(revision) AS r FROM changes").fetchone()
         return int(row["r"] or 0)
 
+    def change_times(self, kind: str) -> dict[tuple[int, str], float]:
+        """`{(stream_id, topic): newest time}` of one kind of change — for a
+        board that wants to know *when* a topic was resolved, which the
+        realm itself does not record."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT stream_id, topic, MAX(at) AS at FROM changes WHERE kind = ? AND stream_id IS NOT NULL"
+                " GROUP BY stream_id, topic", (kind,)).fetchall()
+        return {(int(r["stream_id"]), r["topic"]): float(r["at"]) for r in rows}
+
     def oldest_revision(self) -> int:
         with self._lock:
             row = self._db.execute("SELECT MIN(revision) AS r FROM changes").fetchone()

@@ -261,6 +261,20 @@ class Mirror:
     def bot_name(self) -> str:
         return str((self._self or {}).get("full_name") or "")
 
+    @property
+    def base_url(self) -> str:
+        """The realm's URL, for links; empty until a client exists."""
+        client = self._poller or self._reader
+        return str(getattr(client, "base_url", "") or "")
+
+    def resolved_times(self) -> dict[tuple[str, str], float]:
+        """`{(channel, live ✔ name): when}` for every resolve this mirror
+        watched happen — the only record of *when* a topic was resolved."""
+        names = self.store.channel_names()
+        return {(names.get(stream_id, ""), topic): at
+                for (stream_id, topic), at in self.store.change_times("move").items()
+                if topic.startswith(RESOLVED_TOPIC_PREFIX)}
+
     def _client(self) -> Transport:
         if self._poller is None:
             self._poller = self.client_factory()

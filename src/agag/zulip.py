@@ -64,6 +64,8 @@ RETRY_SECONDS = 5
 RATE_LIMIT_DEFAULT_SECONDS = 60
 RATE_LIMIT_MAX_SECONDS = 300
 RATE_LIMIT_JITTER_FRACTION = 0.1
+#: A header value above this is an epoch second, not a number of seconds.
+EPOCH_THRESHOLD = 10_000_000.0
 
 # A full sweep costs `1 + channels + matching topics` calls. When the quota
 # window has less than this left, the sweep waits for the window to slide
@@ -137,6 +139,15 @@ class RateLimited(ZulipError):
         self.retry_after = float(retry_after)
 
 
+def endpoint_template(path: str) -> str:
+    """`messages/6931` -> `messages/<id>`, `users/me/35/topics` ->
+    `users/me/<id>/topics`: the shape of a call, for counting calls by
+    shape rather than by the object they touched."""
+    return "/".join(
+        "<id>" if part.isdigit() else part for part in path.strip("/").split("/")
+    )
+
+
 def _float_or_none(value) -> float | None:
     try:
         return float(value)
@@ -159,10 +170,18 @@ def retry_after_seconds(headers, body: dict | None = None) -> float:
     """
     get = getattr(headers, "get", None)
     if get is not None:
-        for name in ("Retry-After", "x-ratelimit-reset"):
-            seconds = _positive_float(get(name))
-            if seconds is not None:
-                return seconds
+        seconds = _positive_float(get("Retry-After"))
+        if seconds is not None:
+            return seconds
+        reset = _positive_float(get("x-ratelimit-reset"))
+        if reset is not None:
+            # Absolute on this server (an epoch second); a delay on others.
+            # Measured in `better_zulip_call` p1: read as a delay, the epoch
+            # value was a 1.7-billion-second wait that only the backoff
+            # ceiling made survivable.
+            delay = reset - time.time() if reset > EPOCH_THRESHOLD else reset
+            if delay > 0:
+                return delay
     if body:
         seconds = _positive_float(body.get("retry-after"))
         if seconds is not None:
@@ -210,6 +229,9 @@ class ZulipClient:
         self.calls = 0
         self.rate_limit_remaining: float | None = None
         self.rate_limit_limit: float | None = None
+        #: When the window slides, as an epoch second — Zulip's
+        #: `x-ratelimit-reset` is absolute on this server, not a delay.
+        self.rate_limit_reset: float | None = None
         #: Our own profile, fetched once. A bot's user id and full name do not
         #: change while a process runs, and every serving asks for them at
         #: least twice now (the execution menu is addressed by the name a
@@ -217,6 +239,13 @@ class ZulipClient:
         #: always the same answer is a call out of the quota the listeners
         #: share.
         self._whoami: dict | None = None
+        #: Calls by `(purpose, method, endpoint template)` — the accounting
+        #: the `better_zulip_call` episode asked for at the transport
+        #: boundary. `purpose` is whatever the caller sets on the client
+        #: around a phase of work (`hydrate`, `poll`, `verify`, `write`), so a
+        #: measurement can say what a call was *for*, not only where it went.
+        self.purpose = ""
+        self.ledger: dict[tuple[str, str, str], int] = {}
         if ca_bundle:
             self._ssl = ssl.create_default_context(cafile=ca_bundle)
         else:
@@ -258,6 +287,8 @@ class ZulipClient:
         if data is not None:
             request.add_header("Content-Type", "application/x-www-form-urlencoded")
         self.calls += 1
+        key = (self.purpose, method, endpoint_template(path))
+        self.ledger[key] = self.ledger.get(key, 0) + 1
         try:
             with urllib.request.urlopen(request, timeout=timeout, context=self._ssl) as response:
                 self._record_budget(response.headers)
@@ -308,6 +339,9 @@ class ZulipClient:
         limit = _float_or_none(get("x-ratelimit-limit"))
         if limit is not None:
             self.rate_limit_limit = limit
+        reset = _float_or_none(get("x-ratelimit-reset"))
+        if reset is not None:
+            self.rate_limit_reset = reset if reset > EPOCH_THRESHOLD else time.time() + reset
 
     # --- the four mechanics the receive side needs -------------------------
 
@@ -359,18 +393,82 @@ class ZulipClient:
             raise ZulipError(f"created bot {user_id} is missing {', '.join(missing)}")
         return result
 
-    def register(self) -> tuple[str, int]:
-        result = self.call("POST", "register", {"event_types": ["message"]})
+    def register(
+        self,
+        event_types: list[str] | None = None,
+        *,
+        all_public_streams: bool = False,
+        fetch_event_types: list[str] | None = None,
+    ) -> tuple[str, int]:
+        """Register an event queue and return `(queue_id, last_event_id)`.
+
+        The default is the listeners' historical shape: `message` events for
+        the channels this bot is subscribed to. `all_public_streams` asks
+        for every public channel whether or not the bot is in it — verified
+        on this realm (feature level 500) for a bot, `better_zulip_call` p1 —
+        which is what lets one queue mirror the realm without the
+        subscription writes the ops engine used to make. `fetch_event_types`
+        narrows the *initial state* the registration answers with; `[]`
+        keeps that payload empty, which is all a mirror that reads history
+        itself ever wants.
+        """
+        params: dict = {"event_types": list(event_types or ["message"])}
+        if all_public_streams:
+            params["all_public_streams"] = True
+        if fetch_event_types is not None:
+            params["fetch_event_types"] = list(fetch_event_types)
+        result = self.call("POST", "register", params)
         return result["queue_id"], int(result["last_event_id"])
 
-    def poll(self, queue_id: str, last_event_id: int) -> list[dict]:
-        """Block until events arrive. Raises QueueExpired when the queue died."""
+    def poll(self, queue_id: str, last_event_id: int, *, dont_block: bool = False) -> list[dict]:
+        """Block until events arrive. Raises QueueExpired when the queue died.
+
+        `dont_block` answers at once with whatever is queued — the probe a
+        restarted consumer makes to learn whether its persisted queue is
+        still alive before it decides to read the realm again.
+        """
+        params = {"queue_id": queue_id, "last_event_id": str(last_event_id)}
+        if dont_block:
+            params["dont_block"] = True
         result = self.call(
-            "GET", "events",
-            {"queue_id": queue_id, "last_event_id": str(last_event_id)},
+            "GET", "events", params,
             timeout=POLL_TIMEOUT_SECONDS,
         )
         return result.get("events", [])
+
+    def messages_page(
+        self,
+        narrow: list[dict],
+        *,
+        anchor: int | str = "newest",
+        num_before: int = 0,
+        num_after: int = 0,
+        include_anchor: bool = True,
+    ) -> dict:
+        """One page of `GET /messages`, **with** its coverage flags.
+
+        The other readers here return the list and drop `found_oldest` /
+        `found_newest`; a store that has to say whether it holds a whole
+        conversation needs them, so this returns the raw answer. Raw
+        markdown, as everywhere in this module.
+        """
+        params: dict = {
+            "anchor": str(anchor),
+            "num_before": str(int(num_before)),
+            "num_after": str(int(num_after)),
+            "apply_markdown": "false",
+            "narrow": narrow,
+        }
+        if not include_anchor:
+            params["include_anchor"] = "false"
+        return self.call("GET", "messages", params)
+
+    def channel_topics_detail(self, stream_id: int) -> list[dict]:
+        """Topic rows of one channel as Zulip returns them: `name` and
+        `max_id`, newest first. `channel_topics` keeps only the names; a
+        resync compares the ids without reading a single topic."""
+        result = self.call("GET", f"users/me/{int(stream_id)}/topics")
+        return [row for row in result.get("topics", []) if isinstance(row, dict)]
 
     def deregister(self, queue_id: str) -> None:
         self.call("DELETE", "events", {"queue_id": queue_id})

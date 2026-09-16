@@ -155,7 +155,9 @@ def mentions_of(content: str, bot_name: str) -> list[str | None]:
         return []
     found: list[str | None] = []
     for match in _MENTION.finditer(without_fences(content)):
-        if match.group("name") == bot_name:
+        # Case-insensitive, like `agag.listen.mentions_bot`: `@**cagent**`
+        # is an invitation to `Cagent`.
+        if match.group("name").lower() == bot_name.lower():
             found.append(match.group("selector"))
     return found
 

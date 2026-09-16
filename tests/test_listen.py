@@ -244,3 +244,10 @@ def test_the_queue_coalesces_and_orders_owners_first(tmp_path):
     queue.set_revision(9)
     assert queue.revision() == 9
     queue.close()
+
+
+def test_a_mention_matches_the_name_whatever_its_case():
+    from agag.listen import mentions_bot
+
+    assert mentions_bot("@**cagent** hi", "Cagent") and mentions_bot("@**Cagent** hi", "cagent")
+    assert not mentions_bot("@**cagent2** hi", "Cagent")

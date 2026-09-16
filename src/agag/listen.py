@@ -90,7 +90,15 @@ def current_mirror() -> Mirror | None:
 
 
 def mentions_bot(content: str, bot_name: str) -> bool:
-    return bool(bot_name) and f"@**{bot_name}**" in str(content or "")
+    """Whether `content` names this bot with `@**<name>**`.
+
+    Case-insensitive on the name (`argue` p1 step 4): Front wrote
+    `@**cagent**` for the bot whose display name is `Cagent`, Zulip rendered
+    it as plain text, and the invitation reached nobody. The mirror sees
+    every post whether or not Zulip made a pill of it, and a name that
+    differs only in case is not a different agent.
+    """
+    return bool(bot_name) and f"@**{bot_name.lower()}**" in str(content or "").lower()
 
 
 @dataclass(frozen=True)

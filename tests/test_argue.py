@@ -41,6 +41,7 @@ def test_a_mention_may_carry_a_selector_and_a_fenced_one_is_not_a_mention():
     assert argue.mentions_of(text, "archsage") == ["sage:arxiv", None]
     assert argue.mentions_of(text, "Front") == []
     assert argue.mentions_of("@_**archsage** silently", "archsage") == []
+    assert argue.mentions_of("@**cagent** please", "Cagent") == [None]
     assert argue.parse_selector("sage:arxiv") == "sage:arxiv"
     assert argue.parse_selector("Sage:arxiv") is None
     assert argue.parse_selector("") is None

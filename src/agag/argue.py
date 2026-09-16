@@ -392,10 +392,11 @@ def participant_guide() -> str:
         "Where you can, name the concrete next steps you see and who or what would be "
         "needed for them, without starting any work yourself.\n\n"
         "Your reply is posted into the argue topic as it is. Address the people in "
-        "the conversation; do not name any agent with an `@**…**` mention unless you "
-        "actually need that agent's contribution, because a mention here is a request "
-        "that costs a run. The reply is the closing message of this run — do not post "
-        "it yourself."
+        "the conversation in plain words; do not name any agent with an `@**…**` "
+        "mention — not the facilitator who asked you either — unless you actually "
+        "need that agent's contribution, because a mention here is a request that "
+        "costs a run, and the facilitator is served by your reply anyway. The reply "
+        "is the closing message of this run — do not post it yourself."
     )
 
 

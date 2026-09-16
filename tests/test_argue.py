@@ -399,3 +399,14 @@ def test_a_role_context_may_depend_on_the_invitation(tmp_path):
         run=lambda prompt, cwd, invitation: prompts.append(prompt) or "ok", log=lambda line: None,
     )
     assert "CONTEXT FOR sage:a" in prompts[0] and "CONTEXT FOR sage:b" in prompts[1]
+
+
+def test_two_invitations_to_one_speaker_are_one_reply(tmp_path):
+    client = Client([message(1, FRONT, "Front", "@**Mirror Bot** first?"), message(2, DEV, "Dev", "…"),
+                     message(3, FRONT, "Front", "still waiting on @**Mirror Bot**")])
+    runs = []
+    posted = argue.participate(client, "argue", "argue-x", spec=spec_in(tmp_path), role_context="",
+                               run=lambda prompt, cwd, invitation: runs.append(invitation.message_id) or "here",
+                               log=lambda line: None)
+    assert runs == [3] and len(posted) == 1 and client.reactions == [1, 3]
+    assert client.sent[-1][2] == "[selfnote][served] argue/argue-x 3"

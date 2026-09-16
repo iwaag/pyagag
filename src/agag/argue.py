@@ -478,6 +478,21 @@ def participate(
     if not pending:
         log(f"no outstanding invitation for {bot_name!r} in {channel!r}/{topic!r}")
         return []
+    # One reply per logical speaker per serving: the conversation carries
+    # every invitation, so the newest one to a speaker is answered with all
+    # of them in front of the run, and the earlier ones are reacted to.
+    # (Front named cagent twice before cagent could answer once — live,
+    # `argue` p1 step 4 — and two runs for one reply is a run wasted.)
+    newest: dict[str | None, Invitation] = {}
+    for invitation in pending:
+        newest[invitation.selector] = invitation
+    for invitation in pending:
+        if newest[invitation.selector] is not invitation:
+            try:
+                client.add_reaction(invitation.message_id, "eyes")
+            except Exception as error:  # noqa: BLE001
+                log(f"could not react to {invitation.message_id}: {error!r}")
+    pending = [invitation for invitation in pending if newest[invitation.selector] is invitation]
     known = None if selectors is None else {s for s in selectors}
     conversation_rows = [m for m in history if not (drop is not None and drop(str(m.get("content", ""))))]
     rendered = format_chatlog(conversation_rows, self_id)

@@ -31,8 +31,10 @@ What replaces it:
   served again. At-least-once, with duplicate suppression by evidence;
   nothing here promises exactly-once external effects.
 - **Recovery** reads the mirror's index, not Zulip: every open topic this
-  bot owns whose last real speaker is somebody else, every open topic that
-  names this bot past its served mark. It runs at start and after every
+  bot owns whose last real speaker is somebody else, every open topic
+  holding a post that names this bot past its served mark (`argue` p1: the
+  newest such post, not only the last one — a mention is an invitation and
+  is owed until the mark passes it). It runs at start and after every
   resync the mirror makes (a queue expiry is downtime by another name). The
   `on_recover` hook runs after it, for the obligations no last-speaker check
   can see — Front's unstarted runs and delivered reports.
@@ -321,9 +323,31 @@ class Listener:
             return None
         if entry.route == MENTION:
             marks = self.served_marks() if marks is None else marks
-            if last.id <= marks.get((entry.channel, entry.topic), 0):
+            if self.unanswered_mention(entry.channel, index.live_name,
+                                       marks.get((entry.channel, entry.topic), 0)) is None:
                 return None
         return index.live_name
+
+    def unanswered_mention(self, channel: str, live_name: str, mark: int) -> Message | None:
+        """The newest post naming this bot above its served mark, or None.
+
+        `argue` p1. A mention is an invitation, and it stays owed until this
+        bot has marked the conversation served past it — not until the
+        *last* post happens to be one that names this bot. Two agents named
+        in one post, one of them answering, and a human posting after that
+        left the other's invitation invisible to a last-post check; a
+        restart in that state erased it. Judging by the newest unmarked
+        mention keeps it, and the mark, once written, keeps a finished
+        exchange from being replayed.
+        """
+        for message in reversed(self.mirror.messages(channel, live_name, across_resolve=False)):
+            if message.id <= mark:
+                return None
+            if message.sender_id == self.self_id or not is_speech(message.as_zulip()):
+                continue
+            if mentions_bot(message.content, self.bot_name):
+                return message
+        return None
 
     # -- intake ----------------------------------------------------------------------------
 
@@ -370,13 +394,15 @@ class Listener:
             if last is None or last.sender_id == self.self_id:
                 continue
             if topic_matches(index.channel, index.live_name, self.topic_filter):
-                route = OWNER
-            elif self.on_mention is not None and mentions_bot(last.content, self.bot_name) \
-                    and last.id > marks.get(key, 0):
-                route = MENTION
+                route, newest = OWNER, last.id
+            elif self.on_mention is not None and index.max_id > marks.get(key, 0):
+                mention = self.unanswered_mention(index.channel, index.live_name, marks.get(key, 0))
+                if mention is None:
+                    continue
+                route, newest = MENTION, mention.id
             else:
                 continue
-            if self.queue.enqueue(index.channel, index.name, route, revision=revision, message_id=last.id):
+            if self.queue.enqueue(index.channel, index.name, route, revision=revision, message_id=newest):
                 added += 1
         self.recoveries += 1
         self.log(f"recovery ({reason}): {added} conversation(s) queued from the index, "

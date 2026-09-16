@@ -133,6 +133,10 @@ Examples
   # conversations: say so, on purpose, and the answers come back to this one.
   agentchat anchor <their-channel> <topic>
 
+  # Open an argue — a conversation in #argue where a human develops a desire
+  # with every agent's help — from the conversation you are serving.
+  agentchat argue open <stem> "the invitation, in your own words"
+
   The channel and the topic name are not for this tool to suggest: they are
   whatever the agent you are addressing said its entrance is. Read its
   introduction, and use the names it gave.
@@ -189,6 +193,12 @@ Notes
   Use it when you know the anchor is wrong, not as a habit: the automatic
   one is right for every ordinary delegation, and a correction that was not
   needed is a conversation quietly answering somewhere nobody is reading.
+
+  `argue open` opens `#argue > argue-<stem>` linked to the conversation you
+  are serving, posts your invitation there, and returns. The argue is then a
+  conversation of its own, owned by whoever facilitates argues (its
+  introduction says so): you are not served in it by posting there, and the
+  human is the one expected to speak next. A stem already in use is refused.
 
   `use` posts one command line and returns. It is configuration, not a
   request: the agent answers it with a line of its own and starts no work, so
@@ -597,6 +607,25 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    argue = subcommands.add_parser(
+        "argue",
+        help="open an argue conversation from the one you are serving",
+        description=(
+            "An argue is a conversation in #argue in which a human develops a "
+            "desire with the agents. `argue open <stem> <text>` opens "
+            "`argue-<stem>` there, anchored to the conversation this run is "
+            "serving, and posts <text> as its first message."
+        ),
+    )
+    argue_commands = argue.add_subparsers(dest="argue_command", required=True)
+    argue_open = argue_commands.add_parser("open", help="open a new argue topic")
+    argue_open.add_argument("stem", help="short name; the topic becomes argue-<stem>")
+    argue_open.add_argument("text", nargs="+", help="the invitation posted first; Markdown is rendered")
+    argue_open.add_argument(
+        "--from", dest="origin", default=None, metavar="CHANNEL/TOPIC",
+        help="the conversation the argue grows out of; defaults to the one this run is serving",
+    )
+
     return parser
 
 
@@ -771,6 +800,26 @@ def _run(args, client: ZulipClient, out) -> int:
         )
         if joined:
             print(f"joined #{args.channel}", file=out)
+        return 0
+    if args.command == "argue":
+        from .argue import ARGUE_CHANNEL, open_argue
+
+        text = " ".join(args.text).strip()
+        if not text:
+            raise AgentChatError("refusing to open an argue with an empty invitation")
+        origin = parse_conversation(args.origin) if args.origin else home_from_environment()
+        if args.origin and origin is None:
+            raise AgentChatError(f"--from {args.origin!r} is not a <channel>/<topic> pair")
+        try:
+            topic, anchor_id, post_id = open_argue(client, args.stem, text, origin=origin)
+        except ValueError as error:
+            raise AgentChatError(str(error)) from error
+        print(f"opened #{ARGUE_CHANNEL} > {topic} (argue {anchor_id}, invitation {post_id})", file=out)
+        print(
+            f"it grew out of {origin}" if origin is not None else "it names no origin conversation",
+            file=out,
+        )
+        print("the human is expected to speak there next; do not post into it again from this run", file=out)
         return 0
     if args.command == "topics":
         names = client.channel_topics(client.stream_id(args.channel))

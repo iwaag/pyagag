@@ -387,3 +387,14 @@ def test_a_resolved_argue_serves_nobody(tmp_path):
     assert p.served == []
     assert [r for r in (MENTION,) if p.listener.queue.entries()] == []
     p.stop()
+
+
+def test_a_role_context_may_depend_on_the_invitation(tmp_path):
+    client = Client([message(1, FRONT, "Front", "@**Mirror Bot** sage:a one @**Mirror Bot** sage:b two")])
+    prompts = []
+    argue.participate(
+        client, "argue", "argue-x", spec=spec_in(tmp_path),
+        role_context=lambda invitation: f"CONTEXT FOR {invitation.selector}",
+        run=lambda prompt, cwd, invitation: prompts.append(prompt) or "ok", log=lambda line: None,
+    )
+    assert "CONTEXT FOR sage:a" in prompts[0] and "CONTEXT FOR sage:b" in prompts[1]

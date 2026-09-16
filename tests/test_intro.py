@@ -172,3 +172,12 @@ def test_the_roster_and_the_options_blocks_do_not_read_each_other(tmp_path):
                             roster=roster, options=options)
     assert intro.parse_roster(text).prefixes == ("workplan-",)
     assert intro.parse_exec_options(text).names == ("default", "agy")
+
+
+def test_extra_placeholders_are_filled_like_the_instance(tmp_path):
+    from agag.intro import intro_text
+
+    path = tmp_path / "intro.md"
+    path.write_text("# {instance}\n\nSages: {sages}\n", encoding="utf-8")
+    text = intro_text(path, tmp_path, "archsage-x", commit="abc", extra={"sages": "sage:arxiv, sage:realworld"})
+    assert "# archsage-x" in text and "Sages: sage:arxiv, sage:realworld" in text

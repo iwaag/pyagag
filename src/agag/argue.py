@@ -434,7 +434,7 @@ def participate(
     topic: str,
     *,
     spec,
-    role_context: str,
+    role_context: str | Callable[[Invitation], str],
     role: str = ROLE,
     speaker: str | None = None,
     selectors: Iterable[str | None] | None = None,
@@ -457,7 +457,9 @@ def participate(
     invitation addressed to any other selector is answered with one line
     saying so, without a run. `run(prompt, cwd, invitation)` replaces the
     default `run_role` for an agent whose logical speakers need their own
-    working directory or tools (archsage's sages). The served mark is
+    working directory or tools (archsage's sages), and `role_context` may
+    be a function of the invitation for the same reason: each logical
+    speaker is told who it is. The served mark is
     written after everything found has been answered, so a crash midway
     leaves the rest owed rather than silently spent.
 
@@ -497,8 +499,9 @@ def participate(
         number = next_generation(topic_workspace(spec.topics_root, channel, topic))
         workspace = generation_dir(spec.topics_root, channel, topic, number, role)
         chatlog_path(workspace).write_text(rendered, encoding="utf-8")
+        context = role_context(invitation) if callable(role_context) else role_context
         prompt = participant_prompt(
-            bot_name, conversation_context(rendered), role_context,
+            bot_name, conversation_context(rendered), context,
             speaker=label, desire=desire, history=history,
         )
         meta = {"argue": (anchor(history).message_id if anchor(history) else None),

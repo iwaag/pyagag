@@ -63,6 +63,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Mapping
 
 from agag.execopt import ExecOptions, parse_options
 from agag.zulip import RESOLVED_TOPIC_PREFIX
@@ -232,8 +233,13 @@ def intro_text(
     commit: str | None = None,
     roster: Roster | None = None,
     options: ExecOptions | None = None,
+    extra: Mapping[str, str] | None = None,
 ) -> str:
     """The committed Markdown, with `{instance}` filled in, plus the stamp.
+
+    `extra` fills further `{name}` placeholders the agent's own text uses
+    for what only the running instance knows (`argue` p2: archsage's list
+    of sages), the way `{instance}` is filled here.
 
     The roster block sits between the agent's own prose and the stamp: last,
     so it never interrupts what a human came to read, and inside the post, so
@@ -250,6 +256,8 @@ def intro_text(
     posted = today or date.today()
     current_revision = commit if commit is not None else revision(root)
     body = intro_path.read_text(encoding="utf-8").rstrip().replace("{instance}", instance)
+    for name, value in (extra or {}).items():
+        body = body.replace("{" + name + "}", value)
     if roster is not None:
         body = f"{body}\n\n{roster_block(roster)}"
     if options is not None:
@@ -260,12 +268,13 @@ def intro_text(
 def post_intro(
     client, *, instance: str, intro_path: Path, root: Path,
     roster: Roster | None = None, options: ExecOptions | None = None,
+    extra: Mapping[str, str] | None = None,
 ) -> str:
     """Append this instance's current introduction to the shared board.
 
     Returns the posted text, so a caller can log or test what it announced.
     """
-    text = intro_text(intro_path, root, instance, roster=roster, options=options)
+    text = intro_text(intro_path, root, instance, roster=roster, options=options, extra=extra)
     client.send_to_channel(AGENTS_CHANNEL, intro_topic(instance), text)
     return text
 

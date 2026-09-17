@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from agag.memo import is_memo_message
 from agag.selfnote import (
     MOVED_TAG,
     ROOTCHAT_TAG,
@@ -1013,7 +1014,8 @@ class ZulipClient:
                 "narrow": [{"operator": "is", "operand": "mentioned"}],
             },
         )
-        return result.get("messages", [])
+        # A mention written into a memo invites nobody (`agag.memo`).
+        return [m for m in result.get("messages", []) if not is_memo_message(m)]
 
     def own_notes(self, tag: str, num_before: int = ROOTCHAT_HISTORY) -> list[dict]:
         """Recent `[selfnote][<tag>]` messages written by this bot, oldest first.
@@ -1037,7 +1039,8 @@ class ZulipClient:
                 ],
             },
         )
-        return result.get("messages", [])
+        # A note copied into a memo is text on display, not memory (`agag.memo`).
+        return [m for m in result.get("messages", []) if not is_memo_message(m)]
 
     def own_rootchat_notes(self, num_before: int = ROOTCHAT_HISTORY) -> list[dict]:
         """Recent root notes written by this bot, oldest first.
@@ -1223,6 +1226,8 @@ def topic_from_event(
         return None
     if is_selfnote(message.get("content")):
         return None  # a note an agent wrote to itself is not a turn
+    if is_memo_message(message):
+        return None  # a memo is read, never answered
     topic = str(message.get("subject") or "")
     channel = channel_name(message)
     if not topic or not channel or not topic_matches(channel, topic, topic_filter):
@@ -1245,6 +1250,8 @@ def is_mention_for_us(
         return False
     if is_selfnote(message.get("content")):
         return False  # a note an agent wrote to itself is not a turn
+    if is_memo_message(message):
+        return False  # a mention written into a memo invites nobody
     carried = list(flags or []) + list(message.get("flags") or [])
     if "mentioned" in carried:
         return True

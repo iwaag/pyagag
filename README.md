@@ -148,6 +148,22 @@ conversation in front of it. Three pieces carry that:
   *about* the conversation, and `last_real_sender` skips it the same way —
   un-resolving a topic used to buy its owner a run to answer the notice
   (`operation_room` p8).
+- **A memo is read and never answered.** `agag.memo` (`argue` p2): a
+  conversation whose channel is `memo` or `memo-…` is presentation only —
+  decidable before its first message and through every topic rename, a
+  resolve included. Nothing written there starts anything: not a post in an
+  owned-looking topic, not a real `@**bot**` mention, not a command line,
+  not a copied `[selfnote]`, not a restart with work already queued. The one
+  rule (`is_memo_channel`) is asked at `agag.listen`'s intake, mention
+  route, recovery and again at execution time; in `serve_topic`; in the
+  mirror's note index and `ZulipClient.own_notes` / `mentions` (pass
+  `include_memos=True` to read a memo's own notes); and by `agentchat send`,
+  which writes no root note there. The mirror still holds memo conversations
+  for display. A memo names what it presents with
+  `[selfnote][memosource] <message id>` — deliberately not `rootchat`, which
+  takes part in callback routing and `threads/` — and a memo post that is
+  data carries one fenced `ag-memo` JSON record. A consumer with its own
+  intake outside `agag.listen` must ask the same rule itself.
 - **Two triggers, not one.** `agag.listen` serves the *owner* of a topic on
   anybody else's post in it, and a *participant* only when a post names it.
   Since `better_zulip_call` p1 a listener is a **mirror** of the realm's

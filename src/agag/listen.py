@@ -39,6 +39,13 @@ What replaces it:
   `on_recover` hook runs after it, for the obligations no last-speaker check
   can see — Front's unstarted runs and delivered reports.
 
+**A memo is never work** (`argue` p2 step 1, `agag.memo`). A conversation in
+a memo channel is presentation only, and the same one rule is asked at every
+point where a conversation can become a serving: intake (a post, a mention,
+a rename into an owned name), recovery, the entries a crash left running,
+and — because a queue file outlives the process that filled it — once more
+at execution time, where an entry queued by an older listener is dropped.
+
 The DM route is untouched: `agag.zulip.serve` on its own thread and its own
 client, as before, because a direct message is account-specific and the
 mirror is public conversations only.
@@ -53,6 +60,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .memo import is_memo_channel
 from .mirror import Change, Mirror, Message, bare_topic
 from .selfnote import SELFNOTE_MARKER, is_selfnote, is_speech, note as selfnote_line, parse_served
 from .status import StatusWriter, default_status_path
@@ -320,6 +328,10 @@ class Listener:
 
     def owed(self, entry: Entry, marks: dict[tuple[str, str], int] | None = None) -> str | None:
         """The live topic name to serve, or None when nothing is owed here."""
+        if is_memo_channel(entry.channel):
+            # Asked again here, not only at intake: the queue is a file, and
+            # an entry may have been written before this rule existed.
+            return None
         index = self._live(entry.channel, entry.topic)
         if index is None:
             return None
@@ -360,10 +372,14 @@ class Listener:
     # -- intake ----------------------------------------------------------------------------
 
     def _intake(self, change: Change) -> None:
+        if change.kind != "resync" and is_memo_channel(change.channel):
+            return  # a memo is read, never answered: no post, mention or rename there is work
         if change.kind == "message" and change.message_id is not None:
             message = self.mirror.message(change.message_id)
             if message is None or message.sender_id == self.self_id or is_selfnote(message.content):
                 return
+            if is_memo_channel(message.channel):
+                return  # the change row may predate the channel's name; the message knows it
             if message.resolved:
                 return
             self._consider(message.channel, message.topic, message.content, change.revision, message.id,
@@ -378,6 +394,8 @@ class Listener:
 
     def _consider(self, channel: str, topic: str, content: str, revision: int, message_id: int, *,
                   flagged: bool = False) -> None:
+        if is_memo_channel(channel):
+            return
         if topic_matches(channel, topic, self.topic_filter):
             self._enqueue(channel, bare_topic(topic), OWNER, revision, message_id)
         elif self.on_mention is not None and (flagged or mentions_bot(content, self.bot_name)):
@@ -397,6 +415,8 @@ class Listener:
         marks = self.served_marks() if self.on_mention is not None else {}
         revision = self.mirror.revision()
         for index in self.mirror.topics(include_resolved=False):
+            if is_memo_channel(index.channel):
+                continue
             key = (index.channel, index.name)
             last = index.last_real
             if last is None or last.sender_id == self.self_id:
@@ -429,6 +449,10 @@ class Listener:
         shows. A reply of ours that is not the ack means the run finished;
         anything else is owed again."""
         for entry in self.queue.entries("running"):
+            if is_memo_channel(entry.channel):
+                self.log(f"{entry.route} {entry.channel!r}/{entry.topic!r} is a memo; dropped")
+                self.queue.drop(entry)
+                continue
             index = self._live(entry.channel, entry.topic)
             history = self.mirror.messages(entry.channel, index.live_name, across_resolve=False) if index else []
             ours = [m for m in history if m.sender_id == self.self_id and is_speech(m.as_zulip())]

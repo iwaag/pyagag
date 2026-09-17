@@ -821,14 +821,17 @@ class Mirror:
     # -- queries: notes and introductions -------------------------------------------
 
     def notes(self, *, tag: str | None = None, sender_id: int | None = None, channel: str | None = None,
-              topic: str | None = None, since_id: int = 0) -> list[Note]:
+              topic: str | None = None, since_id: int = 0, include_memos: bool = False) -> list[Note]:
+        """Notes out of the index; memo channels only when `include_memos`
+        (`agag.memo` — the one reader that wants them is a memo's own)."""
         stream_id = None
         if channel is not None:
             found = self.store.channel(channel)
             if found is None:
                 return []
             stream_id = found.stream_id
-        return self.store.notes(tag=tag, sender_id=sender_id, stream_id=stream_id, topic=topic, since_id=since_id)
+        return self.store.notes(tag=tag, sender_id=sender_id, stream_id=stream_id, topic=topic, since_id=since_id,
+                                include_memos=include_memos)
 
     def intros(self, channel: str = "agents", prefix: str = "intro-") -> dict[str, Intro]:
         """Every agent's introduction: the newest post of each `intro-`

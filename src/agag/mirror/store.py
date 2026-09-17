@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator
 
+from agag.memo import is_memo_channel
 from agag.selfnote import SELFNOTE_MARKER, is_speech
 from agag.zulip import RESOLVED_TOPIC_PREFIX
 
@@ -662,7 +663,10 @@ class Store:
     # -- notes ---------------------------------------------------------------
 
     def notes(self, *, tag: str | None = None, sender_id: int | None = None, stream_id: int | None = None,
-              topic: str | None = None, since_id: int = 0) -> list[Note]:
+              topic: str | None = None, since_id: int = 0, include_memos: bool = False) -> list[Note]:
+        """The note index. A note sitting in a memo channel is left out
+        unless asked for (`agag.memo`): a selfnote copied into a memo is
+        text on display, never anybody's anchor, served mark or handoff."""
         sql = ("SELECT n.tag, n.value, n.message_id, m.sender_id, m.stream_id, m.topic, m.timestamp"
                " FROM notes n JOIN messages m ON m.id = n.message_id WHERE m.deleted = 0 AND n.message_id > ?")
         params: list = [int(since_id)]
@@ -682,8 +686,9 @@ class Store:
         with self._lock:
             rows = self._db.execute(sql, params).fetchall()
             names = self.channel_names()
-        return [Note(r["tag"], r["value"], int(r["message_id"]), int(r["sender_id"]), int(r["stream_id"]),
-                     names.get(int(r["stream_id"]), ""), r["topic"], int(r["timestamp"])) for r in rows]
+        found = [Note(r["tag"], r["value"], int(r["message_id"]), int(r["sender_id"]), int(r["stream_id"]),
+                      names.get(int(r["stream_id"]), ""), r["topic"], int(r["timestamp"])) for r in rows]
+        return found if include_memos else [n for n in found if not is_memo_channel(n.channel)]
 
     # -- the change feed -----------------------------------------------------
 

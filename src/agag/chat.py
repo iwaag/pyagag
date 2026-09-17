@@ -40,6 +40,7 @@ from pathlib import Path
 
 from . import execopt
 from .intro import AGENTS_CHANNEL, harvest_intros, parse_exec_options
+from .memo import is_memo_channel
 from .selfnote import (
     Conversation,
     home_from_environment,
@@ -368,6 +369,11 @@ def ensure_rootchat(client: ZulipClient, channel: str, topic: str, out) -> None:
     """
     home = home_from_environment()
     if home is None or (channel, topic) in _ANCHORED:
+        return
+    if is_memo_channel(channel):
+        # A memo is presentation, not participation: a root note takes part
+        # in callback routing and `threads/`, and a memo is in neither.
+        _ANCHORED.add((channel, topic))
         return
     if home.as_pair() == (channel, topic):
         _ANCHORED.add((channel, topic))

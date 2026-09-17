@@ -33,6 +33,7 @@ from pathlib import Path
 
 from . import execopt
 from .execopt import ExecOptions, Selection
+from .memo import is_memo_channel
 from .selfnote import is_selfnote
 from .zulip import (
     RESOLVED_TOPIC_PREFIX,
@@ -687,6 +688,11 @@ def serve_topic(
     two runs for one piece of work, which is `agent_standardize` p8's second
     open item; the caller decides which post is the one that counts.
     """
+    if is_memo_channel(channel) or (reply_to is not None and is_memo_channel(reply_to[0])):
+        # Execution-time eligibility (`agag.memo`): whatever route reached
+        # this call, a memo is never served and never replied into.
+        log(f"{channel!r}/{topic!r} is a memo; not served")
+        return
     self_user = client.whoami()
     self_id = int(self_user["user_id"])
     bot_name = str(self_user.get("full_name") or client.email)

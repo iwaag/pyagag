@@ -46,10 +46,25 @@ and it asks with `include_memos=True`.
 **What a memo holds** is the writer's business; the one shared shape is the
 fenced record (`ag-memo`, one JSON object per post) that lets a reader tell
 a result from prose without knowing who wrote it.
+
+**The dialogue record** (`DIALOGUE_SCHEMA`) is the first such content, and
+the three things its writer (Front's renderer) and its readers (the relay's
+rooms) must agree on live here rather than in either of them: the schema
+name, `fingerprint` — the digest of the source posts a result was made from,
+so an edit or a deletion afterwards is visible to anybody holding the
+source — and the request for another interpretation,
+
+    [selfnote][render] <settings revision>
+
+written into the **source** by a human account. It is a selfnote, so it
+buys nobody a run and is in no chatlog; the renderer reads it off its
+mirror. (A request inside a memo would be a memo starting work, which is
+the one thing a memo never does.)
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
@@ -62,6 +77,10 @@ MEMO_CHANNEL_PREFIX = "memo-"
 SOURCE_TAG = "memosource"
 #: The fenced record a memo post carries.
 RECORD_FENCE = "ag-memo"
+#: A character re-voicing of source posts, and its `failed` / `refused` kin.
+DIALOGUE_SCHEMA = "ag.memo-dialogue.v1"
+#: `[selfnote][render] <settings revision>` — written into the source.
+RENDER_TAG = "render"
 #: Zulip topic names are at most 60 characters.
 TOPIC_LIMIT = 60
 
@@ -69,16 +88,20 @@ _RECORD = re.compile(r"```[ \t]*" + re.escape(RECORD_FENCE) + r"[ \t]*\n(.*?)\n[
 _SLUG = re.compile(r"[^a-z0-9-]+")
 
 __all__ = [
+    "DIALOGUE_SCHEMA",
     "MEMO_CHANNEL",
     "MEMO_CHANNEL_PREFIX",
     "RECORD_FENCE",
+    "RENDER_TAG",
     "SOURCE_TAG",
+    "fingerprint",
     "is_memo_channel",
     "is_memo_message",
     "memo_topic",
     "parse_record",
     "parse_source",
     "render_record",
+    "render_request_note",
     "source_note",
 ]
 
@@ -138,3 +161,19 @@ def parse_record(content) -> dict | None:
     except ValueError:
         return None
     return data if isinstance(data, dict) else None
+
+
+def render_request_note(revision: str) -> str:
+    return note(RENDER_TAG, str(revision).strip())
+
+
+def fingerprint(posts) -> str:
+    """A digest over `(message id, content)` pairs, order-independent.
+
+    What a result was rendered from. A reader recomputes it over the same
+    ids as they stand now: a different value means a post was edited, and a
+    missing id means one was deleted."""
+    digest = hashlib.sha256()
+    for message_id, content in sorted((int(i), str(c or "")) for i, c in posts):
+        digest.update(f"{message_id}\0{content}\0".encode("utf-8"))
+    return f"sha256:{digest.hexdigest()}"

@@ -48,6 +48,13 @@ def test_the_source_link_is_its_own_note_and_the_record_round_trips():
     assert memo.parse_record("no record here") is None
 
 
+def test_the_fingerprint_sees_an_edit_and_not_an_order():
+    a = memo.fingerprint([(2, "two"), (1, "one")])
+    assert a == memo.fingerprint([(1, "one"), (2, "two")]) and a.startswith("sha256:")
+    assert a != memo.fingerprint([(1, "one"), (2, "two!")]) and a != memo.fingerprint([(1, "one")])
+    assert memo.render_request_note(" abc123 ") == "[selfnote][render] abc123"
+
+
 def test_nothing_written_in_a_memo_is_served(tmp_path):
     realm = realm_with_memo()
     h = Harness(realm, tmp_path).start()

@@ -1374,6 +1374,46 @@ def remotes_for_home(
     return found
 
 
+def locate(client: ZulipClient, conversation: Conversation) -> Conversation | None:
+    """Where a conversation is **now**: by its anchor message when it has
+    one, else by its name across the resolve rename.
+
+    `explicit_reply` p1 step 3. A display name is reusable — a resolve
+    renames, a retirement frees the name for a replacement — so a delivery
+    that follows a name can land in a conversation the request never knew.
+    With an anchor the message's own location decides (`conversation_of`),
+    including a `✔ ` name, which is where the reply belongs when the topic
+    was closed while the run was in flight. An anchor that Zulip says is
+    gone falls back to the name under the resolve rule; a name that exists
+    nowhere is None — **absent**, never guessed.
+    """
+    anchor_gone = False
+    if conversation.anchor and hasattr(client, "message"):
+        try:
+            found = conversation_of(client, int(conversation.anchor), strict=True)
+            anchor_gone = found is None
+        except Exception:  # noqa: BLE001 - a lookup that got no answer is not "gone"
+            found = None
+        if found is not None and found.channel == conversation.channel:
+            return Conversation(found.channel, found.topic, int(conversation.anchor))
+    topic = conversation.topic
+    if topic.startswith(RESOLVED_TOPIC_PREFIX):
+        return conversation
+    try:
+        names = client.channel_topics(client.stream_id(conversation.channel))
+    except Exception:  # noqa: BLE001 - a lookup that got no answer is not "gone"
+        return conversation
+    if topic in names:
+        return conversation
+    resolved = f"{RESOLVED_TOPIC_PREFIX}{topic}"
+    if resolved in names:
+        return Conversation(conversation.channel, resolved, conversation.anchor)
+    # The name is listed nowhere. That is "gone" only when the anchor was
+    # confirmed deleted as well; a name alone is not evidence, and the
+    # conversation is answered as asked.
+    return None if anchor_gone else conversation
+
+
 def live_topic_name(client: ZulipClient, channel: str, topic: str) -> str:
     """`topic`, or its resolved `\u2714 ` name when that is what exists now.
 

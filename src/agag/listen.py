@@ -769,6 +769,12 @@ class Listener:
         self.log(f"{'serving' if entry.route == OWNER else 'serving mention in'} {entry.channel!r}/{live!r}")
         serve = self.handler if entry.route == OWNER else self.on_mention
         journal = self.queue.open_serving(entry)
+        trigger = self.mirror.message(entry.message_id) if entry.message_id else None
+        if trigger is not None:
+            # Captured at intake: who asked, by the post that triggered this
+            # serving. `serve_topic` refines it from the processed input.
+            self.queue.update_serving(journal.id, requester_id=int(trigger.sender_id),
+                                      requester_name=trigger.sender_name or "")
         with serving_record.bound(journal):
             serve(entry.channel, live)  # type: ignore[misc]
         self.served += 1

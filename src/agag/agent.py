@@ -38,7 +38,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from . import selfnote
+from . import selfnote, serving as serving_record
 from .agent_config import ResolvedAgent, load_config, resolve_role
 from .execopt import DEFAULT_OPTION, ExecOptions, Option, Selection, run_meta, with_default
 from .execpool import UNKNOWN, OptionPools, diagnose, with_derived_pools
@@ -312,7 +312,14 @@ def chat_environment(
     directory = Path(sys.executable).parent if bin_dir is None else bin_dir
     environment = {AGENTCHAT_ENV_VARIABLE: str(spec.zulip_env)}
     if home is not None:
-        environment[selfnote.HOME_VARIABLE] = str(selfnote.Conversation(*home))
+        environment[selfnote.HOME_VARIABLE] = str(selfnote.Conversation(*home[:2]))
+        # The post this serving was started for (`explicit_reply` p1 step
+        # 3): the listener's journal knows it, and `agentchat send` writes
+        # it into the root note so a callback is located by id, not name.
+        journal = serving_record.current()
+        anchor = getattr(journal, "trigger_id", 0) if journal is not None else 0
+        if anchor:
+            environment[selfnote.HOME_ANCHOR_VARIABLE] = str(int(anchor))
     if directory.is_dir():
         base = os.environ.get("PATH", "") if base_path is None else base_path
         environment["PATH"] = os.pathsep.join([str(directory), base])

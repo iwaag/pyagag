@@ -50,6 +50,7 @@ and `serve_topic`'s post-run re-check all go through it.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
 #: Marks a message as machine-to-machine. First thing in the content, always.
@@ -74,6 +75,7 @@ REPLACES_TAG = "replaces"
 HOME_VARIABLE = "AGENTCHAT_HOME"
 
 __all__ = [
+    "HOME_ANCHOR_VARIABLE",
     "HOME_VARIABLE",
     "MOVED_TAG",
     "REPLACES_TAG",
@@ -104,40 +106,77 @@ __all__ = [
 ]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Conversation:
-    """One channel/topic pair — Zulip's unit of conversation."""
+    """One channel/topic pair — Zulip's unit of conversation.
+
+    `anchor` (`explicit_reply` p1 step 3) is the id of a message *in* that
+    conversation — the post a serving was started for — so a note that
+    names the conversation can be followed to where that message is **now**
+    (`agag.zulip.locate`), after a rename, a resolve or a reuse of the
+    display name. Identity is still the pair: two conversations with the
+    same channel and topic are equal whatever anchor either carries, so
+    every existing comparison keeps its meaning.
+    """
 
     channel: str
     topic: str
+    anchor: int | None = None
 
     def __str__(self) -> str:
-        return f"{self.channel}/{self.topic}"
+        base = f"{self.channel}/{self.topic}"
+        return f"{base} #{int(self.anchor)}" if self.anchor else base
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, Conversation) and self.as_pair() == other.as_pair()
+
+    def __hash__(self) -> int:
+        return hash(self.as_pair())
 
     def as_pair(self) -> tuple[str, str]:
         return (self.channel, self.topic)
 
 
+_ANCHOR_SUFFIX = re.compile(r"^(?P<text>.*?)\s+#(?P<anchor>\d+)$", re.DOTALL)
+
+
 def parse_conversation(value: str | None) -> Conversation | None:
-    """`"<channel>/<topic>"` as a `Conversation`, or None when it is not one.
+    """`"<channel>/<topic>"` — optionally `"<channel>/<topic> #<message id>"`
+    — as a `Conversation`, or None when it is not one.
 
     Split on the *first* separator: a topic may contain slashes, a channel
     may not — the same rule the topic workspaces already live by.
     """
     text = (value or "").strip()
+    anchor = None
+    match = _ANCHOR_SUFFIX.match(text)
+    if match is not None:
+        text, anchor = match.group("text").strip(), int(match.group("anchor"))
     if "/" not in text:
         return None
     channel, topic = text.split("/", 1)
     channel, topic = channel.strip(), topic.strip()
     if not channel or not topic:
         return None
-    return Conversation(channel, topic)
+    return Conversation(channel, topic, anchor)
+
+
+#: The id of the post the serving was started for, beside `AGENTCHAT_HOME`,
+#: so the root note a run writes elsewhere can be followed by id.
+HOME_ANCHOR_VARIABLE = "AGENTCHAT_HOME_ANCHOR"
 
 
 def home_from_environment(environ=None) -> Conversation | None:
-    """The conversation this run is serving, per `AGENTCHAT_HOME`."""
+    """The conversation this run is serving, per `AGENTCHAT_HOME` (and the
+    post it was started for, per `AGENTCHAT_HOME_ANCHOR`, when set)."""
     environ = os.environ if environ is None else environ
-    return parse_conversation(environ.get(HOME_VARIABLE))
+    home = parse_conversation(environ.get(HOME_VARIABLE))
+    if home is None:
+        return None
+    raw = str(environ.get(HOME_ANCHOR_VARIABLE) or "").strip()
+    if raw.isdigit() and int(raw) > 0 and home.anchor is None:
+        return Conversation(home.channel, home.topic, int(raw))
+    return home
 
 
 # --- the convention --------------------------------------------------------

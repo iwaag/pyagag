@@ -40,11 +40,13 @@ from .memo import is_memo_channel
 from .reply import REPLY_GUIDE, record_reply_outcome, resolve_reply
 from .selfnote import is_selfnote, is_speech
 from .serving import NullJournal, Serving
+from .selfnote import Conversation
 from .zulip import (
     RESOLVED_TOPIC_PREFIX,
     ZulipClient,
     ZulipError,
     _safe_topic_component,
+    locate,
     log as default_log,
     topic_write,
 )
@@ -884,12 +886,15 @@ def serve_topic(
             # Who the answer elsewhere is handed to is settled *now*, before
             # the run: the last other speaker in the reply conversation as it
             # stands. A third party speaking there during the run is not the
-            # addressee of an answer that was not written for them.
+            # addressee of an answer that was not written for them. A
+            # conversation that cannot be read leaves the handoff **pending**
+            # — the entry is retried by the listener — rather than answered
+            # to nobody; no model has run yet, so nothing is wasted.
             try:
                 context.reply_history = client.topic_history(reply_channel, reply_topic, num_before=20)
-            except Exception as error:  # noqa: BLE001 - a lost mention must not cost the reply
-                log(f"could not read {reply_channel!r}/{reply_topic!r} for the requester: {error!r}")
-                context.reply_history = None
+            except ZulipError as error:
+                raise DeliveryError(f"could not read {reply_channel!r}/{reply_topic!r} for the requester: {error!r}",
+                                    terminal=False, last=error) from error
         result = TopicResult()
         completed = False
         try:
@@ -946,19 +951,28 @@ def serve_topic(
         parts += [notice for notice in result.notices if notice]
         body = "\n\n".join(part for part in parts if part)
         after_id = max(ack_id, context.processed_up_to)
+        # Where the reply goes is decided **now**, by the id of the post this
+        # serving answers: a topic renamed or resolved while the run was in
+        # flight is still the conversation the request lives in, and its
+        # display name is not (`agag.zulip.locate`). The journal keeps the
+        # located name so a redelivery lands in the same place.
+        anchor = journal.trigger_id if replies_here else (
+            max((int(m.get("id", 0)) for m in (context.reply_history or [])), default=0))
+        destination = _destination(client, reply_channel, reply_topic, anchor, journal, log)
         if body:
             mention = mention_of(requester) if handoff else ""
             text = f"{mention}\n\n{body}" if mention else body
-            journal.prepared(reply_channel, reply_topic, text, resolve_after=bool(result.resolve_after),
-                             after_id=after_id)
+            journal.prepared(destination.channel, destination.topic, text,
+                             resolve_after=bool(result.resolve_after), after_id=after_id)
             # `DeliveryError` escapes on purpose: the text is prepared and
             # the listener owns the retry.
-            journal.delivered(deliver(client, reply_channel, reply_topic, text, self_id=self_id,
+            journal.delivered(deliver(client, destination.channel, destination.topic, text, self_id=self_id,
                                       after_id=after_id, log=log, **delivery))
         else:
-            journal.prepared(reply_channel, reply_topic, "", resolve_after=bool(result.resolve_after),
-                             after_id=after_id)
+            journal.prepared(destination.channel, destination.topic, "",
+                             resolve_after=bool(result.resolve_after), after_id=after_id)
             journal.delivered(None)
+        reply_topic = destination.topic
         _annotate_record(journal)
 
         if result.resolve_after:
@@ -982,6 +996,33 @@ def serve_topic(
         if not arrived:
             return journal.serving()
         log(f"reprocessing {channel!r}/{topic!r}: human posts arrived during the run")
+
+
+def _destination(client, channel: str, topic: str, anchor: int, journal, log) -> Conversation:
+    """The conversation to post into, located by the post being answered.
+    A closed (✔) or renamed destination is used as it stands now and said
+    so on the record; a destination Zulip says is gone is a terminal
+    failure out loud, never a post under whatever took the name."""
+    if not hasattr(client, "message"):
+        return Conversation(channel, topic)  # a stand-in client without a lookup: the name as given
+    found = locate(client, Conversation(channel, topic, anchor or None))
+    if found is None or found.topic != topic:
+        state = "gone" if found is None else ("resolved" if found.topic.startswith(RESOLVED_TOPIC_PREFIX)
+                                              else "renamed")
+        record = journal.serving()
+        extra = dict(record.extra) if record is not None else {}
+        extra["destination"] = {"state": state, "asked": f"{channel}/{topic}",
+                                "found": str(found) if found is not None else None}
+        if hasattr(journal, "queue"):
+            journal.queue.update_serving(journal.id, extra=extra)
+        elif record is not None:
+            record.extra.update(extra)
+        if found is None:
+            log(f"destination {channel!r}/{topic!r} is gone (message {anchor} and the topic are absent)")
+            raise DeliveryError(f"destination {channel!r}/{topic!r} no longer exists", terminal=True)
+        log(f"destination {channel!r}/{topic!r} is {state}: replying under {found.topic!r}")
+        return found
+    return found
 
 
 def _annotate_record(journal) -> None:

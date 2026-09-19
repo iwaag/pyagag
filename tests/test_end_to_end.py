@@ -32,7 +32,7 @@ from test_serving_lifecycle import ACK, BOT, DEV, HOME, OTHER, realm_with_channe
 
 pytestmark = pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 
-DELEGATE = ("pj-x", "workplan-trailer")
+DELEGATE = ("pj-x", "workrun-trailer")
 
 
 class RealmClient(_RealmClient):
@@ -54,6 +54,7 @@ def test_request_delegation_callback_and_final_response_survive_a_restart(tmp_pa
     realm = realm_with_channels()
     runs: list[tuple[str, dict]] = []
     gate = threading.Event()
+    box: dict = {}  # the harness now serving: the one before the crash, then the one after
 
     def model(ctx):
         """The bot's run: delegate on the first serving, answer on the
@@ -62,7 +63,7 @@ def test_request_delegation_callback_and_final_response_survive_a_restart(tmp_pa
                              "previous": ctx.previous, "threads": ctx.extra_threads}))
         remotes = [Remote(c, [dict(m) for m in sorted(realm.messages.values(), key=lambda m: m["id"])
                              if m["display_recipient"] == c.channel and m["subject"] == c.topic], c.topic)
-                   for c in remotes_for_home(h.client, ctx.channel, ctx.topic)]
+                   for c in remotes_for_home(box["h"].client, ctx.channel, ctx.topic)]
         view = continuation_view(ctx.history, BOT, remotes=remotes, interrupted=ctx.previous)
         answered = [r for r in remotes if any(m["sender_id"] != BOT and "@**Mirror Bot**" in m["content"]
                                               for m in r.messages)]
@@ -75,10 +76,10 @@ def test_request_delegation_callback_and_final_response_survive_a_restart(tmp_pa
                        sender_name="Mirror Bot")
             return topics.TopicResult(output=(
                 "I'll delegate the cut and report back.\n\n"
-                "```ag-reply\nAsked autolab for the cut in #pj-x › workplan-trailer; I'll report when it answers.\n```\n"
+                "```ag-reply\nAsked autolab for the cut in #pj-x › workrun-trailer; I'll report when it answers.\n```\n"
                 "```ag-continue\ngoal: a 30 s trailer for the developer\nnext: when autolab answers, tell the developer\n```"))
         gate.wait(10.0)
-        if h.listener._stop.is_set():
+        if box["h"].listener._stop.is_set():
             raise SystemExit  # the crash: the process dies mid-run
         assert "answered, not yet dealt with" in view, view
         assert "goal: a 30 s trailer for the developer" in view
@@ -86,9 +87,11 @@ def test_request_delegation_callback_and_final_response_survive_a_restart(tmp_pa
         return topics.TopicResult(output=f"```ag-reply\nautolab is done: {result.split(chr(10))[-1]}\n```")
 
     def handler(channel, topic):
+        h = box["h"]
         topics.serve_topic(h.client, channel, topic, model, ack_text=ACK, log=h.log.append, delivery=h.delivery)
 
     def mention(channel, topic):
+        h = box["h"]
         topics.serve_topic(h.client, HOME, "front-1", model, ack_text=ACK, log=h.log.append,
                            extra_threads=((channel, topic),), delivery=h.delivery)
 
@@ -98,13 +101,14 @@ def test_request_delegation_callback_and_final_response_survive_a_restart(tmp_pa
             self.client.__class__ = RealmClient
             self.listener.handler = handler
             self.listener.on_mention = mention
+            box["h"] = self
 
     # --- the request ---------------------------------------------------------------
     h = E2E(realm, tmp_path).start()
     asked = realm.post(HOME, "front-1", "make me a 30 s trailer", sender_id=DEV, sender_name="Dev")
     wait_until(lambda: len(h.replies(HOME, "front-1")) == 1, what="the first reply")
     first = h.replies(HOME, "front-1")[0]
-    assert first == "@**Dev**\n\nAsked autolab for the cut in #pj-x › workplan-trailer; I'll report when it answers."
+    assert first == "@**Dev**\n\nAsked autolab for the cut in #pj-x › workrun-trailer; I'll report when it answers."
     assert "I'll delegate" not in first, "the thought is not posted"
     note = [m for m in realm.messages.values() if m["subject"] == DELEGATE[1] and m["content"].startswith("[selfnote][rootchat]")]
     assert parse_rootchat(note[0]["content"]).anchor == asked, "the delegation is bound to the request by id"

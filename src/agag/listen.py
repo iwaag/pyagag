@@ -210,10 +210,13 @@ class Queue:
             row = self._db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
             existing = self._db.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pending'").fetchone()
-            if existing is not None and (row is None or row["value"] != QUEUE_SCHEMA):
+            columns = {r[1] for r in self._db.execute("PRAGMA table_info(pending)").fetchall()} if existing else set()
+            if existing is not None and (row is None or row["value"] != QUEUE_SCHEMA or "next_at" not in columns):
                 # Disposable state: an older layout — the first one wrote no
-                # schema key at all — is dropped, and the startup recovery
-                # rebuilds the pending set from the index.
+                # schema key at all, and a stamp alone proved nothing on
+                # 2026-09-20 — is dropped, judged by the table's own columns,
+                # and the startup recovery rebuilds the pending set from the
+                # index.
                 self._db.executescript("DROP TABLE IF EXISTS pending; DROP TABLE IF EXISTS servings;")
             self._db.executescript(self.SCHEMA)
             self._db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)", (QUEUE_SCHEMA,))

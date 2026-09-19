@@ -274,6 +274,9 @@ def test_a_queue_file_from_before_the_schema_key_is_rebuilt_not_crashed(tmp_path
     CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
     INSERT INTO pending (channel, topic, route, enqueued_at) VALUES ('c', 't', 'owner', 1);
     INSERT INTO meta (key, value) VALUES ('revision', '7');
+    -- …and a stamp that lies, as the first deployment of v2 left behind:
+    -- the layout is judged by the table's columns, never by the stamp alone.
+    INSERT INTO meta (key, value) VALUES ('schema', '2');
     """)
     old.commit()
     old.close()

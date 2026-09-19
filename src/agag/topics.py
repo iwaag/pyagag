@@ -31,10 +31,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import execopt
+from . import execopt, serving as serving_record
+from .delivery import DeliveryError, deliver, redeliver
 from .execopt import ExecOptions, Selection
 from .memo import is_memo_channel
-from .selfnote import is_selfnote
+from .selfnote import is_selfnote, is_speech
+from .serving import NullJournal, Serving
 from .zulip import (
     RESOLVED_TOPIC_PREFIX,
     ZulipClient,
@@ -79,7 +81,10 @@ __all__ = [
     "next_record_path",
     "prompt_with_guide",
     "threads_placement",
+    "requester_of",
+    "resume_prepared",
     "serve_topic",
+    "unprocessed_input",
     "threads_dir",
     "topic_workspace",
 ]
@@ -253,6 +258,11 @@ def handoff_mention(
 
     Empty when nobody else has spoken, which is not an error: a topic this
     bot opened alone has no turn to hand back yet.
+
+    **No longer what `serve_topic` uses** (`explicit_reply` p1 step 3): the
+    skeleton names the requester it recorded from the input it processed
+    (`requester_of`), never a speaker looked up at send time. Kept for the
+    callers that want the send-time answer on purpose.
     """
     try:
         history = client.topic_history(channel, topic, num_before=num_before)
@@ -576,6 +586,17 @@ class TopicContext:
     #: and lands on the next serving. `Selection()` — nothing selected — is
     #: what a serving of an agent that publishes no options always gets.
     selection: Selection = field(default_factory=Selection)
+    #: The serving's durable record (`agag.serving`), for a handler that
+    #: wants to file its run record against it (`context.journal.record`).
+    journal: object = None
+    #: The record of an earlier serving of this conversation that was
+    #: interrupted before it replied, when the listener found one: what it
+    #: had acknowledged and processed, so the run can reconcile actions it
+    #: may have started rather than repeat them blindly.
+    previous: Serving | None = None
+    #: The reply conversation as it stood before the run, for a serving that
+    #: answers somewhere else; None when it could not be read.
+    reply_history: list[dict] | None = None
 
     def __post_init__(self) -> None:
         self.reply_channel = self.reply_channel or self.channel
@@ -608,12 +629,82 @@ class TopicContext:
         )
 
 
+
 @dataclass
 class TopicResult:
     """What the handler produced: what to post, and whether to resolve."""
 
     sections: list[str] = field(default_factory=list)
     resolve_after: bool = False
+
+
+# --- the completion rule ------------------------------------------------------
+
+
+def unprocessed_input(history, self_id: int, processed_up_to: int) -> list[dict]:
+    """Speech by somebody else newer than the input boundary a serving
+    processed. **The one completion rule**: a serving is complete for a
+    conversation when this list is empty — asked after the ordinary reply,
+    before a resolve, at restart recovery and after a callback, so a post
+    that arrived during a run is outstanding on every path."""
+    return [
+        m for m in history
+        if m.get("sender_id") != self_id and is_speech(m) and int(m.get("id", 0)) > processed_up_to
+    ]
+
+
+def requester_of(history, self_id: int, up_to: int | None = None) -> dict | None:
+    """The last other speaker **within the processed input**: the person
+    this serving's reply answers. `up_to` bounds the search to the input
+    boundary the serving read (`TopicContext.processed_up_to`), so a third
+    party speaking during the run is not who the reply is handed to.
+    `handoff_mention` used to re-read the topic at send time and name
+    whoever spoke last *then* — `explicit_reply` p1 step 3 records the
+    relationship at intake instead."""
+    for message in reversed(list(history)):
+        if up_to is not None and int(message.get("id", 0)) > up_to:
+            continue
+        if message.get("sender_id") == self_id or not is_speech(message):
+            continue
+        return message
+    return None
+
+
+def mention_of(message: dict | None) -> str:
+    name = str((message or {}).get("sender_full_name") or "").strip()
+    return f"@**{name}**" if name else ""
+
+
+def _resolve(client: ZulipClient, channel: str, topic: str, log) -> bool:
+    """Resolve after the final reply, so the whole conversation moves under
+    the ✔ name. False when it could not be done; the reason is logged."""
+    try:
+        tail = client.topic_history(channel, topic, num_before=1)
+        if tail:
+            client.resolve_topic(int(tail[-1]["id"]), topic)
+        return True
+    except Exception as error:  # noqa: BLE001
+        log(f"could not resolve {channel!r}/{topic!r}: {error!r}")
+        return False
+
+
+def resume_prepared(client: ZulipClient, record: Serving, journal, *, log=default_log, **delivery) -> int:
+    """Finish a serving that was interrupted between preparing its reply and
+    confirming it: deliver the same text (read-back first), then the resolve
+    it asked for. The model is not run again and no external action is
+    repeated — the reply was the last thing left to do.
+
+    Returns the delivered message id; raises `DeliveryError` when the reply
+    still cannot be confirmed, leaving the record prepared."""
+    self_id = int(client.whoami()["user_id"])
+    log(f"redelivering the prepared reply of serving {record.id} to {record.reply_channel!r}/{record.reply_topic!r}")
+    message_id = redeliver(client, record.reply_channel, record.reply_topic, record.reply_text or "",
+                           self_id=self_id, after_id=record.reply_after, log=log, **delivery)
+    journal.delivered(message_id)
+    if record.resolve_after and not record.resolved:
+        if _resolve(client, record.reply_channel, record.reply_topic, log):
+            journal.resolved()
+    return message_id
 
 
 def serve_topic(
@@ -629,8 +720,10 @@ def serve_topic(
     handoff: bool = True,
     history_messages: int = HISTORY_MESSAGES,
     exec_options: ExecOptions | None = None,
+    journal=None,
+    delivery: dict | None = None,
     log=default_log,
-) -> None:
+) -> Serving | None:
     """Serve one awaiting topic, and always answer it.
 
     `handler(context) -> TopicResult` does the agent-specific work. Every
@@ -640,7 +733,10 @@ def serve_topic(
 
     A human posting *during* a run is not lost either. The final reply makes
     this bot the last poster, so before leaving, this re-checks for messages
-    newer than the chatlog it processed and serves the topic again.
+    newer than the chatlog it processed and serves the topic again — and it
+    does so **before a resolve as well**: a run that asks for the topic to be
+    resolved while a human has posted into it answers that post first and
+    lets the next run decide about resolving (`explicit_reply` p1 step 1).
 
     `empty_reply`, when given, is posted instead of running the handler on a
     topic holding nothing but this bot's own messages. That is not a nicety:
@@ -663,9 +759,13 @@ def serve_topic(
       last poster, so anything that arrived there is found by the ordinary
       owner sweep instead of by looping here.
 
-    Every reply is prefixed with a mention of the last other speaker in the
-    topic being replied into. That is the turn-taking rule as code: whoever is
-    named is served next, and a reply that names nobody ends the exchange.
+    Every reply is prefixed with a mention of the **requester**: the last
+    other speaker within the input this serving processed, read from the
+    history it was given and never re-read at send time. That is the
+    turn-taking rule as code — whoever is named is served next, and a reply
+    that names nobody ends the exchange — and a third party who posts while
+    the run is in flight does not become the addressee of an answer that was
+    not written for them.
 
     `exec_options`, when given, makes this serving obey `ag.exec-options.v1`:
     the topic's own execution commands are answered before anything else
@@ -687,16 +787,33 @@ def serve_topic(
     given their turn back somewhere else. Naming them in both places starts
     two runs for one piece of work, which is `agent_standardize` p8's second
     open item; the caller decides which post is the one that counts.
+
+    **The serving is journaled** (`agag.serving`): the ack's id, the input
+    boundary, the reply text *before* it is sent, and the delivered id after
+    it is confirmed. Under a listener the journal is the executor's durable
+    record for this entry (`serving.current()`); a caller may pass its own
+    as `journal`. The final send goes through `agag.delivery`: an ambiguous
+    answer from the server is settled by reading the conversation back, a
+    refusal or exhausted attempts raise `DeliveryError` **out of this
+    function** with the reply kept prepared in the journal, and the
+    listener retries the delivery — not the run — with backoff. `delivery`
+    holds keyword overrides for `deliver` (attempts, backoff, sleep).
+
+    Returns the serving record as the journal has it at the end, for a
+    caller that wants the outcome (the delivered id, the reply outcome).
     """
     if is_memo_channel(channel) or (reply_to is not None and is_memo_channel(reply_to[0])):
         # Execution-time eligibility (`agag.memo`): whatever route reached
         # this call, a memo is never served and never replied into.
         log(f"{channel!r}/{topic!r} is a memo; not served")
-        return
+        return None
+    journal = journal or serving_record.current() or NullJournal()
+    delivery = dict(delivery or {})
     self_user = client.whoami()
     self_id = int(self_user["user_id"])
     bot_name = str(self_user.get("full_name") or client.email)
     reply_channel, reply_topic = reply_to or (channel, topic)
+    journal.home(channel, topic)
 
     replies_here = (reply_channel, reply_topic) == (channel, topic)
 
@@ -715,16 +832,30 @@ def serve_topic(
                 if replies_here and apply_exec_commands(
                     client, channel, topic, early, self_id, exec_options, log=log
                 ):
-                    return
+                    return journal.serving()
 
+        ack_id = 0
         if replies_here:
-            topic_write(topic, ack_text, channel=channel, client=client)
+            ack_id = int(client.send_to_channel(channel, topic, ack_text) or 0)
+            journal.acked(ack_id)
 
         context = TopicContext(
             client, channel, topic, self_id, bot_name,
             reply_channel=reply_channel, reply_topic=reply_topic,
             extra_threads=tuple(extra_threads),
         )
+        context.journal = journal
+        context.previous = journal.previous()
+        if not replies_here:
+            # Who the answer elsewhere is handed to is settled *now*, before
+            # the run: the last other speaker in the reply conversation as it
+            # stands. A third party speaking there during the run is not the
+            # addressee of an answer that was not written for them.
+            try:
+                context.reply_history = client.topic_history(reply_channel, reply_topic, num_before=20)
+            except Exception as error:  # noqa: BLE001 - a lost mention must not cost the reply
+                log(f"could not read {reply_channel!r}/{reply_topic!r} for the requester: {error!r}")
+                context.reply_history = None
         result = TopicResult()
         completed = False
         try:
@@ -742,52 +873,90 @@ def serve_topic(
                 )
             if empty_reply is not None and not context.humans_spoke():
                 log(f"nothing to answer in {channel!r}/{topic!r}: no messages")
-                context.post(empty_reply)
-                return
+                journal.executed(context.processed_up_to, requester_id=None, requester_name="")
+                journal.prepared(reply_channel, reply_topic, empty_reply, resolve_after=False,
+                                 after_id=max(ack_id, context.processed_up_to))
+                journal.delivered(deliver(client, reply_channel, reply_topic, empty_reply, self_id=self_id,
+                                          after_id=max(ack_id, context.processed_up_to), log=log, **delivery))
+                return journal.serving()
             result = handler(context)
             completed = True
         except Exception as error:  # noqa: BLE001 - the topic is the error channel
             log(f"topic workflow failed during {context.step}: {error!r}")
             result = TopicResult([f"failed during {context.step}: {error}"])
 
+        # The requester is read from the input this serving processed — the
+        # history it was handed — so it is settled before the reply exists,
+        # and a lookup that would have failed at send time cannot fail here.
+        requester = requester_of(context.history, self_id, context.processed_up_to)
+        if not replies_here:
+            # Answering somewhere else: the addressee is whoever spoke last
+            # there before this serving began, which the handler may have
+            # read into `context.reply_history`; otherwise one bounded read.
+            requester = _reply_requester(client, context, self_id, log)
+        journal.executed(context.processed_up_to,
+                         requester_id=(int(requester["sender_id"]) if requester and requester.get("sender_id") is not None else None),
+                         requester_name=str((requester or {}).get("sender_full_name") or ""))
+
         body = "\n\n".join(section for section in result.sections if section)
+        after_id = max(ack_id, context.processed_up_to)
         if body:
-            mention = (
-                handoff_mention(client, reply_channel, reply_topic, self_id)
-                if handoff else ""
-            )
-            topic_write(
-                reply_topic,
-                f"{mention}\n\n{body}" if mention else body,
-                channel=reply_channel,
-                client=client,
-            )
+            mention = mention_of(requester) if handoff else ""
+            text = f"{mention}\n\n{body}" if mention else body
+            journal.prepared(reply_channel, reply_topic, text, resolve_after=bool(result.resolve_after),
+                             after_id=after_id)
+            # `DeliveryError` escapes on purpose: the text is prepared and
+            # the listener owns the retry.
+            journal.delivered(deliver(client, reply_channel, reply_topic, text, self_id=self_id,
+                                      after_id=after_id, log=log, **delivery))
+        else:
+            journal.prepared(reply_channel, reply_topic, "", resolve_after=bool(result.resolve_after),
+                             after_id=after_id)
+            journal.delivered(None)
 
         if result.resolve_after:
-            # After the final reply, so the whole conversation moves under
-            # the ✔ name; a resolved topic stops matching the sweep.
-            try:
-                tail = client.topic_history(reply_channel, reply_topic, num_before=1)
-                if tail:
-                    client.resolve_topic(int(tail[-1]["id"]), reply_topic)
-            except Exception as error:  # noqa: BLE001
-                log(f"could not resolve {reply_channel!r}/{reply_topic!r}: {error!r}")
-            return
+            if completed and context.replies_here and _input_arrived(client, context, self_id, history_messages, log):
+                # The one completion rule, before a resolve too: a human who
+                # posted during this run is answered before the topic closes.
+                log(f"resolution of {channel!r}/{topic!r} deferred: input arrived during the run")
+                continue
+            if _resolve(client, reply_channel, reply_topic, log):
+                journal.resolved()
+            return journal.serving()
         if not completed:
-            return  # do not loop on a failing topic; a human post re-arms it
+            return journal.serving()  # do not loop on a failing topic; a human post re-arms it
         if not context.replies_here:
-            return  # the owner sweep, not this loop, picks up what arrived
+            return journal.serving()  # the owner sweep, not this loop, picks up what arrived
 
-        try:
-            tail = client.topic_history(channel, topic, num_before=history_messages)
-        except ZulipError as error:
-            log(f"post-run re-check failed for {channel!r}/{topic!r}: {error!r}")
-            return
-        if not any(
-            m.get("sender_id") != self_id
-            and not is_selfnote(m.get("content"))
-            and int(m.get("id", 0)) > context.processed_up_to
-            for m in tail
-        ):
-            return
+        arrived = _input_arrived(client, context, self_id, history_messages, log)
+        if arrived is None:
+            journal.recheck_failed("post-run re-check failed")
+            return journal.serving()
+        if not arrived:
+            return journal.serving()
         log(f"reprocessing {channel!r}/{topic!r}: human posts arrived during the run")
+
+
+def _input_arrived(client, context, self_id, history_messages, log) -> bool | None:
+    """Whether speech by somebody else landed past the processed boundary.
+    None when the conversation could not be read: the journal records it and
+    the listener's own evidence decides."""
+    try:
+        tail = client.topic_history(context.channel, context.topic, num_before=history_messages)
+    except ZulipError as error:
+        log(f"post-run re-check failed for {context.channel!r}/{context.topic!r}: {error!r}")
+        return None
+    return bool(unprocessed_input(tail, self_id, context.processed_up_to))
+
+
+def _reply_requester(client, context, self_id, log) -> dict | None:
+    """Who a reply posted *elsewhere* is handed to: the last other speaker
+    in the reply conversation as it stood when this serving started
+    (`context.reply_history`, read before the run). A read that failed then
+    hands the turn to nobody, and the journal's requester stays empty so the
+    failure is visible rather than guessed at send time."""
+    del client, log
+    history = context.reply_history
+    if history is None:
+        return None
+    return requester_of(history, self_id)

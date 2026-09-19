@@ -46,6 +46,31 @@ a rename into an owned name), recovery, the entries a crash left running,
 and — because a queue file outlives the process that filled it — once more
 at execution time, where an entry queued by an older listener is dropped.
 
+**A serving is journaled** (`explicit_reply` p1 step 1, `agag.serving`).
+Beside the queue the file holds one record per serving with the stages a
+reply goes through — received, acked, executed, prepared, delivered — and
+the executor binds it for the handler's thread, so `serve_topic` writes the
+ack's id, the input boundary it processed, the reply text *before* the send
+and the delivered id after it is confirmed. Three consequences:
+
+- **"Who spoke last" is no longer the whole evidence.** An ack of ours is
+  transport, not an answer: `owed` skips this bot's own acks when it asks
+  who really spoke last, so a crash right after the ack leaves the request
+  owed instead of looking answered. A restart marks the records it finds
+  between `received` and `prepared` as `interrupted` — their evidence is
+  handed to the next serving of the same conversation as `context.previous`.
+- **A reply that was prepared is delivered, not re-generated.** A send
+  whose answer was lost, a listener that died between the send and the
+  confirmation, a `DeliveryError` out of `serve_topic` — all leave a
+  `prepared` record, and the next pass redelivers *that text* after reading
+  the conversation back for it (`agag.delivery`). The model does not run
+  again and no external action is repeated.
+- **A transport failure is retried with bounded backoff and never
+  disappears.** An entry whose serving raised is scheduled again
+  (`RETRY_SECONDS`, doubling, up to `MAX_ATTEMPTS`); exhausted, it is kept
+  in the queue as `failed` with its reason — visible in `entries("failed")`
+  and the log — and re-armed by the next post in that conversation.
+
 The DM route is untouched: `agag.zulip.serve` on its own thread and its own
 client, as before, because a direct message is account-specific and the
 mirror is public conversations only.
@@ -60,11 +85,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from . import serving as serving_record
+from .delivery import DeliveryError
 from .memo import is_memo_channel
 from .mirror import Change, Mirror, Message, bare_topic
-from .selfnote import SELFNOTE_MARKER, is_selfnote, is_speech, note as selfnote_line, parse_served
+from .selfnote import (
+    SELFNOTE_MARKER, Conversation, is_selfnote, is_speech, note as selfnote_line, parse_served, served_note,
+)
+from .serving import ACKED, DELIVERED, EXECUTED, FAILED, INTERRUPTED, PREPARED, RECEIVED, Serving
 from .status import StatusWriter, default_status_path
-from .zulip import RESOLVED_TOPIC_PREFIX, ZulipClient, TopicFilter, log as default_log, topic_matches
+from .zulip import RESOLVED_TOPIC_PREFIX, ZulipClient, TopicFilter, live_topic_name, log as default_log, topic_matches
 
 #: The two routes an entry can be on. Owners first, always: a topic this bot
 #: owns is never also a mention to answer somewhere else.
@@ -74,15 +104,26 @@ OWNER, MENTION = "owner", "mention"
 IDLE_SECONDS = 30.0
 #: The queue file, beside the mirror's store.
 QUEUE_NAME = "listener.sqlite"
+#: The queue file's layout. Bumped when the tables change: the file is
+#: disposable state and is rebuilt rather than migrated.
+QUEUE_SCHEMA = "2"
+#: How many times one entry is served before it is left `failed`, and the
+#: first delay between attempts (doubling each time, capped).
+MAX_ATTEMPTS = 5
+RETRY_SECONDS = 5.0
+RETRY_CAP_SECONDS = 300.0
 
 __all__ = [
     "IDLE_SECONDS",
+    "MAX_ATTEMPTS",
     "MENTION",
     "OWNER",
     "QUEUE_NAME",
+    "RETRY_SECONDS",
     "Entry",
     "Listener",
     "Queue",
+    "QueueJournal",
     "current_mirror",
     "mentions_bot",
 ]
@@ -119,6 +160,8 @@ class Entry:
     message_id: int
     attempts: int = 0
     again: bool = False
+    next_at: float | None = None
+    failure: str = ""
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -134,8 +177,24 @@ class Queue:
         state TEXT NOT NULL DEFAULT 'pending', revision INTEGER NOT NULL DEFAULT 0,
         message_id INTEGER NOT NULL DEFAULT 0, enqueued_at REAL NOT NULL,
         started_at REAL, attempts INTEGER NOT NULL DEFAULT 0, again INTEGER NOT NULL DEFAULT 0,
+        next_at REAL, failure TEXT NOT NULL DEFAULT '',
         PRIMARY KEY (channel, topic, route)
     );
+    CREATE TABLE IF NOT EXISTS servings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel TEXT NOT NULL, topic TEXT NOT NULL, route TEXT NOT NULL,
+        trigger_id INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'received',
+        attempt INTEGER NOT NULL DEFAULT 1,
+        home_channel TEXT NOT NULL DEFAULT '', home_topic TEXT NOT NULL DEFAULT '',
+        ack_id INTEGER, input_up_to INTEGER, requester_id INTEGER, requester_name TEXT NOT NULL DEFAULT '',
+        reply_channel TEXT NOT NULL DEFAULT '', reply_topic TEXT NOT NULL DEFAULT '', reply_text TEXT,
+        reply_after INTEGER NOT NULL DEFAULT 0, resolve_after INTEGER NOT NULL DEFAULT 0,
+        resolved INTEGER NOT NULL DEFAULT 0, delivered_id INTEGER,
+        reply_marked INTEGER, reply_blocks INTEGER NOT NULL DEFAULT 0, reply_failure TEXT NOT NULL DEFAULT '',
+        run_record TEXT NOT NULL DEFAULT '', failure TEXT NOT NULL DEFAULT '',
+        started_at REAL NOT NULL DEFAULT 0, updated_at REAL NOT NULL DEFAULT 0, extra TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE INDEX IF NOT EXISTS servings_key ON servings (channel, topic, route, id);
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
     """
 
@@ -147,7 +206,14 @@ class Queue:
         self._db.row_factory = sqlite3.Row
         with self._lock:
             self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.executescript("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);")
+            row = self._db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
+            if row is not None and row["value"] != QUEUE_SCHEMA:
+                # Disposable state: an older layout is dropped, and the
+                # startup recovery rebuilds the pending set from the index.
+                self._db.executescript("DROP TABLE IF EXISTS pending; DROP TABLE IF EXISTS servings;")
             self._db.executescript(self.SCHEMA)
+            self._db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)", (QUEUE_SCHEMA,))
 
     def close(self) -> None:
         with self._lock:
@@ -169,7 +235,8 @@ class Queue:
     @staticmethod
     def _entry(row) -> Entry:
         return Entry(row["channel"], row["topic"], row["route"], row["state"], int(row["revision"]),
-                     int(row["message_id"]), int(row["attempts"]), bool(row["again"]))
+                     int(row["message_id"]), int(row["attempts"]), bool(row["again"]),
+                     None if row["next_at"] is None else float(row["next_at"]), str(row["failure"] or ""))
 
     def enqueue(self, channel: str, topic: str, route: str, *, revision: int, message_id: int,
                 at: float | None = None) -> bool:
@@ -184,20 +251,30 @@ class Queue:
                     "INSERT INTO pending (channel, topic, route, state, revision, message_id, enqueued_at)"
                     " VALUES (?, ?, ?, 'pending', ?, ?, ?)", (channel, topic, route, int(revision), int(message_id), at))
                 return True
+            # A failed entry is re-armed by a newer post: its attempts start
+            # over, because the conversation moved on and the failure was
+            # about the serving that did not happen, not about the entry.
+            rearmed = row["state"] == "failed" and int(message_id) > int(row["message_id"])
             self._db.execute(
                 "UPDATE pending SET revision = MAX(revision, ?), message_id = MAX(message_id, ?),"
-                " again = CASE WHEN state = 'running' THEN 1 ELSE again END"
+                " again = CASE WHEN state = 'running' THEN 1 ELSE again END,"
+                " state = CASE WHEN state = 'failed' AND ? THEN 'pending' ELSE state END,"
+                " attempts = CASE WHEN state = 'failed' AND ? THEN 0 ELSE attempts END,"
+                " next_at = CASE WHEN state = 'failed' AND ? THEN NULL ELSE next_at END,"
+                " failure = CASE WHEN state = 'failed' AND ? THEN '' ELSE failure END"
                 " WHERE channel = ? AND topic = ? AND route = ?",
-                (int(revision), int(message_id), channel, topic, route))
-            return row["state"] == "running"
+                (int(revision), int(message_id), rearmed, rearmed, rearmed, rearmed, channel, topic, route))
+            return row["state"] == "running" or rearmed
 
     def take(self, at: float | None = None) -> Entry | None:
-        """The oldest pending entry, owners first, marked running."""
+        """The oldest pending entry whose retry time has come, owners first,
+        marked running."""
         at = time.time() if at is None else at
         with self._lock:
             row = self._db.execute(
-                "SELECT * FROM pending WHERE state = 'pending'"
-                " ORDER BY CASE route WHEN 'owner' THEN 0 ELSE 1 END, enqueued_at, channel, topic LIMIT 1").fetchone()
+                "SELECT * FROM pending WHERE state = 'pending' AND (next_at IS NULL OR next_at <= ?)"
+                " ORDER BY CASE route WHEN 'owner' THEN 0 ELSE 1 END, enqueued_at, channel, topic LIMIT 1",
+                (at,)).fetchone()
             if row is None:
                 return None
             self._db.execute(
@@ -230,8 +307,94 @@ class Queue:
     def requeue(self, entry: Entry) -> None:
         with self._lock:
             self._db.execute(
-                "UPDATE pending SET state = 'pending', again = 0, started_at = NULL"
+                "UPDATE pending SET state = 'pending', again = 0, started_at = NULL, next_at = NULL"
                 " WHERE channel = ? AND topic = ? AND route = ?", entry.key)
+
+    def retry_later(self, entry: Entry, delay: float, reason: str, at: float | None = None) -> None:
+        """Pending again, not before `delay` seconds, with why."""
+        at = time.time() if at is None else at
+        with self._lock:
+            self._db.execute(
+                "UPDATE pending SET state = 'pending', started_at = NULL, next_at = ?, failure = ?"
+                " WHERE channel = ? AND topic = ? AND route = ?", (at + delay, reason[:500], *entry.key))
+
+    def fail(self, entry: Entry, reason: str) -> None:
+        """Out of attempts: kept, visible, and re-armed by the next post."""
+        with self._lock:
+            self._db.execute(
+                "UPDATE pending SET state = 'failed', started_at = NULL, next_at = NULL, failure = ?"
+                " WHERE channel = ? AND topic = ? AND route = ?", (reason[:500], *entry.key))
+
+    # -- servings ------------------------------------------------------------------
+
+    @staticmethod
+    def _serving(row) -> Serving:
+        import json
+
+        return Serving(
+            id=int(row["id"]), channel=row["channel"], topic=row["topic"], route=row["route"],
+            trigger_id=int(row["trigger_id"]), state=row["state"], attempt=int(row["attempt"]),
+            home_channel=row["home_channel"], home_topic=row["home_topic"],
+            ack_id=row["ack_id"], input_up_to=row["input_up_to"],
+            requester_id=row["requester_id"], requester_name=row["requester_name"],
+            reply_channel=row["reply_channel"], reply_topic=row["reply_topic"], reply_text=row["reply_text"],
+            reply_after=int(row["reply_after"]), resolve_after=bool(row["resolve_after"]),
+            resolved=bool(row["resolved"]), delivered_id=row["delivered_id"],
+            reply_marked=None if row["reply_marked"] is None else bool(row["reply_marked"]),
+            reply_blocks=int(row["reply_blocks"]), reply_failure=row["reply_failure"],
+            run_record=row["run_record"], failure=row["failure"],
+            started_at=float(row["started_at"]), updated_at=float(row["updated_at"]),
+            extra=json.loads(row["extra"] or "{}"),
+        )
+
+    def open_serving(self, entry: Entry, at: float | None = None) -> "QueueJournal":
+        """A new `received` record for this entry, and the journal that
+        writes into it."""
+        at = time.time() if at is None else at
+        with self._lock:
+            cursor = self._db.execute(
+                "INSERT INTO servings (channel, topic, route, trigger_id, attempt, started_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (entry.channel, entry.topic, entry.route, int(entry.message_id), int(entry.attempts), at, at))
+            return QueueJournal(self, int(cursor.lastrowid))
+
+    def serving(self, serving_id: int) -> Serving | None:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM servings WHERE id = ?", (int(serving_id),)).fetchone()
+        return None if row is None else self._serving(row)
+
+    def latest_serving(self, key: tuple[str, str, str], *, states: tuple[str, ...] | None = None) -> Serving | None:
+        """The newest record for this entry key, optionally only in `states`."""
+        with self._lock:
+            if states:
+                marks = ",".join("?" for _ in states)
+                row = self._db.execute(
+                    f"SELECT * FROM servings WHERE channel = ? AND topic = ? AND route = ? AND state IN ({marks})"
+                    " ORDER BY id DESC LIMIT 1", (*key, *states)).fetchone()
+            else:
+                row = self._db.execute(
+                    "SELECT * FROM servings WHERE channel = ? AND topic = ? AND route = ?"
+                    " ORDER BY id DESC LIMIT 1", key).fetchone()
+        return None if row is None else self._serving(row)
+
+    def servings(self, state: str | None = None, *, limit: int = 200) -> list[Serving]:
+        with self._lock:
+            if state is None:
+                rows = self._db.execute("SELECT * FROM servings ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            else:
+                rows = self._db.execute("SELECT * FROM servings WHERE state = ? ORDER BY id DESC LIMIT ?",
+                                        (state, limit)).fetchall()
+        return [self._serving(row) for row in rows]
+
+    def update_serving(self, serving_id: int, **fields) -> None:
+        import json
+
+        if "extra" in fields and not isinstance(fields["extra"], str):
+            fields["extra"] = json.dumps(fields["extra"], ensure_ascii=False)
+        fields["updated_at"] = time.time()
+        columns = ", ".join(f"{name} = ?" for name in fields)
+        with self._lock:
+            self._db.execute(f"UPDATE servings SET {columns} WHERE id = ?", (*fields.values(), int(serving_id)))
 
     def entries(self, state: str | None = None) -> list[Entry]:
         with self._lock:
@@ -244,6 +407,75 @@ class Queue:
     def __len__(self) -> int:
         with self._lock:
             return int(self._db.execute("SELECT COUNT(*) AS n FROM pending").fetchone()["n"])
+
+
+class QueueJournal:
+    """`agag.serving.Journal` over one row of the queue's `servings` table.
+    Every call is one UPDATE, committed at once (autocommit), so the record
+    is on disk before the next step of the serving begins."""
+
+    def __init__(self, queue: Queue, serving_id: int):
+        self.queue = queue
+        self.id = int(serving_id)
+
+    @property
+    def trigger_id(self) -> int:
+        record = self.serving()
+        return record.trigger_id if record is not None else 0
+
+    def serving(self) -> Serving | None:
+        return self.queue.serving(self.id)
+
+    def home(self, channel: str, topic: str) -> None:
+        self.queue.update_serving(self.id, home_channel=channel, home_topic=topic)
+
+    def acked(self, message_id: int) -> None:
+        self.queue.update_serving(self.id, state=ACKED, ack_id=int(message_id))
+
+    def executed(self, input_up_to: int, *, requester_id: int | None, requester_name: str) -> None:
+        self.queue.update_serving(self.id, state=EXECUTED, input_up_to=int(input_up_to),
+                                  requester_id=requester_id, requester_name=requester_name or "")
+
+    def record(self, path: str) -> None:
+        self.queue.update_serving(self.id, run_record=str(path))
+
+    def reply_outcome(self, *, marked: bool | None, blocks: int, failure: str) -> None:
+        self.queue.update_serving(self.id, reply_marked=None if marked is None else int(marked),
+                                  reply_blocks=int(blocks), reply_failure=failure or "")
+
+    def prepared(self, channel: str, topic: str, text: str, *, resolve_after: bool, after_id: int) -> None:
+        self.queue.update_serving(self.id, state=PREPARED, reply_channel=channel, reply_topic=topic,
+                                  reply_text=text, resolve_after=int(bool(resolve_after)), reply_after=int(after_id))
+
+    def delivered(self, message_id: int | None) -> None:
+        self.queue.update_serving(self.id, state=DELIVERED, delivered_id=message_id)
+
+    def resolved(self) -> None:
+        self.queue.update_serving(self.id, resolved=1)
+
+    def failed(self, reason: str) -> None:
+        self.queue.update_serving(self.id, state=FAILED, failure=reason[:1000])
+
+    def interrupted(self) -> None:
+        self.queue.update_serving(self.id, state=INTERRUPTED)
+
+    def recheck_failed(self, reason: str) -> None:
+        record = self.serving()
+        extra = dict(record.extra) if record is not None else {}
+        extra["recheck_failed"] = reason
+        self.queue.update_serving(self.id, extra=extra)
+
+    def previous(self) -> Serving | None:
+        """The newest interrupted record of the same conversation before
+        this one — the evidence the run may need to reconcile."""
+        record = self.serving()
+        if record is None:
+            return None
+        with self.queue._lock:
+            row = self.queue._db.execute(
+                "SELECT * FROM servings WHERE channel = ? AND topic = ? AND route = ? AND state = ? AND id < ?"
+                " ORDER BY id DESC LIMIT 1", (*record.key, INTERRUPTED, self.id)).fetchone()
+        return None if row is None else Queue._serving(row)
 
 
 class Listener:
@@ -263,6 +495,9 @@ class Listener:
         log=default_log,
         status: StatusWriter | None = None,
         idle_seconds: float = IDLE_SECONDS,
+        max_attempts: int = MAX_ATTEMPTS,
+        retry_seconds: float = RETRY_SECONDS,
+        delivery: dict | None = None,
     ):
         self.mirror = mirror
         self.client = client
@@ -274,6 +509,10 @@ class Listener:
         self.log = log
         self.status = status if status is not None else StatusWriter(default_status_path(), log=log)
         self.idle_seconds = float(idle_seconds)
+        self.max_attempts = int(max_attempts)
+        self.retry_seconds = float(retry_seconds)
+        #: Keyword overrides for `agag.delivery.deliver` on redelivery.
+        self.delivery = dict(delivery or {})
         self.queue = Queue(queue_path or (mirror.store.path.parent / QUEUE_NAME))
         self.self_id: int | None = None
         self.bot_name = ""
@@ -305,9 +544,16 @@ class Listener:
         return found[0] if found else None
 
     def _last_real(self, channel: str, live_name: str) -> Message | None:
+        """Who really spoke last: not a selfnote, not a system notice — and
+        not this bot's own ack either. The ack is transport: a conversation
+        whose newest line is our ack is one we have *not* answered, whatever
+        a last-poster check says (a crash after the ack used to hide it)."""
         for message in reversed(self.mirror.messages(channel, live_name, across_resolve=False, limit=60)):
-            if is_speech(message.as_zulip()):
-                return message
+            if not is_speech(message.as_zulip()):
+                continue
+            if message.sender_id == self.self_id and self.is_ack(message.content.strip()):
+                continue
+            return message
         return None
 
     def served_marks(self) -> dict[tuple[str, str], int]:
@@ -335,6 +581,18 @@ class Listener:
         index = self._live(entry.channel, entry.topic)
         if index is None:
             return None
+        if entry.route == OWNER:
+            record = self.queue.latest_serving(entry.key, states=(DELIVERED,))
+            if record is not None and record.input_up_to is not None:
+                # The one completion rule, from the record: speech by
+                # somebody else past the input boundary the last delivered
+                # serving processed. Neither our ack nor our own later post
+                # is evidence that *that* input was answered.
+                from .topics import unprocessed_input
+
+                history = [m.as_zulip() for m in self.mirror.messages(entry.channel, index.live_name,
+                                                                       across_resolve=False)]
+                return index.live_name if unprocessed_input(history, self.self_id, record.input_up_to) else None
         last = self._last_real(entry.channel, index.live_name)
         if last is None:
             # A listed topic holds messages; if none is speech, nobody spoke.
@@ -419,6 +677,8 @@ class Listener:
                 continue
             key = (index.channel, index.name)
             last = index.last_real
+            if last is not None and last.sender_id == self.self_id and self.is_ack(last.content.strip()):
+                last = self._last_real(index.channel, index.live_name)  # our ack answers nothing
             if last is None or last.sender_id == self.self_id:
                 continue
             if topic_matches(index.channel, index.live_name, self.topic_filter):
@@ -445,24 +705,24 @@ class Listener:
         return added
 
     def _resume_running(self) -> None:
-        """Entries a crash left `running`: judged by what the conversation
-        shows. A reply of ours that is not the ack means the run finished;
-        anything else is owed again."""
+        """Entries a crash left `running`: every one is queued again and
+        judged by the executor's one rule — what the conversation and the
+        serving record show *now*. A record between `received` and
+        `prepared` is marked `interrupted` so its evidence reaches the next
+        serving; a `prepared` one is redelivered; a `delivered` one leaves
+        nothing owed unless input arrived after it."""
         for entry in self.queue.entries("running"):
             if is_memo_channel(entry.channel):
                 self.log(f"{entry.route} {entry.channel!r}/{entry.topic!r} is a memo; dropped")
                 self.queue.drop(entry)
                 continue
-            index = self._live(entry.channel, entry.topic)
-            history = self.mirror.messages(entry.channel, index.live_name, across_resolve=False) if index else []
-            ours = [m for m in history if m.sender_id == self.self_id and is_speech(m.as_zulip())]
-            if index is None or (ours and not self.is_ack(ours[-1].content.strip())
-                                 and history and history[-1].sender_id == self.self_id):
-                self.log(f"{entry.route} {entry.channel!r}/{entry.topic!r} was served before the restart; dropped")
-                self.queue.drop(entry)
-            else:
-                self.log(f"{entry.route} {entry.channel!r}/{entry.topic!r} was running at the restart; queued again")
-                self.queue.requeue(entry)
+            record = self.queue.latest_serving(entry.key)
+            if record is not None and record.state in (RECEIVED, ACKED, EXECUTED):
+                QueueJournal(self.queue, record.id).interrupted()
+                self.log(f"{entry.route} {entry.channel!r}/{entry.topic!r} was interrupted at {record.state!r}; "
+                         f"its evidence is kept for the next serving")
+            self.log(f"{entry.route} {entry.channel!r}/{entry.topic!r} was running at the restart; queued again")
+            self.queue.requeue(entry)
 
     # -- execution -----------------------------------------------------------------------------
 
@@ -474,21 +734,101 @@ class Listener:
                     self._wake.wait(1.0)
                 continue
             try:
-                live = self.owed(entry)
-                if live is None:
-                    self.log(f"{entry.route} {entry.channel!r}/{entry.topic!r}: nothing owed now; skipped")
-                else:
-                    self.log(f"{'serving' if entry.route == OWNER else 'serving mention in'} {entry.channel!r}/{live!r}")
-                    serve = self.handler if entry.route == OWNER else self.on_mention
-                    try:
-                        serve(entry.channel, live)  # type: ignore[misc]
-                        self.served += 1
-                    except Exception as error:  # noqa: BLE001 - one bad topic must not end the loop
-                        self.log(f"handler failed on {entry.channel!r}/{live!r}: {error!r}")
-            finally:
-                if self.queue.finish(entry):
-                    self.log(f"{entry.route} {entry.channel!r}/{entry.topic!r}: an event arrived during the "
-                             f"serving; looking again")
+                self._execute_one(entry)
+            except Exception as error:  # noqa: BLE001 - one bad topic must not end the loop
+                self._retry(entry, error)
+
+    def _execute_one(self, entry: Entry) -> None:
+        # A reply prepared and not confirmed comes first, whatever the
+        # conversation looks like: it is the answer to input already
+        # processed, and it is delivered — not regenerated — before anything
+        # newer is looked at.
+        record = self.queue.latest_serving(entry.key, states=(PREPARED, FAILED))
+        if record is not None and record.reply_text and record.delivered_id is None \
+                and not record.extra.get("terminal"):
+            from .topics import resume_prepared
+
+            journal = QueueJournal(self.queue, record.id)
+            resume_prepared(self.client, record, journal, log=self.log, **self.delivery)
+            self._after_delivery(entry, journal.serving())
+            self.queue.requeue(entry)  # then judge what is owed now, once more
+            return
+        record = self.queue.latest_serving(entry.key, states=(DELIVERED,))
+        if record is not None and entry.route == MENTION and not record.extra.get("served_marked"):
+            # Delivered, and the restart came before the served mark: mark
+            # it now, then judge again — the mark is what keeps the mention
+            # from being served twice.
+            self._after_delivery(entry, record)
+            self.queue.requeue(entry)
+            return
+        live = self.owed(entry)
+        if live is None:
+            self.log(f"{entry.route} {entry.channel!r}/{entry.topic!r}: nothing owed now; skipped")
+            self._finish(entry)
+            return
+        self.log(f"{'serving' if entry.route == OWNER else 'serving mention in'} {entry.channel!r}/{live!r}")
+        serve = self.handler if entry.route == OWNER else self.on_mention
+        journal = self.queue.open_serving(entry)
+        with serving_record.bound(journal):
+            serve(entry.channel, live)  # type: ignore[misc]
+        self.served += 1
+        record = journal.serving()
+        if record is not None and record.state == DELIVERED:
+            self._after_delivery(entry, record)
+        elif record is not None and record.state == RECEIVED:
+            # The handler did not go through `serve_topic` (a participant
+            # that posts on its own): the record says only that it ran.
+            journal.queue.update_serving(journal.id, state=EXECUTED)
+        self._finish(entry)
+
+    def _finish(self, entry: Entry) -> None:
+        if self.queue.finish(entry):
+            self.log(f"{entry.route} {entry.channel!r}/{entry.topic!r}: an event arrived during the "
+                     f"serving; looking again")
+
+    def _retry(self, entry: Entry, error: BaseException) -> None:
+        """A serving that raised out of the handler: the transport, not the
+        work, failed (the handler's own failures are posted as replies).
+        Bounded backoff; exhausted, the entry stays visible as `failed`."""
+        terminal = isinstance(error, DeliveryError) and error.terminal
+        reason = f"{type(error).__name__}: {error}"
+        record = self.queue.latest_serving(entry.key)
+        if terminal or entry.attempts >= self.max_attempts:
+            self.queue.fail(entry, reason)
+            if record is not None and record.state != DELIVERED:
+                QueueJournal(self.queue, record.id).failed(reason)
+                if terminal:
+                    self.queue.update_serving(record.id, extra={**record.extra, "terminal": True})
+            self.status.record_error(f"{entry.channel}/{entry.topic}: {reason}")
+            self.log(f"{entry.route} {entry.channel!r}/{entry.topic!r} FAILED after {entry.attempts} attempt(s)"
+                     f"{' (terminal)' if terminal else ''}: {reason}; kept in the queue, re-armed by the next post")
+            return
+        delay = min(self.retry_seconds * (2 ** max(0, entry.attempts - 1)), RETRY_CAP_SECONDS)
+        self.queue.retry_later(entry, delay, reason)
+        self.log(f"{entry.route} {entry.channel!r}/{entry.topic!r} failed (attempt {entry.attempts}/"
+                 f"{self.max_attempts}): {reason}; retrying in {delay:.0f}s")
+
+    def _after_delivery(self, entry: Entry, record: Serving | None) -> None:
+        """What follows a confirmed delivery on the mention route: the served
+        mark, tied to the mention that was actually processed (`trigger_id`)
+        — never to whatever is newest in the remote topic, so a mention that
+        arrived during the run stays owed."""
+        if record is None or entry.route != MENTION or record.extra.get("served_marked"):
+            return
+        if self.self_id is None or not record.trigger_id:
+            return
+        remote = Conversation(entry.channel, entry.topic)
+        home = Conversation(record.home_channel, record.home_topic) if record.home_channel else remote
+        try:
+            live = live_topic_name(self.client, home.channel, home.topic)
+            self.client.send_to_channel(home.channel, live, served_note(remote, record.trigger_id))
+        except Exception as error:  # noqa: BLE001 - the mark is retried with the entry
+            raise DeliveryError(f"could not write the served mark for {remote} in {home}: {error!r}",
+                                terminal=False, last=error) from error
+        extra = dict(record.extra)
+        extra["served_marked"] = record.trigger_id
+        self.queue.update_serving(record.id, extra=extra)
+        self.log(f"marked {remote} served up to {record.trigger_id} in {home}")
 
     # -- lifecycle -----------------------------------------------------------------------------
 

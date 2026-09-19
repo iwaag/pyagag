@@ -56,12 +56,11 @@ def serve(client, handler, **kwargs):
 def test_the_ack_precedes_every_step():
     calls = []
     serve(Client(calls), lambda ctx: topics.TopicResult(["done"]))
-    # chatlog, then the handoff lookup, then the reply, then the re-check.
-    assert [call[0] for call in calls] == [
-        "post", "history", "history", "post", "history",
-    ]
+    # chatlog, then the reply, then the re-check. No lookup at send time:
+    # the requester is read from the history the serving processed.
+    assert [call[0] for call in calls] == ["post", "history", "post", "history"]
     assert calls[0][2] == "ack"
-    assert calls[3][2] == "@**Developer**\n\ndone"
+    assert calls[2][2] == "@**Developer**\n\ndone"
 
 
 def test_a_failure_is_reported_with_the_step_the_handler_had_named():
@@ -113,7 +112,9 @@ def test_no_sections_means_no_final_post():
 def test_resolve_after_renames_the_topic_after_the_final_reply():
     calls = []
     serve(Client(calls), lambda ctx: topics.TopicResult(["cancelled"], resolve_after=True))
-    assert [call[0] for call in calls][-3:] == ["post", "history", "resolve"]
+    # the reply, the check for input that arrived during the run, the tail
+    # read the resolve needs, the resolve itself
+    assert [call[0] for call in calls][-4:] == ["post", "history", "history", "resolve"]
     assert calls[-1] == ("resolve", 1, TOPIC)
 
 
@@ -124,10 +125,9 @@ def test_a_human_post_during_the_run_serves_the_topic_again():
     class Scripted(Client):
         def __init__(self):
             super().__init__(calls)
-            # chatlog, handoff lookup, re-check — twice.
-            self.scripts = [[message()], [message()], [message(), later],
-                            [message(), later], [message(), later],
-                            [message(), later]]
+            # chatlog, re-check — twice.
+            self.scripts = [[message()], [message(), later],
+                            [message(), later], [message(), later]]
 
         def topic_history(self, channel, topic, num_before):
             calls.append(("history", num_before))
@@ -144,8 +144,8 @@ def test_our_own_post_during_the_run_does_not_re_arm_the_topic():
     ours = message(sender_id=BOT_ID, name="Autolab", content="an answer", id=9)
     client = Client(calls, history=[message(), ours])
     serve(client, lambda ctx: topics.TopicResult(["ok"]))
-    # chatlog, handoff lookup, re-check: one pass only.
-    assert [call[0] for call in calls].count("history") == 3
+    # chatlog, re-check: one pass only.
+    assert [call[0] for call in calls].count("history") == 2
 
 
 # --- the empty topic -------------------------------------------------------
@@ -800,7 +800,7 @@ def test_a_command_arriving_during_a_run_is_handled_on_the_next_pass():
         def topic_history(self, channel, topic, num_before):
             self.reads += 1
             self.calls.append(("history", num_before))
-            if self.reads >= 3:
+            if self.reads >= 2:
                 # Our own reply is in the topic by then, so the command is
                 # the only thing left awaiting an answer.
                 return self.history + [

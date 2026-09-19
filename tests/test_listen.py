@@ -251,3 +251,37 @@ def test_a_mention_matches_the_name_whatever_its_case():
 
     assert mentions_bot("@**cagent** hi", "Cagent") and mentions_bot("@**Cagent** hi", "cagent")
     assert not mentions_bot("@**cagent2** hi", "Cagent")
+
+
+
+def test_a_queue_file_from_before_the_schema_key_is_rebuilt_not_crashed(tmp_path):
+    """The first layout wrote no `schema` row. Deployed on 2026-09-20, the
+    check that only compared an existing row let the old `pending` table
+    through, and every listener's executor died on `no such column:
+    next_at`. An existing table without the key is the old layout."""
+    import sqlite3
+
+    path = tmp_path / "q.sqlite"
+    old = sqlite3.connect(str(path))
+    old.executescript("""
+    CREATE TABLE pending (
+        channel TEXT NOT NULL, topic TEXT NOT NULL, route TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending', revision INTEGER NOT NULL DEFAULT 0,
+        message_id INTEGER NOT NULL DEFAULT 0, enqueued_at REAL NOT NULL,
+        started_at REAL, attempts INTEGER NOT NULL DEFAULT 0, again INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (channel, topic, route)
+    );
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+    INSERT INTO pending (channel, topic, route, enqueued_at) VALUES ('c', 't', 'owner', 1);
+    INSERT INTO meta (key, value) VALUES ('revision', '7');
+    """)
+    old.commit()
+    old.close()
+    queue = Queue(path)
+    assert queue.take() is None and len(queue) == 0, "the old rows are gone with the old layout"
+    assert queue.enqueue("c", "t", OWNER, revision=1, message_id=1) and queue.take() is not None
+    queue.close()
+    # And a file already on the new layout keeps its rows.
+    again = Queue(path)
+    assert len(again) == 1
+    again.close()

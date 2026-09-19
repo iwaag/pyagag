@@ -208,9 +208,12 @@ class Queue:
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.executescript("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);")
             row = self._db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
-            if row is not None and row["value"] != QUEUE_SCHEMA:
-                # Disposable state: an older layout is dropped, and the
-                # startup recovery rebuilds the pending set from the index.
+            existing = self._db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pending'").fetchone()
+            if existing is not None and (row is None or row["value"] != QUEUE_SCHEMA):
+                # Disposable state: an older layout — the first one wrote no
+                # schema key at all — is dropped, and the startup recovery
+                # rebuilds the pending set from the index.
                 self._db.executescript("DROP TABLE IF EXISTS pending; DROP TABLE IF EXISTS servings;")
             self._db.executescript(self.SCHEMA)
             self._db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema', ?)", (QUEUE_SCHEMA,))

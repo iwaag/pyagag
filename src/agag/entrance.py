@@ -23,6 +23,7 @@ tidying on its own would be deciding somebody else's conversation is over.
 from __future__ import annotations
 
 from .agent import SWEEP_ACK, AgentSpec, exec_options_for, is_ack, run_role
+from .reply import repair_with
 from .topics import (
     TopicResult,
     chatlog_path,
@@ -59,7 +60,7 @@ You are this instance's entrance. Answer what the chatlog asks, reading what you
 {request_line}
 If you are asked to close out finished work: read those topics to check they really are finished, then `agentchat resolve <your own channel> <topic>` for each. Only when asked.
 
-Your reply is the last thing you say in this run, and it is posted into this topic for you. Never `agentchat send` into this channel — doing that posts your answer twice.
+Your reply is posted into this topic for you. Never `agentchat send` into this channel — doing that posts your answer twice.
 """
 
 __all__ = [
@@ -126,7 +127,7 @@ def entrance_prompt(spec: AgentSpec, bot_name: str, conversation: str = "") -> s
     lines = [chatlog_placement(bot_name), f"Your own channel is {spec.instance_name()!r}."]
     if conversation:
         lines += ["", conversation]
-    return prompt_with_guide(lines, entrance_guide(spec))
+    return prompt_with_guide(lines, entrance_guide(spec), reply=True)
 
 
 def serve_entrance(spec: AgentSpec, context) -> TopicResult:
@@ -143,13 +144,14 @@ def serve_entrance(spec: AgentSpec, context) -> TopicResult:
     chatlog_path(workspace).write_text(chatlog, encoding="utf-8")
 
     context.step = ROLE
+    record = next_record_path(spec.records_root / "entrance_front")
     output, _, exit_code = run_role(
         spec,
         ROLE,
         entrance_prompt(spec, context.bot_name, conversation_context(chatlog)),
         cwd=workspace,
         timeout=ENTRANCE_TIMEOUT_SECONDS,
-        record=next_record_path(spec.records_root / "entrance_front"),
+        record=record,
         # What the run actually looked at. Without it, an answer that
         # skipped a topic is indistinguishable from one that found nothing
         # in it — which is how `agent_standardize` p10 lost a whole project
@@ -164,7 +166,19 @@ def serve_entrance(spec: AgentSpec, context) -> TopicResult:
     )
     if exit_code != 0:
         raise EntranceError(f"front run exited {exit_code}: {output.strip()[:500]}")
-    return TopicResult([output.strip() or NO_ANSWER])
+    journal = getattr(context, "journal", None)
+    if journal is not None:
+        journal.record(str(record))
+
+    def repair(prompt: str) -> str:
+        again, _, code = run_role(spec, ROLE, prompt, cwd=workspace, timeout=ENTRANCE_TIMEOUT_SECONDS,
+                                  record=next_record_path(spec.records_root / "entrance_front"),
+                                  home=(context.channel, context.topic), selection=context.selection)
+        return again if code == 0 else ""
+
+    # The reply contract (`agag.reply`): only the marked reply is posted; an
+    # unmarked output is repaired once, then reported as no reply.
+    return TopicResult(output=output, repair=repair_with(repair, output))
 
 
 def handle_entrance(spec: AgentSpec, client: ZulipClient, channel: str, topic: str) -> None:

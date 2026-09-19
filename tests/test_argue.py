@@ -223,7 +223,7 @@ def test_participate_answers_each_outstanding_invitation_without_an_ack(tmp_path
 
     def run(prompt, cwd, invitation):
         prompts.append((prompt, cwd, invitation))
-        return f"answer for {invitation.selector}"
+        return f"thinking first\n\n```ag-reply\nanswer for {invitation.selector}\n```"
 
     posted = argue.participate(
         client, "argue", "argue-x", spec=spec_in(tmp_path), role_context="I am a sage.",
@@ -396,7 +396,7 @@ def test_a_role_context_may_depend_on_the_invitation(tmp_path):
     argue.participate(
         client, "argue", "argue-x", spec=spec_in(tmp_path),
         role_context=lambda invitation: f"CONTEXT FOR {invitation.selector}",
-        run=lambda prompt, cwd, invitation: prompts.append(prompt) or "ok", log=lambda line: None,
+        run=lambda prompt, cwd, invitation: prompts.append(prompt) or "```ag-reply\nok\n```", log=lambda line: None,
     )
     assert "CONTEXT FOR sage:a" in prompts[0] and "CONTEXT FOR sage:b" in prompts[1]
 
@@ -406,7 +406,7 @@ def test_two_invitations_to_one_speaker_are_one_reply(tmp_path):
                      message(3, FRONT, "Front", "still waiting on @**Mirror Bot**")])
     runs = []
     posted = argue.participate(client, "argue", "argue-x", spec=spec_in(tmp_path), role_context="",
-                               run=lambda prompt, cwd, invitation: runs.append(invitation.message_id) or "here",
+                               run=lambda prompt, cwd, invitation: runs.append(invitation.message_id) or "```ag-reply\nhere\n```",
                                log=lambda line: None)
     assert runs == [3] and len(posted) == 1 and client.reactions == [1, 3]
     assert client.sent[-1][2] == "[selfnote][served] argue/argue-x 3"

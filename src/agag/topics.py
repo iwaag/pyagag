@@ -31,10 +31,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from collections.abc import Callable
+
 from . import execopt, serving as serving_record
 from .delivery import DeliveryError, deliver, redeliver
 from .execopt import ExecOptions, Selection
 from .memo import is_memo_channel
+from .reply import REPLY_GUIDE, record_reply_outcome, resolve_reply
 from .selfnote import is_selfnote, is_speech
 from .serving import NullJournal, Serving
 from .zulip import (
@@ -297,9 +300,17 @@ def guide(root: Path, *parts: str) -> str:
     return text
 
 
-def prompt_with_guide(lines, guide_text: str) -> str:
-    """Placement lines, then the guide. The whole prompt composition rule."""
-    return "\n".join(lines) + f"\n\n{guide_text}"
+def prompt_with_guide(lines, guide_text: str, *, reply: bool = False) -> str:
+    """Placement lines, then the guide. The whole prompt composition rule.
+
+    `reply=True` appends the reply mark's description (`agag.reply
+    .REPLY_GUIDE`) after the guide — once, for every conversational role,
+    so no guide has to say "no notes to yourself". A structured-output role
+    (Front's `present`, a generator that answers with files) leaves it off
+    and keeps its own output contract.
+    """
+    prompt = "\n".join(lines) + f"\n\n{guide_text}"
+    return f"{prompt}\n\n{REPLY_GUIDE}" if reply else prompt
 
 
 def chatlog_placement(bot_name: str) -> str:
@@ -632,10 +643,30 @@ class TopicContext:
 
 @dataclass
 class TopicResult:
-    """What the handler produced: what to post, and whether to resolve."""
+    """What the handler produced, in three kinds, and whether to resolve.
+
+    - `output` is the **model's output** — what the run printed, with any
+      machine block the handler parses already removed. It is subject to
+      the reply contract (`agag.reply`): only its `ag-reply` blocks are
+      posted; the rest is the run's own. Missing, empty or unclosed marks
+      are repaired once through `repair(reason) -> output` when the
+      handler gives one, else answered with a visible failure line.
+    - `sections` are **literal text** the handler wants posted as written:
+      a deterministic status line, a canonical machine block echoed back
+      as the record. Never model output.
+    - `notices` are **system-generated notes** appended after the reply:
+      the desire recorded, a completion checked, a block that could not be
+      read. Kept apart from the reply so the mark cannot swallow them.
+
+    The post is `reply`, then `sections`, then `notices`, joined by blank
+    lines; an empty whole means no final post.
+    """
 
     sections: list[str] = field(default_factory=list)
     resolve_after: bool = False
+    output: str | None = None
+    notices: list[str] = field(default_factory=list)
+    repair: Callable[[str], str] | None = None
 
 
 # --- the completion rule ------------------------------------------------------
@@ -836,7 +867,10 @@ def serve_topic(
 
         ack_id = 0
         if replies_here:
-            ack_id = int(client.send_to_channel(channel, topic, ack_text) or 0)
+            # Through `deliver` like the reply: an ack whose answer was lost
+            # is found on read-back rather than posted twice.
+            ack_id = int(deliver(client, channel, topic, ack_text, self_id=self_id,
+                                 after_id=0, log=log, **delivery) or 0)
             journal.acked(ack_id)
 
         context = TopicContext(
@@ -898,7 +932,19 @@ def serve_topic(
                          requester_id=(int(requester["sender_id"]) if requester and requester.get("sender_id") is not None else None),
                          requester_name=str((requester or {}).get("sender_full_name") or ""))
 
-        body = "\n\n".join(section for section in result.sections if section)
+        parts: list[str] = []
+        if result.output is not None:
+            text, split, repaired = resolve_reply(result.output, result.repair, log=log)
+            journal.reply_outcome(marked=split.marked, blocks=split.blocks, failure=split.error or "")
+            if repaired:
+                log(f"reply for {reply_channel!r}/{reply_topic!r} came from the repair run"
+                    f"{'' if split.ok else ' and still had no usable mark'}")
+            if not split.ok:
+                log(f"no usable reply for {reply_channel!r}/{reply_topic!r}: {split.error}; posting the failure")
+            parts.append(text)
+        parts += [section for section in result.sections if section]
+        parts += [notice for notice in result.notices if notice]
+        body = "\n\n".join(part for part in parts if part)
         after_id = max(ack_id, context.processed_up_to)
         if body:
             mention = mention_of(requester) if handoff else ""
@@ -913,6 +959,7 @@ def serve_topic(
             journal.prepared(reply_channel, reply_topic, "", resolve_after=bool(result.resolve_after),
                              after_id=after_id)
             journal.delivered(None)
+        _annotate_record(journal)
 
         if result.resolve_after:
             if completed and context.replies_here and _input_arrived(client, context, self_id, history_messages, log):
@@ -935,6 +982,20 @@ def serve_topic(
         if not arrived:
             return journal.serving()
         log(f"reprocessing {channel!r}/{topic!r}: human posts arrived during the run")
+
+
+def _annotate_record(journal) -> None:
+    """The reply and delivery outcome beside the run identity, in the run
+    record the handler filed (`context.journal.record(path)`)."""
+    record = journal.serving()
+    if record is None or not record.run_record:
+        return
+    record_reply_outcome(
+        record.run_record, marked=record.reply_marked, blocks=record.reply_blocks,
+        failure=record.reply_failure or None, delivered_id=record.delivered_id,
+        posted_to=f"{record.reply_channel}/{record.reply_topic}" if record.reply_channel else None,
+        serving_id=record.id or None,
+    )
 
 
 def _input_arrived(client, context, self_id, history_messages, log) -> bool | None:

@@ -169,7 +169,10 @@ def test_serve_entrance_writes_the_chatlog_and_posts_the_answer(tmp_path, monkey
 
     monkeypatch.setattr(entrance, "run_role", run_role)
     result = entrance.serve_entrance(s, context())
-    assert result.sections == ["the answer"]
+    # The model's output goes under the reply contract (`agag.reply`): only
+    # its marked text is posted, and an unmarked one is repaired once.
+    assert result.output == "the answer" and result.sections == [] and result.repair is not None
+    assert "How your reply is posted" in seen["prompt"]
     assert seen["role"] == "front"
     assert seen["home"] == ("agtest-host1", "hello")
     assert seen["stream"] is True

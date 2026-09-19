@@ -51,6 +51,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
+from .reply import REPLY_GUIDE, repair_with, resolve_reply
 from .selfnote import Conversation, is_selfnote, is_speech, note, parse_conversation, parse_note
 from .topics import (
     chatlog_path,
@@ -395,8 +396,8 @@ def participant_guide() -> str:
         "the conversation in plain words; do not name any agent with an `@**…**` "
         "mention — not the facilitator who asked you either — unless you actually "
         "need that agent's contribution, because a mention here is a request that "
-        "costs a run, and the facilitator is served by your reply anyway. The reply "
-        "is the closing message of this run — do not post it yourself."
+        "costs a run, and the facilitator is served by your reply anyway. Your reply "
+        "is posted for you; do not post it yourself."
     )
 
 
@@ -425,6 +426,9 @@ def participant_prompt(
     context = (role_context or "").strip()
     if context:
         lines += ["", "About you, in this conversation:", "", context]
+    # The reply mark, described once (`agag.reply`): a participant's
+    # analysis-before-the-answer is its own; only the mark is posted.
+    lines += ["", REPLY_GUIDE]
     return "\n".join(lines)
 
 
@@ -536,7 +540,19 @@ def participate(
                 )
                 if exit_code != 0:
                     raise RuntimeError(f"{role} run exited {exit_code}: {output.strip()[:500]}")
-            body = output.strip() or NO_ANSWER
+            # The reply contract: only the marked reply is said; an unmarked
+            # output is repaired once, then reported as no reply.
+            def repair(prompt: str, _workspace=workspace, _invitation=invitation) -> str:
+                if run is not None:
+                    return run(prompt, _workspace, _invitation)
+                again, _, code = run_role(spec, role, prompt, cwd=_workspace, timeout=timeout,
+                                          record=next_record_path(spec.records_root / role),
+                                          extra_meta={k: v for k, v in meta.items() if v is not None})
+                return again if code == 0 else ""
+
+            body, split, _ = resolve_reply(output, repair_with(repair, output), log=log)
+            if not split.ok:
+                log(f"participation in {channel!r}/{topic!r} produced no usable reply: {split.error}")
         except Exception as error:  # noqa: BLE001 - the topic is the error channel
             log(f"participation failed in {channel!r}/{topic!r}: {error!r}")
             body = f"failed while answering: {error}"

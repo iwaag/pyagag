@@ -465,6 +465,16 @@ class QueueJournal:
         extra["recheck_failed"] = reason
         self.queue.update_serving(self.id, extra=extra)
 
+    def last_delivered_for(self, channel: str, topic: str) -> Serving | None:
+        """The newest delivered serving of the conversation `channel/topic`
+        as home, before this one, whatever route brought it — what the
+        continuation view reads its input boundary and last reply from."""
+        with self.queue._lock:
+            row = self.queue._db.execute(
+                "SELECT * FROM servings WHERE home_channel = ? AND home_topic = ? AND state = ? AND id < ?"
+                " ORDER BY id DESC LIMIT 1", (channel, topic, DELIVERED, self.id)).fetchone()
+        return None if row is None else Queue._serving(row)
+
     def previous(self) -> Serving | None:
         """The newest interrupted record of the same conversation before
         this one — the evidence the run may need to reconcile."""

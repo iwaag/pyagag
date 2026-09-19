@@ -31,12 +31,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import re
 from collections.abc import Callable
 
 from . import execopt, serving as serving_record
 from .delivery import DeliveryError, deliver, redeliver
 from .execopt import ExecOptions, Selection
 from .memo import is_memo_channel
+from .continuation import CONTINUATION_GUIDE, continuation_note, split_continuation
 from .reply import REPLY_GUIDE, record_reply_outcome, resolve_reply
 from .selfnote import is_selfnote, is_speech
 from .serving import NullJournal, Serving
@@ -86,6 +88,7 @@ __all__ = [
     "next_record_path",
     "prompt_with_guide",
     "threads_placement",
+    "omitted_from",
     "requester_of",
     "resume_prepared",
     "serve_topic",
@@ -302,7 +305,7 @@ def guide(root: Path, *parts: str) -> str:
     return text
 
 
-def prompt_with_guide(lines, guide_text: str, *, reply: bool = False) -> str:
+def prompt_with_guide(lines, guide_text: str, *, reply: bool = False, continuation: bool = False) -> str:
     """Placement lines, then the guide. The whole prompt composition rule.
 
     `reply=True` appends the reply mark's description (`agag.reply
@@ -312,7 +315,13 @@ def prompt_with_guide(lines, guide_text: str, *, reply: bool = False) -> str:
     and keeps its own output contract.
     """
     prompt = "\n".join(lines) + f"\n\n{guide_text}"
-    return f"{prompt}\n\n{REPLY_GUIDE}" if reply else prompt
+    if reply:
+        prompt = f"{prompt}\n\n{REPLY_GUIDE}"
+    if continuation:
+        # The carry-forward block (`agag.continuation`), for a role whose
+        # conversation outlives one serving and delegates elsewhere.
+        prompt = f"{prompt}\n\n{CONTINUATION_GUIDE}"
+    return prompt
 
 
 def chatlog_placement(bot_name: str) -> str:
@@ -938,8 +947,17 @@ def serve_topic(
                          requester_name=str((requester or {}).get("sender_full_name") or ""))
 
         parts: list[str] = []
+        carried = None
         if result.output is not None:
-            text, split, repaired = resolve_reply(result.output, result.repair, log=log)
+            # The agent's carry-forward (`agag.continuation`) is a machine
+            # block read off the whole output first; it is never posted and
+            # is written as a note into the served conversation after the
+            # reply, so a crash before the reply leaves no note either.
+            output, carried, carry_error = split_continuation(result.output)
+            if carry_error:
+                log(f"continuation block unreadable in {channel!r}/{topic!r}: {carry_error}")
+                result.notices.append(f"(your {'ag-continue'} block was not readable: {carry_error})")
+            text, split, repaired = resolve_reply(output, result.repair, log=log)
             journal.reply_outcome(marked=split.marked, blocks=split.blocks, failure=split.error or "")
             if repaired:
                 log(f"reply for {reply_channel!r}/{reply_topic!r} came from the repair run"
@@ -974,6 +992,12 @@ def serve_topic(
             journal.delivered(None)
         reply_topic = destination.topic
         _annotate_record(journal)
+        if carried is not None and carried.fields:
+            try:
+                client.send_to_channel(channel, _served_name(client, channel, topic, journal),
+                                       continuation_note(carried, context.processed_up_to))
+            except Exception as error:  # noqa: BLE001 - the reply stands; the memory is a courtesy
+                log(f"could not write the continuation note into {channel!r}/{topic!r}: {error!r}")
 
         if result.resolve_after:
             if completed and context.replies_here and _input_arrived(client, context, self_id, history_messages, log):
@@ -996,6 +1020,25 @@ def serve_topic(
         if not arrived:
             return journal.serving()
         log(f"reprocessing {channel!r}/{topic!r}: human posts arrived during the run")
+
+
+_OMITTED = re.compile(r"\[\.\.\. (?P<n>\d+) earlier message")
+
+
+def omitted_from(context_text: str) -> int:
+    """How many posts `conversation_context` left out of the carried text
+    (0 when it carried the whole conversation)."""
+    match = _OMITTED.search(context_text or "")
+    return int(match.group("n")) if match else 0
+
+
+def _served_name(client, channel: str, topic: str, journal) -> str:
+    """The name the served conversation can be written under now: the reply
+    destination when the reply went there, else the name as served."""
+    record = journal.serving()
+    if record is not None and record.reply_channel == channel and record.reply_topic:
+        return record.reply_topic
+    return topic
 
 
 def _destination(client, channel: str, topic: str, anchor: int, journal, log) -> Conversation:

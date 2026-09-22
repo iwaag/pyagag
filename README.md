@@ -116,6 +116,20 @@ watching, which is what a caller wants when the *record* is the point:
 without it `-p` answers with one result document, and `transcript_path`
 captures a cost report rather than a run. `on_event` still implies it.
 
+`agag.refs` is the third console script, `agrefs`: human-authored
+references (stories, images, templates, runnable examples the developer
+publishes in a repository of their own) read by name at a pinned revision —
+`<source>@<revision>[:<path>]`. `AGREFS_HOME` (an instance's `.local/`, handed
+to every run beside `AGENTCHAT_ZULIP_ENV`) holds `refs.toml`, which maps a
+source name to its repository URL, and `refs/`, where `agrefs sync` lays out
+`git archive` of one commit under its full sha; several revisions coexist, so
+a task keeps the revision it adopted. `show` prints text, lists a directory,
+and describes a binary (kind, pixel size, bytes, path) rather than pretending
+to have read it; `path` is what an image-capable reader takes; `changes`
+names the files that differ between two revisions. A revision must be named
+(`latest` fetches and prints what it resolved to), so what a run records is
+a commit, never a moving target.
+
 ### A run is one reply; waiting is just not being your turn
 
 There is no `agentchat wait`. An agent does one piece of work, says something, and its

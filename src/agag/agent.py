@@ -38,7 +38,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from . import selfnote, serving as serving_record
+from . import refs, selfnote, serving as serving_record
 from .agent_config import ResolvedAgent, load_config, resolve_role
 from .execopt import DEFAULT_OPTION, ExecOptions, Option, Selection, run_meta, with_default
 from .execpool import UNKNOWN, OptionPools, diagnose, with_derived_pools
@@ -311,6 +311,9 @@ def chat_environment(
     """
     directory = Path(sys.executable).parent if bin_dir is None else bin_dir
     environment = {AGENTCHAT_ENV_VARIABLE: str(spec.zulip_env)}
+    # `agrefs` (agag.refs): the instance's `.local/` holds `refs.toml` and the
+    # snapshot cache, so a run reads human references by name at a revision.
+    environment[refs.HOME_VARIABLE] = str(spec.local)
     if home is not None:
         environment[selfnote.HOME_VARIABLE] = str(selfnote.Conversation(*home[:2]))
         # The post this serving was started for (`explicit_reply` p1 step

@@ -585,6 +585,8 @@ class TopicContext:
     bot_name: str
     history: list[dict] = field(default_factory=list)
     processed_up_to: int = 0
+    #: A post in this conversation that locates it by id after a rename.
+    anchor: int = 0
     #: Named by the handler as it advances; a failure is reported as
     #: `failed during <step>`, so this is what tells a human where it broke.
     step: str = "reading the topic"
@@ -748,12 +750,24 @@ def resume_prepared(client: ZulipClient, record: Serving, journal, *, log=defaul
     Returns the delivered message id; raises `DeliveryError` when the reply
     still cannot be confirmed, leaving the record prepared."""
     self_id = int(client.whoami()["user_id"])
-    log(f"redelivering the prepared reply of serving {record.id} to {record.reply_channel!r}/{record.reply_topic!r}")
-    message_id = redeliver(client, record.reply_channel, record.reply_topic, record.reply_text or "",
+    channel, topic = record.reply_channel, record.reply_topic
+    anchor = int(record.extra.get("reply_anchor") or 0)
+    if anchor and hasattr(client, "message"):
+        # The name was located when the reply was prepared; the conversation
+        # may have been renamed or ✔'d since (robust_workflow p2 step 2).
+        # Its anchor says where it is now, and a gone one is terminal.
+        found = locate(client, Conversation(channel, topic, anchor))
+        if found is None:
+            raise DeliveryError(f"destination {channel!r}/{topic!r} no longer exists", terminal=True)
+        if found.topic != topic:
+            log(f"destination {channel!r}/{topic!r} moved to {found.topic!r} since the reply was prepared")
+            topic = found.topic
+    log(f"redelivering the prepared reply of serving {record.id} to {channel!r}/{topic!r}")
+    message_id = redeliver(client, channel, topic, record.reply_text or "",
                            self_id=self_id, after_id=record.reply_after, log=log, **delivery)
     journal.delivered(message_id)
     if record.resolve_after and not record.resolved:
-        if _resolve(client, record.reply_channel, record.reply_topic, log):
+        if _resolve(client, channel, topic, log):
             journal.resolved()
     return message_id
 
@@ -923,6 +937,16 @@ def serve_topic(
             context.processed_up_to = max(
                 (int(m.get("id", 0)) for m in context.history), default=0
             )
+            # Home's anchor: the trigger when it is a post here (the owner
+            # route), else the newest post this serving read here (a callback,
+            # whose trigger is in the caller's conversation).
+            held = {int(m.get("id", 0)) for m in context.history}
+            trigger = int(getattr(journal, "trigger_id", 0) or 0)
+            context.anchor = trigger if trigger in held else context.processed_up_to
+            try:
+                journal.home_anchor = context.anchor
+            except AttributeError:  # a caller's own journal without the slot
+                pass
             if exec_options is not None:
                 context.selection = execopt.resolve(
                     context.history, exec_options.bot,
@@ -983,9 +1007,10 @@ def serve_topic(
         # flight is still the conversation the request lives in, and its
         # display name is not (`agag.zulip.locate`). The journal keeps the
         # located name so a redelivery lands in the same place.
-        anchor = journal.trigger_id if replies_here else (
+        anchor = context.anchor if replies_here else (
             max((int(m.get("id", 0)) for m in (context.reply_history or [])), default=0))
         destination = _destination(client, reply_channel, reply_topic, anchor, journal, log)
+        _remember(journal, reply_anchor=int(anchor or 0))
         if body:
             mention = mention_of(requester) if handoff else ""
             text = f"{mention}\n\n{body}" if mention else body
@@ -1075,6 +1100,18 @@ def _destination(client, channel: str, topic: str, anchor: int, journal, log) ->
         log(f"destination {channel!r}/{topic!r} is {state}: replying under {found.topic!r}")
         return found
     return found
+
+
+def _remember(journal, **values) -> None:
+    """Keep small facts about this serving in its record's `extra`."""
+    record = journal.serving() if hasattr(journal, "serving") else None
+    if record is None:
+        return
+    extra = {**record.extra, **values}
+    if hasattr(journal, "queue"):
+        journal.queue.update_serving(journal.id, extra=extra)
+    else:
+        record.extra.update(values)
 
 
 def _annotate_record(journal) -> None:

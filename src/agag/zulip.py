@@ -1336,7 +1336,17 @@ def rootchat_notes(
     not, as p2's manual repair found, still to the conversation that opened
     it by mistake.
     """
-    ordinary: dict[tuple[str, str], Conversation] = {}
+    return [(key, home) for key, home, _ in _rootchat_links(client, num_before, include_resolved=include_resolved)]
+
+
+def _rootchat_links(
+    client: ZulipClient,
+    num_before: int = ROOTCHAT_HISTORY,
+    *,
+    include_resolved: bool = False,
+) -> list[tuple[tuple[str, str], Conversation, int]]:
+    """`rootchat_notes` with the id of the note that decided each row."""
+    ordinary: dict[tuple[str, str], tuple[int, Conversation]] = {}
     moved: dict[tuple[str, str], tuple[int, Conversation]] = {}
     order: list[tuple[str, str]] = []
     for message in list(client.own_rootchat_notes(num_before)) + list(
@@ -1368,16 +1378,17 @@ def rootchat_notes(
                 moved[key] = (message_id, home)
         elif key not in ordinary:
             # The earliest ordinary note anchors; later ones repeat.
-            ordinary[key] = home
+            ordinary[key] = (int(message.get("id") or 0), home)
     return [
-        (key, moved[key][1] if key in moved else ordinary[key])
+        (key, *reversed(moved[key] if key in moved else ordinary[key]))
         for key in order
         if key in moved or key in ordinary
     ]
 
 
 def remotes_for_home(
-    client: ZulipClient, channel: str, topic: str, num_before: int = ROOTCHAT_HISTORY
+    client: ZulipClient, channel: str, topic: str, num_before: int = ROOTCHAT_HISTORY,
+    *, home_messages: list[dict] | None = None,
 ) -> list[Conversation]:
     """Every conversation this one has reached out to, oldest note first.
 
@@ -1388,15 +1399,49 @@ def remotes_for_home(
     """
     home = Conversation(channel, topic)
     found: list[Conversation] = []
-    for (remote_channel, remote_topic), anchored in rootchat_notes(
+    for (remote_channel, remote_topic), anchored, note_id in _rootchat_links(
         client, num_before, include_resolved=True
     ):
-        if anchored != home:
+        if home_messages is None:
+            if anchored != home:
+                continue
+        elif not _names_this_home(client, anchored, note_id, home, home_messages):
             continue
         remote = Conversation(remote_channel, remote_topic)
         if remote not in found:
             found.append(remote)
     return found
+
+
+def _names_this_home(client, anchored: Conversation, note_id: int, home: Conversation,
+                     home_messages: list[dict]) -> bool:
+    """Whether a root note means *this* conversation, judged against the
+    history the serving read (robust_workflow p2 step 2): its anchor is a
+    post here (whatever name the note carries — home was renamed); or it
+    names this conversation and is not contradicted — no anchor from
+    elsewhere in this channel, not older than the conversation now holding
+    the name (a reused name inherits nothing)."""
+    ids = {int(m.get("id") or 0) for m in home_messages}
+    anchor = int(anchored.anchor or 0)
+    if anchor and anchor in ids:
+        return True
+    if (anchored.channel, _bare_topic(anchored.topic)) != (home.channel, _bare_topic(home.topic)):
+        return False
+    complete = len(home_messages) < ROOTCHAT_HISTORY
+    oldest = min(ids) if ids else 0
+    if not complete or not ids:
+        return True
+    if anchor and anchor >= oldest:
+        # An anchor that is not here. A callback serving used to write the
+        # calling post's id (another channel): that one says nothing.
+        where = conversation_of(client, anchor) if hasattr(client, "message") else None
+        if where is not None and where.channel == home.channel:
+            return False
+    return note_id > oldest
+
+
+def _bare_topic(topic: str) -> str:
+    return topic[len(RESOLVED_TOPIC_PREFIX):] if topic.startswith(RESOLVED_TOPIC_PREFIX) else topic
 
 
 def locate(client: ZulipClient, conversation: Conversation) -> Conversation | None:

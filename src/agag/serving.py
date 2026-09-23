@@ -128,6 +128,11 @@ class Journal(Protocol):  # pragma: no cover - structural typing only
     def serving(self) -> Serving | None: ...
     @property
     def trigger_id(self) -> int: ...
+    #: A message **in the served conversation** that locates it by id
+    #: (`robust_workflow` p2 step 2), set by `serve_topic` once it has read
+    #: the history. On the mention route `trigger_id` is the post that named
+    #: this bot in somebody else's topic, so it cannot be home's anchor.
+    home_anchor: int
 
 
 class NullJournal:
@@ -137,6 +142,7 @@ class NullJournal:
 
     def __init__(self, trigger_id: int = 0):
         self._serving = Serving(0, "", "", "", trigger_id)
+        self.home_anchor = 0
 
     @property
     def trigger_id(self) -> int:

@@ -70,6 +70,7 @@ from .selfnote import (
     parse_rootchat,
     parse_rootchat_moved,
     parse_served,
+    replaced_anchor,
 )
 from .zulip import RESOLVED_TOPIC_PREFIX, ZulipError, ZulipRejected, channel_name
 
@@ -130,6 +131,11 @@ class Node:
     state: str
     detail: str = ""
     identity: str = ""
+    #: A message id that is this conversation whatever it is called: its
+    #: identity note, else the root note that opened it for its parent, else
+    #: its oldest post read. The key every consumer of a trace dedupes on
+    #: (robust_workflow p2 step 2) — a name is display only.
+    anchor: int = 0
     owner: str = ""
     note_state: str = ""
     requested_by: list[str] = field(default_factory=list)
@@ -218,48 +224,6 @@ def _sender(message: dict) -> str:
     return str(message.get("sender_full_name") or message.get("sender_id") or "?")
 
 
-def _anchored_children(notes: list[dict]) -> dict[tuple[str, str], list[tuple[str, str, dict]]]:
-    """home (channel, bare topic) → [(channel, live topic, note)] of the topics
-    anchored to it. A deliberate move by the same author replaces its ordinary
-    note for that topic (`effective_rootchat`'s rule, per author)."""
-    per_author: dict[tuple[str, str, int], tuple[Conversation, dict, bool]] = {}
-    for message in notes:
-        if message.get("type") not in (None, "stream"):
-            continue
-        content = message.get("content")
-        moved = parse_rootchat_moved(content)
-        home = moved if moved is not None else parse_rootchat(content)
-        if home is None:
-            continue
-        channel = channel_name(message)
-        topic = str(message.get("subject") or "")
-        if not channel or not topic:
-            continue
-        author = int(message.get("sender_id") or 0)
-        key = (channel, _bare(topic), author)
-        previous = per_author.get(key)
-        # The earliest ordinary note anchors; the newest move replaces it.
-        if previous is None or (
-            moved is not None
-            and (not previous[2] or int(message.get("id") or 0) >= int(previous[1].get("id") or 0))
-        ):
-            per_author[key] = (home, message, moved is not None)
-    children: dict[tuple[str, str], list[tuple[str, str, dict]]] = {}
-    for (channel, _, _), (home, message, _) in per_author.items():
-        children.setdefault(_key(home.channel, home.topic), []).append(
-            (channel, str(message.get("subject") or ""), message)
-        )
-    for rows in children.values():
-        rows.sort(key=lambda row: int(row[2].get("id") or 0))
-    return children
-
-
-def _home_of(note_message: dict) -> tuple[str, str] | None:
-    content = note_message.get("content")
-    home = parse_rootchat_moved(content) or parse_rootchat(content)
-    return _key(home.channel, home.topic) if home is not None else None
-
-
 def _identity(messages: list[dict]) -> tuple[str, int | None]:
     """`(label, owner id)` from the first identity note in the conversation."""
     for message in messages:
@@ -319,20 +283,34 @@ def _owner_by_ack(messages: list[dict]) -> int | None:
     return None
 
 
-def _served_marks(home_messages: list[dict] | None, remote: tuple[str, str]) -> int:
-    """Highest `[served] <remote> <id>` in the requester's home, 0 when none."""
+def _served_marks(home_messages: list[dict] | None, remote: tuple[str, str],
+                  remote_ids: frozenset[int] = frozenset(), complete: bool = False) -> int:
+    """Highest `[served] <remote> <id>` in the requester's home, 0 when none.
+
+    A mark covers this conversation when the post it names **is in it**
+    (robust_workflow p2 step 2): the id is the post the mark was written for,
+    and it moves with every rename, where the name written beside it does
+    not. The name decides only for a post older than the history read — a
+    long conversation whose beginning the read did not reach."""
+    oldest = min(remote_ids) if remote_ids else 0
     best = 0
     for message in home_messages or ():
         parsed = parse_served(message.get("content"))
         if parsed is None:
             continue
         conversation, up_to = parsed
-        if _key(conversation.channel, conversation.topic) == remote:
+        if int(up_to) in remote_ids:
+            covers = True
+        elif not complete and remote_ids and int(up_to) < oldest:
+            covers = _key(conversation.channel, conversation.topic) == remote
+        else:
+            covers = not remote_ids and _key(conversation.channel, conversation.topic) == remote
+        if covers:
             best = max(best, int(up_to))
     return best
 
 
-def _unserved_answer(messages, owner, homes, home_messages, here):
+def _unserved_answer(messages, owner, homes, home_messages, here, here_ids=frozenset(), complete=False):
     """`(answer, requester name, home)` for the owner's newest answer that
     names a requester whose home has not marked it served, or None."""
     if owner is None or not homes:
@@ -347,17 +325,18 @@ def _unserved_answer(messages, owner, homes, home_messages, here):
         names = {_sender(m) for m in messages if m.get("sender_id") == requester_id}
         if not names or not (names & named):
             continue
-        if not _taken_up((home_messages or {}).get(requester_id), requester_id, int(answer.get("id") or 0), here):
+        if not _taken_up((home_messages or {}).get(requester_id), requester_id, int(answer.get("id") or 0), here,
+                         here_ids, complete):
             return answer, ", ".join(sorted(names)), home
     return None
 
 
-def _taken_up(home_messages, requester_id: int, answer_id: int, here) -> bool:
+def _taken_up(home_messages, requester_id: int, answer_id: int, here, here_ids=frozenset(), complete=False) -> bool:
     """Whether the requester dealt with an answer: its home's served mark
     covers it, or the requester has spoken at home since. A served mark is
     written for the post that triggered a serving; an answer that arrived
     within that serving is answered without one."""
-    if _served_marks(home_messages, here) >= answer_id:
+    if _served_marks(home_messages, here, here_ids, complete) >= answer_id:
         return True
     return any(
         m.get("sender_id") == requester_id and is_speech(m) and int(m.get("id") or 0) > answer_id
@@ -398,6 +377,8 @@ def classify(
     now = int(now if now is not None else time.time())
     if messages is None:
         return "unobservable", "could not be read", "", "", [], 0
+    here_ids = frozenset(int(m.get("id") or 0) for m in messages)
+    complete = len(messages) < HISTORY
     identity, owner = _identity(messages)
     if owner is None:
         owner = _owner_by_ack(messages)
@@ -410,7 +391,7 @@ def classify(
         # forge writes `delivered` the moment it posts, and when the asker's
         # listener is down that answer is owed all the same (robust_workflow
         # p1 step 5, trial N2 — missed until this).
-        owed = _unserved_answer(messages, owner, homes, home_messages, here)
+        owed = _unserved_answer(messages, owner, homes, home_messages, here, here_ids, complete)
         if owed is not None:
             answer, requester, home = owed
             return (
@@ -518,8 +499,8 @@ def classify(
         requester_names = {_sender(m) for m in others if m.get("sender_id") == requester_id}
         if not requester_names or not (requester_names & named):
             continue
-        served = _served_marks((home_messages or {}).get(requester_id), here)
-        if _taken_up((home_messages or {}).get(requester_id), requester_id, mid(last_answer), here):
+        served = _served_marks((home_messages or {}).get(requester_id), here, here_ids, complete)
+        if _taken_up((home_messages or {}).get(requester_id), requester_id, mid(last_answer), here, here_ids, complete):
             return (
                 "awaiting_requester",
                 f"{owner_name} answered #{mid(last_answer)}; {', '.join(sorted(requester_names))} has taken it up (served up to {served})",
@@ -536,6 +517,111 @@ def classify(
         f"{owner_name} answered #{mid(last_answer)} {_age(now, int(last_answer.get('timestamp') or 0))} ago",
         identity, owner_name, [mid(last_answer)], last_activity,
     )
+
+
+@dataclass
+class _Link:
+    """One effective root note: the conversation it is in now (`child_*`,
+    from the note's own current topic) was opened on behalf of `home`, as the
+    note names it — with the anchor it carries, when it carries one."""
+
+    note_id: int
+    author: int
+    author_name: str
+    child_channel: str
+    child_topic: str
+    home: Conversation
+    message: dict
+
+
+def _links(notes: list[dict]) -> list[_Link]:
+    """The effective root notes, per author and conversation: the earliest
+    ordinary note anchors, the newest deliberate move replaces it
+    (`effective_rootchat`'s rule, per author)."""
+    per_author: dict[tuple[str, str, int], tuple[Conversation, dict, bool]] = {}
+    for message in notes:
+        if message.get("type") not in (None, "stream"):
+            continue
+        content = message.get("content")
+        moved = parse_rootchat_moved(content)
+        home = moved if moved is not None else parse_rootchat(content)
+        if home is None:
+            continue
+        channel = channel_name(message)
+        topic = str(message.get("subject") or "")
+        if not channel or not topic:
+            continue
+        author = int(message.get("sender_id") or 0)
+        slot = (channel, _bare(topic), author)
+        previous = per_author.get(slot)
+        if previous is None or (
+            moved is not None
+            and (not previous[2] or int(message.get("id") or 0) >= int(previous[1].get("id") or 0))
+        ):
+            per_author[slot] = (home, message, moved is not None)
+    links = [
+        _Link(int(message.get("id") or 0), author, _sender(message), channel, str(message.get("subject") or ""),
+              home, message)
+        for (channel, _, author), (home, message, _) in per_author.items()
+    ]
+    links.sort(key=lambda link: link.note_id)
+    return links
+
+
+def _settle(link: _Link, named: tuple[str, str], messages: list[dict] | None, locate) -> tuple[str, str] | None:
+    """Which conversation a root note means, given the one its name points
+    at now (`named`, read as `messages`).
+
+    robust_workflow p2 step 2. The name was right when the note was
+    written; since then the conversation may have been renamed, ✔'d,
+    retired, or its name taken by another. In order:
+
+    1. **The anchor decides** when the note carries one: a post in the
+       named conversation means it is that one; a post found elsewhere in
+       the same channel means it moved there. An anchor in another channel
+       is not home's (callback servings used to write the calling post's
+       id) and is ignored.
+    2. Without a usable anchor, **a note older than the conversation now
+       holding the name cannot mean it**: that conversation began after the
+       note was written. It means the one that held the name before, which
+       is known only when the holder says so — `[replaces] <id>`, one hop.
+       Otherwise the note is attached nowhere, rather than to a stranger.
+    3. Otherwise the name stands. A read that failed or did not reach the
+       beginning cannot contradict it.
+    """
+    if messages is None:
+        return named
+    ids = {int(m.get("id") or 0) for m in messages}
+    complete = len(messages) < HISTORY
+    oldest = min(ids) if ids else 0
+    anchor = int(link.home.anchor or 0)
+    if anchor:
+        if anchor in ids:
+            return named
+        if complete or anchor >= oldest:
+            where = locate(anchor)
+            if where is not None and where[0] == link.home.channel:
+                return _key(*where)
+    if not complete:
+        return named
+    if not ids:
+        return None
+    if link.note_id > oldest:
+        return named
+    predecessor = replaced_anchor(messages)
+    if predecessor is not None:
+        where = locate(predecessor)
+        if where is not None:
+            return _key(*where)
+    return None
+
+
+def _identity_id(messages: list[dict]) -> int:
+    for message in messages:
+        for tag in IDENTITY_TAGS:
+            if parse_note(message.get("content"), tag) is not None:
+                return int(message.get("id") or 0)
+    return 0
 
 
 def trace(client, message_id: int, *, now: int | None = None, max_depth: int = MAX_DEPTH) -> Trace:
@@ -561,69 +647,143 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
     index_problem = ""
     if notes is None:
         notes, index_problem = [], "the root-note search got no answer; delegations are not listed"
-    children_of = _anchored_children(list(notes) + list(moved or []))
+    links = _links(list(notes) + list(moved or []))
+
+    root_key = _key(channel, topic)
+    #: The name each conversation is read under: where its notes are now.
+    names: dict[tuple[str, str], str] = {root_key: topic}
+    for link in links:
+        names.setdefault(_key(link.child_channel, link.child_topic), link.child_topic)
+    histories: dict[tuple[str, str], list[dict] | None] = {}
+
+    def read(key: tuple[str, str]) -> list[dict] | None:
+        if key not in histories:
+            name = names.get(key, key[1])
+            messages = reader.history(key[0], name)
+            if messages == [] and not name.startswith(RESOLVED_TOPIC_PREFIX):
+                messages = reader.history(key[0], f"{RESOLVED_TOPIC_PREFIX}{name}")
+            elif messages == [] and name != key[1]:
+                messages = reader.history(key[0], key[1])
+            histories[key] = messages
+        return histories[key]
+
+    def locate(anchor: int) -> tuple[str, str] | None:
+        found = reader.message(anchor)
+        if not found:
+            return None
+        where = (channel_name(found), str(found.get("subject") or ""))
+        if not where[0] or not where[1]:
+            return None
+        names.setdefault(_key(*where), where[1])
+        return where
+
+    # Which conversation each note means (`_settle`), decided against the
+    # histories the tree needs anyway: a note is checked when the
+    # conversation its name points at is reached, and a note re-homed there
+    # may make another conversation reachable — so, to a fixed point.
+    home_of: dict[int, tuple[str, str] | None] = {
+        link.note_id: _key(link.home.channel, link.home.topic) for link in links
+    }
+    settled: set[int] = set()
+    for _ in range(MAX_DEPTH + 2):
+        children_of: dict[tuple[str, str], list[_Link]] = {}
+        for link in links:
+            home = home_of[link.note_id]
+            if home is not None:
+                children_of.setdefault(home, []).append(link)
+        reachable, frontier = {root_key}, [root_key]
+        while frontier:
+            following = []
+            for home in frontier:
+                for link in children_of.get(home, []):
+                    child = _key(link.child_channel, link.child_topic)
+                    if child not in reachable:
+                        reachable.add(child)
+                        following.append(child)
+            frontier = following
+        changed = False
+        held_by: dict[int, tuple[str, str]] = {}
+        for home in sorted(reachable):
+            messages = read(home)
+            for message in messages or ():
+                held_by[int(message.get("id") or 0)] = home
+            waiting = [link for link in children_of.get(home, []) if link.note_id not in settled]
+            for link in waiting:
+                settled.add(link.note_id)
+                verdict = _settle(link, home, messages, locate)
+                if verdict != home:
+                    home_of[link.note_id] = verdict
+                    changed = True
+        # A note naming a conversation the tree does not reach, whose anchor
+        # is a post in one it does: that conversation was renamed since the
+        # note was written. Membership needs no lookup.
+        for link in links:
+            if link.note_id in settled or home_of[link.note_id] in reachable:
+                continue
+            anchor = int(link.home.anchor or 0)
+            if anchor in held_by and held_by[anchor][0] == link.home.channel:
+                settled.add(link.note_id)
+                home_of[link.note_id] = held_by[anchor]
+                changed = True
+        if not changed:
+            break
+
+    children_of = {}
+    for link in links:
+        home = home_of[link.note_id]
+        if home is not None and _key(link.child_channel, link.child_topic) != home:
+            children_of.setdefault(home, []).append(link)
 
     # Where each anchored conversation is shown: under the **most specific**
     # conversation anchoring it that the tree reaches — a task Front started
-    # and autolab's planner opened sits under the mission, not beside it —
-    # decided on the index alone, before any history is read.
-    depth_of: dict[tuple[str, str], int] = {_key(channel, topic): 0}
-    frontier = [_key(channel, topic)]
+    # and autolab's planner opened sits under the mission, not beside it.
+    depth_of: dict[tuple[str, str], int] = {root_key: 0}
+    frontier = [root_key]
     while frontier:
         following = []
         for home in frontier:
-            for child_channel, child_topic, _ in children_of.get(home, []):
-                key = _key(child_channel, child_topic)
+            for link in children_of.get(home, []):
+                key = _key(link.child_channel, link.child_topic)
                 if key not in depth_of:
                     depth_of[key] = depth_of[home] + 1
                     following.append(key)
         frontier = following
     placement: dict[tuple[str, str], tuple[str, str]] = {}
+    anchors_of: dict[tuple[str, str], list[_Link]] = {}
     for home, rows in children_of.items():
         if home not in depth_of:
             continue
-        for child_channel, child_topic, _ in rows:
-            key = _key(child_channel, child_topic)
+        for link in rows:
+            key = _key(link.child_channel, link.child_topic)
+            anchors_of.setdefault(key, []).append(link)
             current = placement.get(key)
-            if key != home and (current is None or depth_of[home] > depth_of[current]):
+            if current is None or depth_of[home] > depth_of[current]:
                 placement[key] = home
-    anchors_of: dict[tuple[str, str], list[dict]] = {}
-    for home, rows in children_of.items():
-        if home in depth_of:
-            for child_channel, child_topic, note_message in rows:
-                anchors_of.setdefault(_key(child_channel, child_topic), []).append(note_message)
 
-    histories: dict[tuple[str, str], list[dict] | None] = {}
-
-    def read(channel: str, topic: str) -> list[dict] | None:
-        key = _key(channel, topic)
-        if key not in histories:
-            messages = reader.history(channel, topic)
-            if messages == [] and not topic.startswith(RESOLVED_TOPIC_PREFIX):
-                messages = reader.history(channel, f"{RESOLVED_TOPIC_PREFIX}{topic}")
-            histories[key] = messages
-        return histories[key]
-
-    def build(channel: str, topic: str, depth: int, seen: set, human: bool,
+    def build(key: tuple[str, str], depth: int, seen: set, human: bool,
               requested: list[tuple[int, str, tuple[str, str]]]) -> Node:
-        messages = read(channel, topic)
+        messages = read(key)
         homes = {requester: home for requester, _, home in requested}
-        home_messages = {requester: read(*home) for requester, _, home in requested}
+        home_messages = {requester: read(home) for requester, _, home in requested}
         state, detail, identity, owner, evidence, last = classify(
-            messages, human=human, now=now, home_messages=home_messages, homes=homes,
-            here=_key(channel, topic),
+            messages, human=human, now=now, home_messages=home_messages, homes=homes, here=key,
         )
-        live = topic
+        live = names.get(key, key[1])
         if messages:
-            live = str(messages[-1].get("subject") or topic)
+            live = str(messages[-1].get("subject") or live)
         _, owner_id = _identity(messages or [])
         word, _ = _note_state(messages or [], owner_id or _owner_by_ack(messages or []))
         if live.startswith(RESOLVED_TOPIC_PREFIX) and state not in ("done", "cancelled"):
             # A ✔ on unfinished work is either a mistake or a closure nobody
             # recorded; either way the reader must see it.
             detail = f"{detail}; resolved (✔) without a finished state" if detail else "resolved (✔) without a finished state"
+        opened_by = [link.note_id for link in anchors_of.get(key, [])]
+        stable = [i for i in (_identity_id(messages or []), *opened_by) if i]
+        anchor = min(stable) if stable else min((int(m.get("id") or 0) for m in messages or ()), default=0)
+        if depth == 0:
+            anchor = min((int(m.get("id") or 0) for m in messages or ()), default=anchor)
         node = Node(
-            channel=channel, topic=live, state=state, detail=detail, identity=identity,
+            channel=key[0], topic=live, state=state, detail=detail, identity=identity, anchor=anchor,
             owner=owner, note_state=word, evidence=evidence, last_activity=last,
             failures=[
                 f"#{m.get('id')} {_sender(m)}: {value}"
@@ -633,30 +793,27 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
         )
         if depth >= max_depth:
             return node
-        here = _key(channel, topic)
-        seen = seen | {here}
+        seen = seen | {key}
         order: list[tuple[str, str]] = []
-        first: dict[tuple[str, str], tuple[str, str]] = {}
-        for child_channel, child_topic, _ in children_of.get(here, []):
-            key = _key(child_channel, child_topic)
-            if key in seen or placement.get(key) != here or key in first:
+        for link in children_of.get(key, []):
+            child = _key(link.child_channel, link.child_topic)
+            if child in seen or placement.get(child) != key or child in order:
                 continue
-            order.append(key)
-            first[key] = (child_channel, child_topic)
-        for key in order:
-            notes_for = anchors_of.get(key, [])
+            order.append(child)
+        for child in order:
+            notes_for = anchors_of.get(child, [])
             requesters = []
-            for note_message in notes_for:
-                home = _home_of(note_message)
+            for link in notes_for:
+                home = home_of[link.note_id]
                 if home is not None:
-                    requesters.append((int(note_message.get("sender_id") or 0), _sender(note_message), home))
-            child = build(*first[key], depth + 1, seen, False, requesters)
-            child.requested_by = [f"{_sender(n)} #{n.get('id')}" for n in notes_for]
-            node.children.append(child)
+                    requesters.append((link.author, link.author_name, home))
+            built = build(child, depth + 1, seen, False, requesters)
+            built.requested_by = [f"{link.author_name} #{link.note_id}" for link in notes_for]
+            node.children.append(built)
         _order_tasks(node)
         return node
 
-    result.root = build(channel, topic, 0, set(), True, [])
+    result.root = build(root_key, 0, set(), True, [])
     result.calls = reader.calls
     result.problem = index_problem
     return result
@@ -790,11 +947,17 @@ class Candidate:
     since: int
     evidence: tuple[int, ...] = ()
     judgment: bool = False
+    #: The stalled conversation's `Node.anchor`: what it *is*, whatever it
+    #: is called by the time anybody reads this.
+    anchor: int = 0
 
     @property
     def key(self) -> str:
-        anchor = self.evidence[0] if self.evidence else 0
-        return f"{self.kind}:{self.channel}/{_bare(self.topic)}:{anchor}"
+        """Kind, the conversation by anchor (by name only when the trace had
+        none), and the evidence post."""
+        evidence = self.evidence[0] if self.evidence else 0
+        where = f"a{self.anchor}" if self.anchor else f"{self.channel}/{_bare(self.topic)}"
+        return f"{self.kind}:{where}:{evidence}"
 
 
 #: Seconds before each kind is a candidate — the grace a healthy system
@@ -827,7 +990,7 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
                 "unacknowledged", node.channel, node.topic, node.identity, node.detail,
                 node.owner or "the agent that owns this conversation",
                 f"{node.owner or 'its owner'}'s listener picks up #{node.evidence[0] if node.evidence else '?'} and serves it",
-                node.last_activity, tuple(node.evidence),
+                node.last_activity, tuple(node.evidence), anchor=node.anchor,
             ))
         if is_root:
             continue
@@ -836,14 +999,14 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
             found.append(Candidate(
                 "undelivered", node.channel, node.topic, node.identity, node.detail, requester,
                 f"{requester} is served with the answer #{node.evidence[0] if node.evidence else '?'} and takes it up",
-                node.last_activity, tuple(node.evidence),
+                node.last_activity, tuple(node.evidence), anchor=node.anchor,
             ))
         if node.state == "failed" and overdue("failed", node.last_activity):
             found.append(Candidate(
                 "failed", node.channel, node.topic, node.identity, node.detail,
                 node.owner or "the owner",
                 "whoever asked decides what to do about the failure (retry, change the request, or stop and say so)",
-                node.last_activity, tuple(node.evidence),
+                node.last_activity, tuple(node.evidence), anchor=node.anchor,
             ))
         if resolved and node.state in ("queued", "executing", "awaiting_delivery", "awaiting_requester") \
                 and overdue("resolved_live", node.last_activity):
@@ -852,14 +1015,14 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
                 f"✔ while {node.state.replace('_', ' ')}: {node.detail}",
                 "whoever resolved it",
                 f"`agentchat unresolve {node.channel} {_bare(node.topic)}` if the ✔ was a mistake; nothing if it was a deliberate close",
-                node.last_activity, tuple(node.evidence) or (0,), judgment=True,
+                node.last_activity, tuple(node.evidence) or (0,), judgment=True, anchor=node.anchor,
             ))
         if node.state == "executing" and overdue("silent", node.last_activity):
             found.append(Candidate(
                 "silent", node.channel, node.topic, node.identity, node.detail,
                 node.owner or "the owner",
                 f"{node.owner or 'the owner'} answers, or says the work is still running",
-                node.last_activity, tuple(node.evidence), judgment=True,
+                node.last_activity, tuple(node.evidence), judgment=True, anchor=node.anchor,
             ))
         tasks = [child for child in node.children if _task_serial(child.identity)]
         if tasks and node.note_state == "started":
@@ -874,7 +1037,7 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
                         f"{child.identity} has no post and no start although every task before it is finished",
                         child.owner or node.owner or "the owner",
                         f"{child.identity} starts (a post in {child.channel}/{_bare(child.topic)} starts it)",
-                        finished_at or node.last_activity, tuple(child.evidence) or (0,),
+                        finished_at or node.last_activity, tuple(child.evidence) or (0,), anchor=child.anchor,
                     ))
                 break
     return found

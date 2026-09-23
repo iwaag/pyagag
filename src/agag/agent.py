@@ -319,8 +319,12 @@ def chat_environment(
         # The post this serving was started for (`explicit_reply` p1 step
         # 3): the listener's journal knows it, and `agentchat send` writes
         # it into the root note so a callback is located by id, not name.
+        # It must be a message *in* home: on the mention route the trigger
+        # is the post that named us elsewhere, and a root note carrying that
+        # id located the delegate's home in the caller's conversation
+        # (robust_workflow p2 step 1: 23 of 64 anchored notes did).
         journal = serving_record.current()
-        anchor = getattr(journal, "trigger_id", 0) if journal is not None else 0
+        anchor = getattr(journal, "home_anchor", 0) if journal is not None else 0
         if anchor:
             environment[selfnote.HOME_ANCHOR_VARIABLE] = str(int(anchor))
     if directory.is_dir():

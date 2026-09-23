@@ -241,9 +241,37 @@ def test_the_run_environment_carries_the_anchor_of_the_post_it_serves(tmp_path):
     spec = agent.AgentSpec("agtest", tmp_path, plan_prefix="plan-", run_prefix="run-")
     plain = agent.chat_environment(spec, home=("front", "front-1"), bin_dir=tmp_path)
     assert plain["AGENTCHAT_HOME"] == "front/front-1" and "AGENTCHAT_HOME_ANCHOR" not in plain
-    with serving.bound(serving.NullJournal(trigger_id=7225)):
+    journal = serving.NullJournal(trigger_id=7225)
+    journal.home_anchor = 7225  # what `serve_topic` sets once it has read home
+    with serving.bound(journal):
         bound = agent.chat_environment(spec, home=("front", "front-1"), bin_dir=tmp_path)
     assert bound["AGENTCHAT_HOME"] == "front/front-1" and bound["AGENTCHAT_HOME_ANCHOR"] == "7225"
+
+
+def test_a_callback_serving_is_anchored_in_home_not_in_the_topic_that_called(tmp_path):
+    """robust_workflow p2 step 1: on the mention route the trigger is the post
+    that named us in somebody else's topic; 23 of the realm's 64 anchored root
+    notes carried such an id and located home in the caller's conversation."""
+    from agag.topics import TopicResult, serve_topic
+
+    realm = realm_with_channels()
+    home = realm.post(HOME, "front-1", "Please do the thing.", sender_id=DEV, sender_name="Dev")
+    remote = realm.post("pj-x", "task-1", "@**Mirror Bot** done", sender_id=OTHER, sender_name="autolab")
+    client = RealmClient(realm)
+    seen = {}
+
+    def handler(context):
+        seen["anchor"] = context.anchor
+        seen["env"] = agent.chat_environment(agent.AgentSpec("agtest", tmp_path, plan_prefix="p-", run_prefix="r-"),
+                                             home=(HOME, "front-1"), bin_dir=tmp_path)
+        return TopicResult(output="```ag-reply\nnoted\n```")
+
+    journal = serving.NullJournal(trigger_id=remote)
+    with serving.bound(journal):
+        serve_topic(client, HOME, "front-1", handler, ack_text=ACK, journal=journal)
+    assert seen["anchor"] != remote and seen["anchor"] >= home
+    assert realm.messages[seen["anchor"]]["subject"] == "front-1"
+    assert seen["env"]["AGENTCHAT_HOME_ANCHOR"] == str(seen["anchor"])
 
 
 def test_a_root_note_with_an_anchor_round_trips_and_is_located_by_it():

@@ -17,7 +17,6 @@ from test_listen import DEV, OTHER, Harness, realm_with_channels, wait_until
 defect = pytest.mark.xfail(strict=True, reason="reproduced in robust_workflow p2 step 1; not fixed yet")
 
 
-@defect
 def test_l1_a_served_callback_is_not_served_again_after_its_topic_is_renamed(tmp_path):
     """The served mark names the remote conversation by name; after a rename
     (a retire, an ordinary rename) a restart finds no mark for the new name

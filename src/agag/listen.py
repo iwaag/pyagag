@@ -89,6 +89,7 @@ from . import serving as serving_record
 from .delivery import DeliveryError
 from .memo import is_memo_channel
 from .mirror import Change, Mirror, Message, bare_topic
+from .identity import served_key, whereabouts
 from .selfnote import (
     SELFNOTE_MARKER, Conversation, is_selfnote, is_speech, note as selfnote_line, owed_start, parse_served,
     parse_start, served_note,
@@ -426,6 +427,21 @@ class QueueJournal:
         self.id = int(serving_id)
 
     @property
+    def home_anchor(self) -> int:
+        """A post in the served conversation (`agag.serving.Journal`), kept
+        in the record so the served mark and a redelivery after a restart
+        locate home by id."""
+        record = self.serving()
+        return int((record.extra if record is not None else {}).get("home_anchor") or 0)
+
+    @home_anchor.setter
+    def home_anchor(self, value: int) -> None:
+        record = self.serving()
+        if record is None:
+            return
+        self.queue.update_serving(self.id, extra={**record.extra, "home_anchor": int(value or 0)})
+
+    @property
     def trigger_id(self) -> int:
         record = self.serving()
         return record.trigger_id if record is not None else 0
@@ -575,7 +591,12 @@ class Listener:
 
     def served_marks(self) -> dict[tuple[str, str], int]:
         """`{(channel, bare topic): newest served id}` from this bot's own
-        served notes, out of the mirror's index."""
+        served notes, out of the mirror's index.
+
+        A mark is filed under the conversation its post is in **now**
+        (`agag.identity.served_key`), not the name written in it: a callback
+        topic renamed after it was served used to lose its mark and be served
+        again at the next restart (robust_workflow p2 step 1, L1)."""
         marks: dict[tuple[str, str], int] = {}
         if self.self_id is None:
             return marks
@@ -584,7 +605,7 @@ class Listener:
             if parsed is None:
                 continue
             remote, message_id = parsed
-            key = (remote.channel, bare_topic(remote.topic))
+            key = served_key(self.mirror, remote, message_id)
             if message_id > marks.get(key, 0):
                 marks[key] = message_id
         return marks
@@ -884,7 +905,11 @@ class Listener:
         remote = Conversation(entry.channel, entry.topic)
         home = Conversation(record.home_channel, record.home_topic) if record.home_channel else remote
         try:
-            live = live_topic_name(self.client, home.channel, home.topic)
+            # Home by its anchor first: renamed or ✔'d since the serving,
+            # the mark still goes where the conversation is.
+            where = whereabouts(self.mirror, int(record.extra.get("home_anchor") or 0))
+            live = where[1] if where is not None and where[0] == home.channel else \
+                live_topic_name(self.client, home.channel, home.topic)
             self.client.send_to_channel(home.channel, live, served_note(remote, record.trigger_id))
         except Exception as error:  # noqa: BLE001 - the mark is retried with the entry
             raise DeliveryError(f"could not write the served mark for {remote} in {home}: {error!r}",

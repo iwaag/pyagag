@@ -616,6 +616,19 @@ class Listener:
             # Asked again here, not only at intake: the queue is a file, and
             # an entry may have been written before this rule existed.
             return None
+        if entry.route == MENTION and entry.message_id:
+            # By the post that triggered it, first (robust_workflow p2 step
+            # 5). autolab ✔s a task in the second after its closing report;
+            # a look by *name* read the topic's listing, then its messages,
+            # and when the ✔ moved them in between it found nothing — the
+            # report was skipped as "nothing owed" and never came back. The
+            # post's id finds it wherever it is.
+            trigger = self.mirror.message(int(entry.message_id))
+            if trigger is not None and trigger.channel == entry.channel and trigger.sender_id != self.self_id \
+                    and mentions_bot(trigger.content, self.bot_name):
+                marks = self.served_marks() if marks is None else marks
+                if trigger.id > marks.get((trigger.channel, bare_topic(trigger.topic)), 0):
+                    return trigger.topic
         index = self._live(entry.channel, entry.topic)
         if index is None and entry.route == MENTION:
             # A callback's topic is very often ✔'d by the very post that names

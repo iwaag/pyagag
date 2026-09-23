@@ -311,7 +311,7 @@ def _served_marks(home_messages: list[dict] | None, remote: tuple[str, str],
 
 
 def _unserved_answer(messages, owner, homes, home_messages, here, here_ids=frozenset(), complete=False,
-                     receipts_from=0):
+                     receipts_from=0, known_names=None):
     """`(answer, requester name, home)` for the owner's newest answer that
     names a requester whose home has not marked it served, or None."""
     if owner is None or not homes:
@@ -324,6 +324,7 @@ def _unserved_answer(messages, owner, homes, home_messages, here, here_ids=froze
     named = {match.group("name").strip() for match in MENTION.finditer(str(answer.get("content") or ""))}
     for requester_id, home in homes.items():
         names = {_sender(m) for m in messages if m.get("sender_id") == requester_id}
+        names |= {name for name in [(known_names or {}).get(requester_id)] if name}
         if not names or not (names & named):
             continue
         if not _taken_up((home_messages or {}).get(requester_id), requester_id, int(answer.get("id") or 0), here,
@@ -379,6 +380,7 @@ def classify(
     homes: dict[int, tuple[str, str]] | None = None,
     here: tuple[str, str] = ("", ""),
     receipts_from: int = 0,
+    requester_names: dict[int, str] | None = None,
 ) -> tuple[str, str, str, str, list[int], int]:
     """`(state, detail, identity, owner name, evidence ids, last activity)`
     for one conversation's messages (oldest first).
@@ -406,7 +408,8 @@ def classify(
         # forge writes `delivered` the moment it posts, and when the asker's
         # listener is down that answer is owed all the same (robust_workflow
         # p1 step 5, trial N2 — missed until this).
-        owed = _unserved_answer(messages, owner, homes, home_messages, here, here_ids, complete, receipts_from)
+        owed = _unserved_answer(messages, owner, homes, home_messages, here, here_ids, complete, receipts_from,
+                                requester_names)
         if owed is not None:
             answer, requester, home = owed
             return (
@@ -511,20 +514,21 @@ def classify(
         )
     named = {match.group("name").strip() for match in MENTION.finditer(str(last_answer.get("content") or ""))}
     for requester_id, home in (homes or {}).items():
-        requester_names = {_sender(m) for m in others if m.get("sender_id") == requester_id}
-        if not requester_names or not (requester_names & named):
+        names_here = {_sender(m) for m in others if m.get("sender_id") == requester_id}
+        names_here |= {name for name in [(requester_names or {}).get(requester_id)] if name}
+        if not names_here or not (names_here & named):
             continue
         served = _served_marks((home_messages or {}).get(requester_id), here, here_ids, complete)
         if _taken_up((home_messages or {}).get(requester_id), requester_id, mid(last_answer), here, here_ids, complete,
                      receipts_from):
             return (
                 "awaiting_requester",
-                f"{owner_name} answered #{mid(last_answer)}; {', '.join(sorted(requester_names))} has taken it up (served up to {served})",
+                f"{owner_name} answered #{mid(last_answer)}; {', '.join(sorted(names_here))} has taken it up (served up to {served})",
                 identity, owner_name, [mid(last_answer)], last_activity,
             )
         return (
             "awaiting_delivery",
-            f"{owner_name} answered #{mid(last_answer)} naming {', '.join(sorted(requester_names))}; "
+            f"{owner_name} answered #{mid(last_answer)} naming {', '.join(sorted(names_here))}; "
             f"not marked served in {home[0]}/{home[1]} after {_age(now, int(last_answer.get('timestamp') or 0))}",
             identity, owner_name, [mid(last_answer)], last_activity,
         )
@@ -794,7 +798,7 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
         home_messages = {requester: read(home) for requester, _, home in requested}
         state, detail, identity, owner, evidence, last = classify(
             messages, human=human, now=now, home_messages=home_messages, homes=homes, here=key,
-            receipts_from=receipts_from,
+            receipts_from=receipts_from, requester_names={requester: name for requester, name, _ in requested},
         )
         live = names.get(key, key[1])
         if messages:
@@ -835,6 +839,15 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
                 home = home_of[link.note_id]
                 if home is not None:
                     requesters.append((link.author, link.author_name, home))
+            # …and whoever asked *here*, one hop down: an owner may open and
+            # start work for this conversation without its requester ever
+            # posting in it (autolab's tasks since robust_workflow p1), and
+            # the answer then reaches that requester through this
+            # conversation's root note (`agag.zulip.parent_rootchat`). The
+            # trace follows the same hop, or an answer lost on that route is
+            # invisible to it (p2 step 5, trial B).
+            known = {requester for requester, _, _ in requesters}
+            requesters += [row for row in requested if row[0] not in known]
             built = build(child, depth + 1, seen, False, requesters)
             built.requested_by = [f"{link.author_name} #{link.note_id}" for link in notes_for]
             node.children.append(built)

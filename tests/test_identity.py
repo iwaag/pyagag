@@ -228,3 +228,25 @@ def test_an_answer_older_than_the_receipt_boundary_is_read_as_p1_read_it(world):
     old = next(n for n in trace(MirrorReader(mirror), ask, now=later, receipts_from=answer + 1).nodes()
                if n.topic == task)
     assert strict.state == "awaiting_delivery" and old.state == "awaiting_requester"
+
+
+def test_an_answer_in_a_task_its_owner_started_is_owed_to_the_parent_s_requester(world):
+    """robust_workflow p2 step 5, trial B: autolab starts a task itself, so
+    Front never posts in it; the closing report names Front and reaches it
+    through the workplan's root note. Unserved, it must read as owed."""
+    realm, mirror, ask, mission, task, answer = world
+    auto = f"workrun-task2-m{mission}"
+    post(realm, "work-m1", auto, f"[selfnote][task] {mission}#2", AUTOLAB)
+    post(realm, "work-m1", auto, f"[selfnote][rootchat] pj-x/workplan-a #{mission}", AUTOLAB)
+    post(realm, "work-m1", auto, "Task 2 starts now.", AUTOLAB)
+    post(realm, "work-m1", auto, ACK, AUTOLAB)
+    report = post(realm, "work-m1", auto, "@**Front** task 2 is committed.", AUTOLAB)
+    post(realm, "work-m1", auto, "[selfnote][state] completed", AUTOLAB)
+    settle(mirror, lambda: mirror.message(report) is not None)
+    later = realm.messages[report]["timestamp"] + 3600
+    node = next(n for n in tree(mirror, ask, now=later).nodes() if n.topic == auto)
+    assert node.state == "awaiting_delivery" and "Front" in node.detail
+    mark = post(realm, "front", "front-a", f"[selfnote][served] work-m1/{auto} {report}", FRONT)
+    settle(mirror, lambda: mirror.message(mark) is not None)
+    node = next(n for n in tree(mirror, ask, now=later).nodes() if n.topic == auto)
+    assert node.state == "done"

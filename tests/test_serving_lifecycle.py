@@ -499,3 +499,24 @@ def test_a_dropped_send_is_retried_and_then_handed_back_with_the_reply_prepared(
     message_id = topics.resume_prepared(client, journal.serving(), journal, log=lambda t: None)
     assert journal.serving().state == serving.DELIVERED and journal.serving().delivered_id == message_id
     assert client.sent == ["ack", "@**Developer**\n\nok"]
+
+
+def test_an_owed_answer_in_the_processed_input_is_marked_served_after_the_reply(tmp_path):
+    """robust_workflow p2 step 5, trial B: a callback the listener never
+    served was relayed by the owner-route serving that Observer's request
+    started — and nothing recorded it, so the recovery could not be told
+    from the stall. The request carries `[selfnote][owed]`; the serving whose
+    input holds it is its receipt once the reply is delivered."""
+    realm = realm_with_channels()
+    answer = realm.post("pj-x", "task-x", "@**Mirror Bot** done, committed", sender_id=OTHER, sender_name="autolab",
+                        quiet=True)
+    realm.post(HOME, "home", "my own conversation", sender_id=DEV, sender_name="Dev", quiet=True)
+    h = Harness(realm, tmp_path).start()
+    realm.post(HOME, "home", f"[selfnote][owed] pj-x/task-x {answer}", sender_id=OTHER, sender_name="Observer")
+    realm.post(HOME, "home", "Something this request depends on has stopped: the answer in pj-x/task-x.",
+               sender_id=OTHER, sender_name="Observer")
+    wait_until(lambda: any(c.startswith("[selfnote][served]") for c in h.posts(HOME, "home")), what="the receipt")
+    notes = [parse_served(c) for c in h.posts(HOME, "home") if c.startswith("[selfnote][served]")]
+    assert [(n[0].as_pair(), n[1]) for n in notes] == [(("pj-x", "task-x"), answer)]
+    assert h.replies(HOME, "home"), "after the reply, never instead of it"
+    h.stop()

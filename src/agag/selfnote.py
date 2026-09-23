@@ -82,6 +82,9 @@ __all__ = [
     "ROOTCHAT_TAG",
     "SELFNOTE_MARKER",
     "SERVED_TAG",
+    "OWED_TAG",
+    "owed_note",
+    "parse_owed",
     "START_TAG",
     "Conversation",
     "effective_rootchat",
@@ -353,6 +356,26 @@ def served_note(remote: Conversation, message_id: int) -> str:
     own topic, so the note triggers nobody either.
     """
     return note(SERVED_TAG, f"{remote} {int(message_id)}")
+
+
+#: A note posted beside a request to recover an answer somebody's listener
+#: never served (robust_workflow p2 step 5): `[selfnote][owed] <remote> <id>`.
+#: The serving whose processed input includes it, once its reply is
+#: delivered, is the receipt for that answer — its listener writes the
+#: served mark (`agag.listen`).
+OWED_TAG = "owed"
+
+
+def owed_note(remote: Conversation, message_id: int) -> str:
+    return note(OWED_TAG, f"{remote} {int(message_id)}")
+
+
+def parse_owed(content) -> tuple[Conversation, int] | None:
+    """`(remote, answer id)` of an owed note, or None."""
+    value = parse_note(content, OWED_TAG)
+    if value is None:
+        return None
+    return parse_served(note(SERVED_TAG, value))
 
 
 def parse_served(content) -> tuple[Conversation, int] | None:

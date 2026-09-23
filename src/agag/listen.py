@@ -910,7 +910,12 @@ class Listener:
         """What follows a confirmed delivery on the mention route: the served
         mark, tied to the mention that was actually processed (`trigger_id`)
         — never to whatever is newest in the remote topic, so a mention that
-        arrived during the run stays owed."""
+        arrived during the run stays owed. On the owner route: the served
+        marks for answers named by `[selfnote][owed]` notes inside the input
+        this serving processed."""
+        if record is not None and entry.route == OWNER:
+            self._mark_owed(record)
+            return
         if record is None or entry.route != MENTION or record.extra.get("served_marked"):
             return
         if self.self_id is None or not record.trigger_id:
@@ -931,6 +936,39 @@ class Listener:
         extra["served_marked"] = record.trigger_id
         self.queue.update_serving(record.id, extra=extra)
         self.log(f"marked {remote} served up to {record.trigger_id} in {home}")
+
+    def _mark_owed(self, record: Serving) -> None:
+        """An answer somebody asked us to deal with — Observer's request for
+        one our listener never served — was in the input of a serving whose
+        reply is now delivered: that serving is its receipt (robust_workflow
+        p2 step 5, trial B: Front relayed a lost report 12 s after being
+        asked, and without a receipt nothing could tell it had)."""
+        if self.self_id is None or record.input_up_to is None or record.extra.get("owed_marked"):
+            return
+        from .selfnote import parse_owed
+
+        live = self._live(record.home_channel or record.channel, record.home_topic or record.topic)
+        if live is None:
+            return
+        marks = self.served_marks()
+        written = []
+        for message in self.mirror.messages(live.channel, live.live_name, across_resolve=True):
+            if message.id > int(record.input_up_to):
+                break
+            owed = parse_owed(message.content)
+            if owed is None:
+                continue
+            remote, answer = owed
+            key = served_key(self.mirror, remote, answer)
+            if answer <= marks.get(key, 0):
+                continue
+            self.client.send_to_channel(live.channel, live.live_name, served_note(remote, answer))
+            marks[key] = answer
+            written.append(f"{remote} up to {answer}")
+        record.extra["owed_marked"] = True
+        self.queue.update_serving(record.id, extra=record.extra)
+        for line in written:
+            self.log(f"marked {line} served in {live.channel}/{live.live_name} (an owed answer this serving took up)")
 
     # -- lifecycle -----------------------------------------------------------------------------
 

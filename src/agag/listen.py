@@ -596,6 +596,15 @@ class Listener:
             # an entry may have been written before this rule existed.
             return None
         index = self._live(entry.channel, entry.topic)
+        if index is None and entry.route == MENTION:
+            # A callback's topic is very often ✔'d by the very post that names
+            # us — autolab resolves a task right after its closing report. A
+            # finished conversation of *ours* is finished; somebody else's
+            # finished conversation can still hold our answer. Until
+            # robust_workflow p1 (trial N3) this dropped that report whenever
+            # the ✔ reached the mirror before the executor looked.
+            found = self.mirror.topic(entry.channel, entry.topic)
+            index = found[0] if found else None
         if index is None:
             return None
         if entry.route == OWNER:
@@ -677,6 +686,11 @@ class Listener:
             if is_memo_channel(message.channel):
                 return  # the change row may predate the channel's name; the message knows it
             if message.resolved:
+                # Not work of ours — but a mention in somebody else's ✔'d
+                # conversation is still an answer owed to us (see `owed`).
+                if (self.on_mention is not None and not topic_matches(message.channel, message.topic, self.topic_filter)
+                        and (change.detail.get("mentioned") or mentions_bot(message.content, self.bot_name))):
+                    self._enqueue(message.channel, bare_topic(message.topic), MENTION, change.revision, message.id)
                 return
             self._consider(message.channel, message.topic, message.content, change.revision, message.id,
                            flagged=bool(change.detail.get("mentioned")))

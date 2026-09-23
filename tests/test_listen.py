@@ -333,3 +333,22 @@ def test_somebody_else_s_start_note_is_not_our_work(tmp_path):
     time.sleep(0.6)
     assert (OWNER, "pj-x", "workplan-t4") not in h.served
     h.stop()
+
+
+
+def test_a_mention_whose_topic_is_resolved_right_after_it_is_still_served(tmp_path):
+    """robust_workflow p1 N3: autolab posts its closing report naming the
+    requester and resolves the task at once; the report was skipped as
+    'nothing owed' whenever the ✔ reached the mirror first."""
+    realm = realm_with_channels()
+    realm.post("pj-x", "task-a", "[selfnote][rootchat] mirror-bot-x/home", sender_id=BOT, sender_name="Mirror Bot")
+    gate = threading.Event()
+    h = Harness(realm, tmp_path, block=gate).start()
+    realm.post("mirror-bot-x", "busy", "keep the executor busy", sender_id=DEV, sender_name="Dev")
+    wait_until(lambda: (OWNER, "mirror-bot-x", "busy") in h.served, what="the executor to be busy")
+    realm.post("pj-x", "task-a", "@**Mirror Bot** task done", sender_id=OTHER, sender_name="Other")
+    realm.resolve("pj-x", "task-a")
+    time.sleep(0.5)
+    gate.set()
+    wait_until(lambda: any(route == MENTION for route, _, _ in h.served), what="the mention to be served")
+    h.stop()

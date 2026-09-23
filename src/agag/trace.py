@@ -310,7 +310,8 @@ def _served_marks(home_messages: list[dict] | None, remote: tuple[str, str],
     return best
 
 
-def _unserved_answer(messages, owner, homes, home_messages, here, here_ids=frozenset(), complete=False):
+def _unserved_answer(messages, owner, homes, home_messages, here, here_ids=frozenset(), complete=False,
+                     receipts_from=0):
     """`(answer, requester name, home)` for the owner's newest answer that
     names a requester whose home has not marked it served, or None."""
     if owner is None or not homes:
@@ -326,12 +327,13 @@ def _unserved_answer(messages, owner, homes, home_messages, here, here_ids=froze
         if not names or not (names & named):
             continue
         if not _taken_up((home_messages or {}).get(requester_id), requester_id, int(answer.get("id") or 0), here,
-                         here_ids, complete):
+                         here_ids, complete, receipts_from):
             return answer, ", ".join(sorted(names)), home
     return None
 
 
-def _taken_up(home_messages, requester_id: int, answer_id: int, here, here_ids=frozenset(), complete=False) -> bool:
+def _taken_up(home_messages, requester_id: int, answer_id: int, here, here_ids=frozenset(), complete=False,
+              receipts_from: int = 0) -> bool:
     """Whether the requester dealt with an answer: its home holds a served
     mark covering it — the receipt its listener writes after a *delivered*
     serving, bound to the post that serving processed.
@@ -342,8 +344,19 @@ def _taken_up(home_messages, requester_id: int, answer_id: int, here, here_ids=f
     consumed an answer nothing had read (p2 step 1, R8). An answer that
     arrives during a serving stays owed until a serving marks it, which the
     listener does on its next pass."""
-    del requester_id  # kept in the signature: the receipt is the requester's
-    return _served_marks(home_messages, here, here_ids, complete) >= answer_id
+    if _served_marks(home_messages, here, here_ids, complete) >= answer_id:
+        return True
+    if answer_id >= receipts_from:
+        return False
+    # An answer from before `receipts_from` is read as p1 read it: the
+    # listeners of that time left marks one post short of an answer that
+    # arrived with its topic's ✔ (fixed in 87ac87e), so the requester
+    # speaking at home since is taken as the answer taken up.
+    return any(
+        m.get("sender_id") == requester_id and is_speech(m) and int(m.get("id") or 0) > answer_id
+        and not is_ack(str(m.get("content") or ""))
+        for m in home_messages or ()
+    )
 
 
 def _age(now: int, timestamp: int) -> str:
@@ -365,6 +378,7 @@ def classify(
     home_messages: dict[int, list[dict] | None] | None = None,
     homes: dict[int, tuple[str, str]] | None = None,
     here: tuple[str, str] = ("", ""),
+    receipts_from: int = 0,
 ) -> tuple[str, str, str, str, list[int], int]:
     """`(state, detail, identity, owner name, evidence ids, last activity)`
     for one conversation's messages (oldest first).
@@ -392,7 +406,7 @@ def classify(
         # forge writes `delivered` the moment it posts, and when the asker's
         # listener is down that answer is owed all the same (robust_workflow
         # p1 step 5, trial N2 — missed until this).
-        owed = _unserved_answer(messages, owner, homes, home_messages, here, here_ids, complete)
+        owed = _unserved_answer(messages, owner, homes, home_messages, here, here_ids, complete, receipts_from)
         if owed is not None:
             answer, requester, home = owed
             return (
@@ -501,7 +515,8 @@ def classify(
         if not requester_names or not (requester_names & named):
             continue
         served = _served_marks((home_messages or {}).get(requester_id), here, here_ids, complete)
-        if _taken_up((home_messages or {}).get(requester_id), requester_id, mid(last_answer), here, here_ids, complete):
+        if _taken_up((home_messages or {}).get(requester_id), requester_id, mid(last_answer), here, here_ids, complete,
+                     receipts_from):
             return (
                 "awaiting_requester",
                 f"{owner_name} answered #{mid(last_answer)}; {', '.join(sorted(requester_names))} has taken it up (served up to {served})",
@@ -625,8 +640,13 @@ def _identity_id(messages: list[dict]) -> int:
     return 0
 
 
-def trace(client, message_id: int, *, now: int | None = None, max_depth: int = MAX_DEPTH) -> Trace:
-    """The progress tree below the conversation holding `message_id`."""
+def trace(client, message_id: int, *, now: int | None = None, max_depth: int = MAX_DEPTH,
+          receipts_from: int = 0) -> Trace:
+    """The progress tree below the conversation holding `message_id`.
+
+    `receipts_from`: answers older than this id are taken up as p1 read them
+    (a served mark, or the requester speaking at home since); newer ones
+    only by a served mark. 0, the default, is the strict rule throughout."""
     now = int(now if now is not None else time.time())
     reader = _Reader(client)
     result = Trace(root=None, origin=int(message_id), observed_at=now)
@@ -774,6 +794,7 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
         home_messages = {requester: read(home) for requester, _, home in requested}
         state, detail, identity, owner, evidence, last = classify(
             messages, human=human, now=now, home_messages=home_messages, homes=homes, here=key,
+            receipts_from=receipts_from,
         )
         live = names.get(key, key[1])
         if messages:

@@ -217,3 +217,14 @@ def test_only_a_served_mark_takes_up_an_answer_not_later_speech_at_home(world):
     settle(mirror, lambda: mirror.message(mark) is not None)
     node = next(n for n in tree(mirror, ask, now=later).nodes() if n.topic == task)
     assert node.state == "awaiting_requester"
+
+
+def test_an_answer_older_than_the_receipt_boundary_is_read_as_p1_read_it(world):
+    realm, mirror, ask, mission, task, answer = world
+    later = realm.messages[answer]["timestamp"] + 3600
+    reply = post(realm, "front", "front-a", "@**Developer** task 1 is done.", FRONT)
+    settle(mirror, lambda: mirror.message(reply) is not None)
+    strict = next(n for n in tree(mirror, ask, now=later).nodes() if n.topic == task)
+    old = next(n for n in trace(MirrorReader(mirror), ask, now=later, receipts_from=answer + 1).nodes()
+               if n.topic == task)
+    assert strict.state == "awaiting_delivery" and old.state == "awaiting_requester"

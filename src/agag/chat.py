@@ -861,14 +861,19 @@ def _run(args, client: ZulipClient, out) -> int:
                 print(f"#{args.channel} > {bare} is not resolved", file=out)
                 return 0
             raise AgentChatError(f"no conversation #{args.channel} > {resolved} to unresolve")
-        if client.topic_last_id(args.channel, bare):
+        twin = client.topic_history(args.channel, bare, num_before=LAST_SPEAKER_LOOKBACK)
+        if twin and any(is_selfnote(m.get("content")) for m in twin):
+            # A topic of that name that was opened as a conversation of its
+            # own — its own anchor or identity notes — is other work that took
+            # the freed name: merging would join two requests.
             raise AgentChatError(
-                f"#{args.channel} > {bare} already has messages beside {resolved!r}: "
-                "renaming it back would merge two conversations. Read both, and "
-                "continue in the one the work belongs to."
+                f"#{args.channel} > {bare} already holds a conversation of its own beside "
+                f"{resolved!r}: renaming it back would merge two conversations. Read both, "
+                "and continue in the one the work belongs to."
             )
         client.rename_topic(message_id, bare)
-        print(f"unresolved #{args.channel} > {bare}", file=out)
+        folded = f" (folding in {len(twin)} stray post(s) made under the old name after the ✔)" if twin else ""
+        print(f"unresolved #{args.channel} > {bare}{folded}", file=out)
         return 0
     if args.command == "options":
         lines = exec_options_lines(harvest_intros(client), args.agent)

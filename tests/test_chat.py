@@ -832,9 +832,20 @@ def test_unresolve_renames_the_resolved_topic_back(monkeypatch):
     assert code == 0 and ("rename", 8325, TOPIC) in calls and "unresolved" in out
 
 
+def test_unresolve_folds_a_stray_twin_back_in(monkeypatch):
+    """robust_workflow p1 N3: a progress post under the old name after a ✔
+    is the same conversation, and it is what blocked the recovery."""
+    calls = []
+    client = Renaming(calls, messages=[message(id=8400, content="🔧 Bash: git status")])
+    client.holders = {f"✔ {TOPIC}": 8325, TOPIC: 8400}
+    code, out, _ = run(monkeypatch, ["unresolve", CHANNEL, TOPIC], client)
+    assert code == 0 and ("rename", 8325, TOPIC) in calls and "folding in 1 stray" in out
+
+
 def test_unresolve_refuses_to_merge_into_a_twin(monkeypatch):
     calls = []
-    client = Renaming(calls)
+    client = Renaming(calls, messages=[message(id=8399, content="[selfnote][rootchat] front/front-b"),
+                                       message(id=8400, content="a new request")])
     client.holders = {f"✔ {TOPIC}": 8325, TOPIC: 8400}
     code, _, err = run(monkeypatch, ["unresolve", CHANNEL, f"✔ {TOPIC}"], client)
     assert code == 1 and "merge" in err

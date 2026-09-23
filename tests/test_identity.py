@@ -202,3 +202,18 @@ def test_a_reused_home_name_inherits_no_threads_and_a_renamed_home_keeps_its_own
                                                   home_messages=client.history("front", "front-a-renamed"))]
     assert sorted(renamed) == sorted(["workplan-a", task])
     assert fresh and legacy
+
+
+def test_only_a_served_mark_takes_up_an_answer_not_later_speech_at_home(world):
+    """robust_workflow p2 step 1, R8: Front answering something else at home
+    after the answer arrived is not evidence that it read the answer."""
+    realm, mirror, ask, mission, task, answer = world
+    later = realm.messages[answer]["timestamp"] + 3600
+    reply = post(realm, "front", "front-a", "@**Developer** about your other question: yes.", FRONT)
+    settle(mirror, lambda: mirror.message(reply) is not None)
+    node = next(n for n in tree(mirror, ask, now=later).nodes() if n.topic == task)
+    assert node.state == "awaiting_delivery"
+    mark = post(realm, "front", "front-a", f"[selfnote][served] work-m1/{task} {answer}", FRONT)
+    settle(mirror, lambda: mirror.message(mark) is not None)
+    node = next(n for n in tree(mirror, ask, now=later).nodes() if n.topic == task)
+    assert node.state == "awaiting_requester"

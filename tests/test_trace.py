@@ -20,6 +20,37 @@ from agag.zulip import RESOLVED_TOPIC_PREFIX, ZulipError
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "trace_p3.json").read_text("utf-8"))
 
 
+def _marks_as_written_today(messages):
+    """p3's served marks were written by the pre-journal `note_served`,
+    which marked the newest *real* post of the remote topic at the time
+    (task 2's says 8382, a progress line; the answer naming Front, which that
+    serving read, is 8386). Since `explicit_reply` p1 the listener binds the
+    mark to the mention the serving processed, and since robust_workflow p2
+    step 3 the mark is the only receipt the trace accepts. The replay is
+    therefore read with each mark moved to the newest post naming Front in
+    that remote topic before the mark was written — what today's writer
+    would have recorded for the same serving."""
+    import re
+
+    from agag.selfnote import parse_served
+
+    out = []
+    for m in messages:
+        parsed = parse_served(m["content"])
+        if parsed is not None and m["sender_full_name"] == "Front":
+            remote, _ = parsed
+            named = [x["id"] for x in messages
+                     if x["channel"] == remote.channel and x["topic"] == remote.topic and x["id"] < m["id"]
+                     and re.search(r"@\*\*Front\*\*", x["content"])]
+            if named:
+                m = {**m, "content": f"[selfnote][served] {remote.channel}/{remote.topic} {max(named)}"}
+        out.append(m)
+    return out
+
+
+FIXTURE["messages"] = _marks_as_written_today(FIXTURE["messages"])
+
+
 class Realm:
     """A read-only stand-in cut at message `upto`, topics named as they stood."""
 

@@ -332,17 +332,18 @@ def _unserved_answer(messages, owner, homes, home_messages, here, here_ids=froze
 
 
 def _taken_up(home_messages, requester_id: int, answer_id: int, here, here_ids=frozenset(), complete=False) -> bool:
-    """Whether the requester dealt with an answer: its home's served mark
-    covers it, or the requester has spoken at home since. A served mark is
-    written for the post that triggered a serving; an answer that arrived
-    within that serving is answered without one."""
-    if _served_marks(home_messages, here, here_ids, complete) >= answer_id:
-        return True
-    return any(
-        m.get("sender_id") == requester_id and is_speech(m) and int(m.get("id") or 0) > answer_id
-        and not is_ack(str(m.get("content") or ""))
-        for m in home_messages or ()
-    )
+    """Whether the requester dealt with an answer: its home holds a served
+    mark covering it — the receipt its listener writes after a *delivered*
+    serving, bound to the post that serving processed.
+
+    Nothing weaker counts (robust_workflow p2 step 3). p1 also accepted the
+    requester speaking at home after the answer, and a reply to something
+    else — a serving whose input ended before the answer arrived — then
+    consumed an answer nothing had read (p2 step 1, R8). An answer that
+    arrives during a serving stays owed until a serving marks it, which the
+    listener does on its next pass."""
+    del requester_id  # kept in the signature: the receipt is the requester's
+    return _served_marks(home_messages, here, here_ids, complete) >= answer_id
 
 
 def _age(now: int, timestamp: int) -> str:
@@ -763,6 +764,12 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
     def build(key: tuple[str, str], depth: int, seen: set, human: bool,
               requested: list[tuple[int, str, tuple[str, str]]]) -> Node:
         messages = read(key)
+        if not messages and anchors_of.get(key):
+            # Its own root notes are in it — that is how it was found — so a
+            # read that returns nothing is a read that failed (a mirror that
+            # does not hold it, a lost coverage), never an empty conversation
+            # and never "not started" (robust_workflow p2 step 1, R1).
+            messages = None
         homes = {requester: home for requester, _, home in requested}
         home_messages = {requester: read(home) for requester, _, home in requested}
         state, detail, identity, owner, evidence, last = classify(

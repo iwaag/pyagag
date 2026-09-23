@@ -693,7 +693,11 @@ def test_anchor_refuses_a_conversation_anchored_to_itself(monkeypatch):
     monkeypatch.setenv(selfnote.HOME_VARIABLE, f"{CHANNEL}/{TOPIC}")
     code, _, err = run(monkeypatch, ["anchor", CHANNEL, TOPIC], Client(calls))
     assert code == 1 and "not anchored to itself" in err
-    assert [call for call in calls if call[0] == "send"] == []
+    # Nothing is written where the correction was aimed; the refusal is
+    # recorded as a note in the run's own home (robust_workflow p1).
+    assert [call for call in calls if call[0] == "send" and "[selfnote][opfail]" not in call[3]] == []
+    assert [call[3].split(":")[0] for call in calls if call[0] == "send"] == ["[selfnote][opfail] anchor "
+                                                                           f"{CHANNEL}/{TOPIC} refused"]
 
 
 def test_anchor_refuses_a_resolved_topic(monkeypatch):
@@ -707,7 +711,11 @@ def test_anchor_refuses_a_resolved_topic(monkeypatch):
 
     code, _, err = run(monkeypatch, ["anchor", CHANNEL, TOPIC], Resolved(calls))
     assert code == 1
-    assert [call for call in calls if call[0] == "send"] == []
+    # Nothing is written where the correction was aimed; the refusal is
+    # recorded as a note in the run's own home (robust_workflow p1).
+    assert [call for call in calls if call[0] == "send" and "[selfnote][opfail]" not in call[3]] == []
+    assert [call[3].split(":")[0] for call in calls if call[0] == "send"] == ["[selfnote][opfail] anchor "
+                                                                           f"{CHANNEL}/{TOPIC} refused"]
 
 
 def test_ordinary_send_still_anchors_automatically(monkeypatch):
@@ -732,3 +740,42 @@ def test_the_tool_documentation_explains_when_to_correct_an_anchor():
     assert "ordinary post never changes it" in doc
     assert "not as a habit" in doc
     assert "nobody is served by it" in doc
+
+
+# --- operation failures are recorded where the request is (robust_workflow p1) ---
+
+
+def test_a_refused_send_leaves_a_note_in_the_run_s_home(monkeypatch):
+    """adventure_game p3: Front's correction into a resolved topic was
+    refused, and the refusal lived only in its transcript. The note puts it
+    in the conversation the request is traced from."""
+    calls = []
+
+    class Resolved(Client):
+        holders = {f"{chat.RESOLVED_TOPIC_PREFIX}{TOPIC}": 7}
+
+    client = Resolved(calls)
+    monkeypatch.setattr(chat, "client_from_environment", lambda environ=None: client)
+    monkeypatch.setenv("AGENTCHAT_HOME", "front/front-x")
+    monkeypatch.delenv("AGENTCHAT_HOME_ANCHOR", raising=False)
+    code = chat.main(["send", CHANNEL, TOPIC, "hello"], out=io.StringIO(), err=io.StringIO())
+    assert code == 1
+    notes = [c for c in calls if c[0] == "send"]
+    assert len(notes) == 1
+    _, channel, topic, content = notes[0]
+    assert (channel, topic) == ("front", "front-x")
+    assert content.startswith("[selfnote][opfail] send ")
+    assert "refused" in content
+
+
+def test_a_failed_read_records_nothing(monkeypatch):
+    calls = []
+
+    class Broken(Client):
+        def topic_history(self, channel, topic, num_before=50):
+            raise ZulipError("timed out")
+
+    monkeypatch.setattr(chat, "client_from_environment", lambda environ=None: Broken(calls))
+    monkeypatch.setenv("AGENTCHAT_HOME", "front/front-x")
+    assert chat.main(["read", CHANNEL, TOPIC], out=io.StringIO(), err=io.StringIO()) == 1
+    assert not [c for c in calls if c[0] == "send"]

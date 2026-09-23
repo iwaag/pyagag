@@ -1,0 +1,216 @@
+"""`agag.trace`: where a request stands, read from its conversations.
+
+The fixture is adventure_game p3's first request as the realm held it
+(messages 8280–8460, text shortened): Front's conversation, the mission it
+opened, the twin it opened by mistake, and the five task topics. Cut at a
+message id, it is the realm as a reader would have found it at that moment —
+which is what the tests below ask: would the trace have shown the stalls the
+Omni Agent had to find by reading topics one at a time?
+"""
+
+import json
+from pathlib import Path
+
+import pytest
+
+from agag import trace as tracing
+from agag.agent import SWEEP_ACK
+from agag.zulip import RESOLVED_TOPIC_PREFIX, ZulipError
+
+FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "trace_p3.json").read_text("utf-8"))
+
+
+class Realm:
+    """A read-only stand-in cut at message `upto`, topics named as they stood."""
+
+    def __init__(self, upto: int, messages=None, failing=()):
+        self.upto = upto
+        self.all = [m for m in (messages or FIXTURE["messages"]) if m["id"] <= upto]
+        self.failing = set(failing)
+        self.calls = []
+
+    def _live(self, channel, topic):
+        resolved = False
+        for m in self.all:
+            if m["channel"] == channel and m["topic"] == topic and m["sender_realm_str"]:
+                resolved = "marked this topic as resolved" in m["content"]
+        return f"{RESOLVED_TOPIC_PREFIX}{topic}" if resolved else topic
+
+    def _shape(self, m):
+        return {
+            "id": m["id"], "type": "stream", "display_recipient": m["channel"],
+            "subject": self._live(m["channel"], m["topic"]), "sender_id": m["sender_id"],
+            "sender_full_name": m["sender_full_name"], "sender_realm_str": m["sender_realm_str"],
+            "timestamp": m["timestamp"], "content": m["content"],
+        }
+
+    def message(self, message_id, strict=False):
+        self.calls.append(("message", message_id))
+        for m in self.all:
+            if m["id"] == message_id:
+                return self._shape(m)
+        return None
+
+    def topic_history(self, channel, topic, num_before=50):
+        self.calls.append(("history", channel, topic))
+        if (channel, topic) in self.failing:
+            raise ZulipError("timed out")
+        bare = topic[len(RESOLVED_TOPIC_PREFIX):] if topic.startswith(RESOLVED_TOPIC_PREFIX) else topic
+        if self._live(channel, bare) != topic:
+            return []
+        return [self._shape(m) for m in self.all if m["channel"] == channel and m["topic"] == bare][-num_before:]
+
+    def public_notes(self, tag, num_before=1000):
+        self.calls.append(("notes", tag))
+        marker = f"[selfnote][{tag}]"
+        return [self._shape(m) for m in self.all if m["content"].startswith(marker)]
+
+
+def node(result, topic_suffix):
+    for n in result.nodes():
+        if n.topic.endswith(topic_suffix):
+            return n
+    raise AssertionError(f"{topic_suffix} not in the tree")
+
+
+ORIGIN = 8286
+NOW_STALL = 1790171400  # 2026-09-23T13:50:00Z, five minutes into the 24-minute stall
+
+
+def test_the_claimed_start_shows_as_a_task_nobody_started():
+    """F2: at 13:50 Front had reported task 4 as passed on. The trace says
+    what the topic says — nobody has posted there — and names it owed."""
+    result = tracing.trace(Realm(8425), ORIGIN, now=NOW_STALL)
+    task4 = node(result, "workrun-task4-m8298")
+    assert task4.state == "not_started"
+    assert task4.identity == "task 8298#4"
+    assert all(not a.startswith("Front") for a in task4.requested_by)
+    assert node(result, "workrun-task3-m8298").state == "done"
+    owed = tracing.next_actions(result)
+    assert any("workrun-task4-m8298" in line and "every task before it is finished" in line for line in owed)
+
+
+def test_the_unstarted_last_task_is_owed_after_the_one_before_closes():
+    """F3: at 14:11 task 4 was closed and task 5 had only its spec."""
+    result = tracing.trace(Realm(8441), ORIGIN, now=NOW_STALL + 1260)
+    assert node(result, "workrun-task4-m8298").state == "done"
+    assert node(result, "workrun-task5-m8298").state == "not_started"
+    assert any("workrun-task5-m8298" in line for line in tracing.next_actions(result))
+
+
+def test_later_tasks_are_not_owed_while_an_earlier_one_is_open():
+    result = tracing.trace(Realm(8425), ORIGIN, now=NOW_STALL)
+    owed = " ".join(tracing.next_actions(result))
+    assert "workrun-task5-m8298" not in owed
+
+
+def test_a_task_being_worked_on_is_executing_not_owed():
+    """13:44:00: Front's #8409 was acknowledged in task 3 and the supercoder
+    was posting progress — work in flight, not a stall."""
+    result = tracing.trace(Realm(8413), ORIGIN, now=NOW_STALL - 360)
+    task3 = node(result, "workrun-task3-m8298")
+    assert task3.state == "executing"
+    assert "workrun-task3" not in " ".join(tracing.next_actions(result))
+
+
+def test_the_twin_opened_by_mistake_is_visible_as_resolved_unfinished():
+    """F1: `workplan-locations-2` was answered and then ✔'d with no state."""
+    result = tracing.trace(Realm(8425), ORIGIN, now=NOW_STALL)
+    twin = node(result, "workplan-locations-2")
+    assert twin.topic.startswith(RESOLVED_TOPIC_PREFIX)
+    assert "resolved" in twin.detail
+    mission = node(result, "pj-protoprey/workplan-locations".split("/")[1])
+    assert mission.identity.startswith("mission m8298")
+    assert mission.note_state == "started"
+
+
+def test_each_conversation_appears_once_under_its_most_specific_anchor():
+    result = tracing.trace(Realm(8460), ORIGIN, now=NOW_STALL + 1800)
+    root = result.root
+    assert not any("workrun-" in child.topic for child in root.children)
+    mission = next(child for child in root.children if child.identity.startswith("mission"))
+    assert [child.identity for child in mission.children] == [f"task 8298#{n}" for n in range(1, 6)]
+    task5 = mission.children[-1]
+    assert any(a.startswith("Front") for a in task5.requested_by)
+    assert any(a.startswith("autolab") for a in task5.requested_by)
+
+
+def test_the_origin_is_awaiting_the_human_when_the_agent_answered_last():
+    result = tracing.trace(Realm(8425), ORIGIN, now=NOW_STALL)
+    assert result.root.state == "awaiting_human"
+    assert result.root.owner == "Front"
+
+
+def test_an_unreadable_conversation_is_unobservable_never_not_started():
+    realm = Realm(8425, failing={("work-m8298", "workrun-task4-m8298")})
+    result = tracing.trace(realm, ORIGIN, now=NOW_STALL)
+    task4 = node(result, "workrun-task4-m8298")
+    assert task4.state == "unobservable"
+    assert "workrun-task4" not in " ".join(tracing.next_actions(result))
+
+
+def test_a_missing_origin_is_said_and_nothing_else_is_read():
+    realm = Realm(8425)
+    result = tracing.trace(realm, 1, now=NOW_STALL)
+    assert result.root is None and "does not exist" in result.problem
+    assert realm.calls == [("message", 1)]
+
+
+def test_calls_are_counted_and_bounded():
+    realm = Realm(8460)
+    result = tracing.trace(realm, ORIGIN, now=NOW_STALL)
+    assert result.calls == len(realm.calls)
+    # one lookup, two note searches, one history per conversation (+ ✔ retries)
+    assert result.calls <= 3 + 2 * len(list(result.nodes()))
+
+
+def _conversation(owner_id=11, requester_id=15, *extra):
+    base = [
+        {"id": 10, "channel": "c", "topic": "t", "sender_id": requester_id, "sender_full_name": "Front",
+         "sender_realm_str": "", "timestamp": 100, "content": "[selfnote][rootchat] front/front-x #9"},
+        {"id": 11, "channel": "c", "topic": "t", "sender_id": requester_id, "sender_full_name": "Front",
+         "sender_realm_str": "", "timestamp": 100, "content": "please do it"},
+    ]
+    return base + list(extra)
+
+
+def test_a_post_nobody_acknowledged_is_queued():
+    state, detail, *_ = tracing.classify(_conversation(), now=400)
+    assert state == "queued"
+
+
+def test_an_answer_the_requester_has_not_served_is_awaiting_delivery():
+    messages = _conversation(
+        11, 15,
+        {"id": 12, "sender_id": 11, "sender_full_name": "autolab", "sender_realm_str": "",
+         "timestamp": 110, "content": SWEEP_ACK},
+        {"id": 13, "sender_id": 11, "sender_full_name": "autolab", "sender_realm_str": "",
+         "timestamp": 200, "content": "@**Front** done, see above"},
+    )
+    home = [{"id": 5, "sender_id": 15, "content": "[selfnote][served] c/t 11"}]
+    state, *_ = tracing.classify(messages, now=400, homes={15: ("front", "front-x")},
+                                 home_messages={15: home}, here=("c", "t"))
+    assert state == "awaiting_delivery"
+    home.append({"id": 14, "sender_id": 15, "content": "[selfnote][served] c/t 13"})
+    state, *_ = tracing.classify(messages, now=400, homes={15: ("front", "front-x")},
+                                 home_messages={15: home}, here=("c", "t"))
+    assert state == "awaiting_requester"
+
+
+def test_a_failure_notice_after_the_request_is_failed():
+    messages = _conversation(
+        11, 15,
+        {"id": 12, "sender_id": 11, "sender_full_name": "autolab", "sender_realm_str": "",
+         "timestamp": 110, "content": SWEEP_ACK},
+        {"id": 13, "sender_id": 11, "sender_full_name": "autolab", "sender_realm_str": "",
+         "timestamp": 120, "content": "Please complete previous work (task 1 is open)"},
+    )
+    state, detail, *_ = tracing.classify(messages, now=400)
+    assert state == "failed" and "previous work" in detail
+
+
+def test_trace_lines_render_the_tree_and_the_owed_list():
+    result = tracing.trace(Realm(8425), ORIGIN, now=NOW_STALL)
+    text = "\n".join(tracing.trace_lines(result))
+    assert "task 8298#4" in text and "NOT_STARTED" in text
+    assert "owed now:" in text

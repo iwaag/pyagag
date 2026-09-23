@@ -1042,6 +1042,31 @@ class ZulipClient:
         # A note copied into a memo is text on display, not memory (`agag.memo`).
         return [m for m in result.get("messages", []) if not is_memo_message(m)]
 
+    def public_notes(self, tag: str, num_before: int = ROOTCHAT_HISTORY) -> list[dict]:
+        """Recent `[selfnote][<tag>]` candidates written by **anybody**, oldest first.
+
+        `own_notes` without the sender: the question "which conversations
+        were opened on behalf of that one" is asked by a reader that is not
+        the agent that opened them (`agag.trace`). `channels:public` makes it
+        the realm's public history rather than this bot's inbox, which only
+        holds the channels it is subscribed to. The caller parses; the search
+        only narrows.
+        """
+        result = self.call(
+            "GET", "messages",
+            {
+                "anchor": "newest",
+                "num_before": str(num_before),
+                "num_after": "0",
+                "apply_markdown": "false",
+                "narrow": [
+                    {"operator": "channels", "operand": "public"},
+                    {"operator": "search", "operand": tag},
+                ],
+            },
+        )
+        return [m for m in result.get("messages", []) if not is_memo_message(m)]
+
     def own_rootchat_notes(self, num_before: int = ROOTCHAT_HISTORY) -> list[dict]:
         """Recent root notes written by this bot, oldest first.
 

@@ -45,6 +45,7 @@ from .selfnote import (
     Conversation,
     home_from_environment,
     is_selfnote,
+    note,
     own_rootchat,
     parse_conversation,
     rootchat_moved_note,
@@ -55,6 +56,7 @@ from .zulip import (
     RESOLVED_TOPIC_PREFIX,
     ZulipClient,
     ZulipError,
+    ZulipRejected,
 )
 
 ENV_VARIABLE = "AGENTCHAT_ZULIP_ENV"
@@ -118,6 +120,11 @@ Examples
 
   # Everything newer than a message you have already seen.
   agentchat read <their-channel> <topic> --since <message-id>
+
+  # Where does a request stand? Every conversation opened for it, from the
+  # conversation you are serving (or the one holding <message-id>), with
+  # the state of each and what is owed.
+  agentchat trace [<message-id>]
 
   # Mark a conversation finished, once you have read it and it is finished.
   agentchat resolve <their-channel> <topic>
@@ -490,6 +497,29 @@ def build_parser() -> argparse.ArgumentParser:
             "default because they are not part of the conversation"
         ),
     )
+    trace = subcommands.add_parser(
+        "trace",
+        help="where a request stands: every conversation opened for it, and its state",
+        description=(
+            "Follow a request from one message down through every "
+            "conversation opened on its behalf — the topics carrying a root "
+            "note that names it, and theirs in turn — and print, for each, "
+            "what its posts show: not_started (nobody has posted since it was "
+            "opened), queued (a post the owner has not acknowledged), "
+            "executing (acknowledged, not answered yet), awaiting_requester, "
+            "awaiting_delivery (answered, and the requester has not served "
+            "the answer), awaiting_human, failed, done, cancelled, or "
+            "unobservable (it could not be read — which says nothing about "
+            "the work). 'owed now' lists what the records say somebody has "
+            "not done yet. A read: it posts nothing and serves nobody."
+        ),
+    )
+    trace.add_argument(
+        "message_id", nargs="?", type=int, default=None,
+        help="any message of the conversation to start from; defaults to the one this run is serving",
+    )
+    trace.add_argument("--json", action="store_true", help="print the tree as JSON (agag.trace.v1)")
+
     read.add_argument(
         "--since", type=int, default=None, metavar="MESSAGE_ID",
         help=(
@@ -702,6 +732,26 @@ def _run(args, client: ZulipClient, out) -> int:
                 return 0
         print(format_messages(messages), file=out)
         return 0
+    if args.command == "trace":
+        origin = args.message_id
+        if origin is None:
+            home = home_from_environment()
+            origin = home.anchor if home is not None else None
+        if origin is None:
+            raise AgentChatError(
+                "trace needs a message id: none was given and this run's "
+                "conversation carries no anchor"
+            )
+        from .trace import trace as trace_request, trace_lines
+
+        result = trace_request(client, int(origin))
+        if args.json:
+            import json
+
+            print(json.dumps(result.as_dict(), ensure_ascii=False, indent=1), file=out)
+        else:
+            print("\n".join(trace_lines(result)), file=out)
+        return 0 if result.root is not None else 1
     if args.command == "channels":
         lines = channel_lines(client.channels(), args.prefix)
         if not lines:
@@ -837,14 +887,52 @@ def _run(args, client: ZulipClient, out) -> int:
     raise AgentChatError(f"unknown command: {args.command}")
 
 
+#: The commands that change the realm. A failure of one of them is an event
+#: the run's own report may leave out; `OPFAIL_TAG` keeps it where a reader
+#: of the request can find it (`agag.trace`).
+WRITE_COMMANDS = ("send", "resolve", "unresolve", "use", "anchor", "argue")
+OPFAIL_TAG = "opfail"
+
+
+def record_failure(client, args, error, environ=None) -> None:
+    """`[selfnote][opfail] <command> <channel>/<topic>: <reason>` in the
+    conversation this run is serving.
+
+    `robust_workflow` p1 step 2. An agent whose post was refused carried on
+    with whatever the refusal suggested and reported the result, and the
+    refusal itself survived only in its own transcript. A note in the home
+    conversation is the one place every later reader of the request looks,
+    and a selfnote buys nobody a run. A timeout is recorded as *uncertain*:
+    the post may have landed. Best effort — a note that cannot be written is
+    not a second failure to report.
+    """
+    home = home_from_environment(environ)
+    if home is None or client is None:
+        return
+    target = "/".join(str(part) for part in (getattr(args, "channel", ""), getattr(args, "topic", "")) if part)
+    kind = "refused" if isinstance(error, (AgentChatError, ZulipRejected)) else "uncertain"
+    reason = " ".join(str(error).split())[:300]
+    try:
+        client.send_to_channel(
+            home.channel, home.topic,
+            note(OPFAIL_TAG, f"{args.command} {target or '-'} {kind}: {reason}"),
+        )
+    except Exception:  # noqa: BLE001 - best effort, see above
+        pass
+
+
 def main(argv: list[str] | None = None, out=None, err=None) -> int:
     out = sys.stdout if out is None else out
     err = sys.stderr if err is None else err
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    client = None
     try:
-        return _run(args, client_from_environment(), out)
+        client = client_from_environment()
+        return _run(args, client, out)
     except (AgentChatError, ZulipError) as error:
         print(f"agentchat: {error}", file=err)
+        if args.command in WRITE_COMMANDS:
+            record_failure(client, args, error)
         return 1
 
 

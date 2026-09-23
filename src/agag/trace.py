@@ -332,6 +332,40 @@ def _served_marks(home_messages: list[dict] | None, remote: tuple[str, str]) -> 
     return best
 
 
+def _unserved_answer(messages, owner, homes, home_messages, here):
+    """`(answer, requester name, home)` for the owner's newest answer that
+    names a requester whose home has not marked it served, or None."""
+    if owner is None or not homes:
+        return None
+    answers = [m for m in messages if m.get("sender_id") == owner and is_speech(m)
+               and not is_ack(str(m.get("content") or "")) and not _is_progress(m.get("content"))]
+    if not answers:
+        return None
+    answer = answers[-1]
+    named = {match.group("name").strip() for match in MENTION.finditer(str(answer.get("content") or ""))}
+    for requester_id, home in homes.items():
+        names = {_sender(m) for m in messages if m.get("sender_id") == requester_id}
+        if not names or not (names & named):
+            continue
+        if not _taken_up((home_messages or {}).get(requester_id), requester_id, int(answer.get("id") or 0), here):
+            return answer, ", ".join(sorted(names)), home
+    return None
+
+
+def _taken_up(home_messages, requester_id: int, answer_id: int, here) -> bool:
+    """Whether the requester dealt with an answer: its home's served mark
+    covers it, or the requester has spoken at home since. A served mark is
+    written for the post that triggered a serving; an answer that arrived
+    within that serving is answered without one."""
+    if _served_marks(home_messages, here) >= answer_id:
+        return True
+    return any(
+        m.get("sender_id") == requester_id and is_speech(m) and int(m.get("id") or 0) > answer_id
+        and not is_ack(str(m.get("content") or ""))
+        for m in home_messages or ()
+    )
+
+
 def _age(now: int, timestamp: int) -> str:
     if not timestamp:
         return "?"
@@ -372,6 +406,19 @@ def classify(
 
     word, word_id = _note_state(messages, owner)
     if word in DONE_WORDS:
+        # Finished in the owner's record is not received by the requester:
+        # forge writes `delivered` the moment it posts, and when the asker's
+        # listener is down that answer is owed all the same (robust_workflow
+        # p1 step 5, trial N2 — missed until this).
+        owed = _unserved_answer(messages, owner, homes, home_messages, here)
+        if owed is not None:
+            answer, requester, home = owed
+            return (
+                "awaiting_delivery",
+                f"{word}; {owner_name} answered #{answer['id']} naming {requester}; not marked served in "
+                f"{home[0]}/{home[1]} after {_age(now, int(answer.get('timestamp') or 0))}",
+                identity, owner_name, [int(answer["id"])], int(answer.get("timestamp") or 0),
+            )
         return "done", word, identity, owner_name, [word_id] if word_id else [], last_activity
     if word in CANCELLED_WORDS:
         return "cancelled", word, identity, owner_name, [word_id] if word_id else [], last_activity
@@ -472,7 +519,7 @@ def classify(
         if not requester_names or not (requester_names & named):
             continue
         served = _served_marks((home_messages or {}).get(requester_id), here)
-        if served >= mid(last_answer):
+        if _taken_up((home_messages or {}).get(requester_id), requester_id, mid(last_answer), here):
             return (
                 "awaiting_requester",
                 f"{owner_name} answered #{mid(last_answer)}; {', '.join(sorted(requester_names))} has taken it up (served up to {served})",

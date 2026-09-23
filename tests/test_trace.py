@@ -299,3 +299,25 @@ def test_the_mirror_reader_traces_without_a_zulip_call(tmp_path):
             assert realm.calls == before
     finally:
         mirror.stop()
+
+
+
+def test_a_delivered_record_is_still_owed_until_the_requester_serves_it():
+    """robust_workflow p1 N2: forge wrote `delivered` while Front's listener
+    was down; the trace said done and nobody noticed for eleven minutes."""
+    messages = _conversation(
+        11, 15,
+        {"id": 12, "sender_id": 11, "sender_full_name": "forge", "sender_realm_str": "",
+         "timestamp": 110, "content": SWEEP_ACK},
+        {"id": 13, "sender_id": 11, "sender_full_name": "forge", "sender_realm_str": "",
+         "timestamp": 200, "content": "@**Front** result: files/x.zip"},
+        {"id": 14, "sender_id": 11, "sender_full_name": "forge", "sender_realm_str": "",
+         "timestamp": 200, "content": "[selfnote][state] delivered"},
+    )
+    home = [{"id": 5, "sender_id": 15, "content": "[selfnote][served] c/t 11"}]
+    state, detail, *_ = tracing.classify(messages, now=600, homes={15: ("front", "front-x")},
+                                         home_messages={15: home}, here=("c", "t"))
+    assert state == "awaiting_delivery" and "delivered" in detail
+    home.append({"id": 15, "sender_id": 15, "content": "[selfnote][served] c/t 13"})
+    assert tracing.classify(messages, now=600, homes={15: ("front", "front-x")},
+                            home_messages={15: home}, here=("c", "t"))[0] == "done"

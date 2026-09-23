@@ -244,3 +244,22 @@ def test_the_reply_guide_is_appended_once_and_only_on_request():
     assert prompt.endswith(REPLY_GUIDE) and prompt.startswith("placement\n\nthe guide")
     assert topics.prompt_with_guide(["placement"], "the guide") == "placement\n\nthe guide"
     assert isinstance(ReplySplit("", "", 0), ReplySplit) and reply.REPLY_LANGUAGE == "ag-reply"
+
+
+
+# --- two closing slips seen live (robust_workflow p1, trial N1) ---
+
+
+def test_an_html_style_close_ends_the_block():
+    split = reply.split_reply("thinking\n```ag-reply\nPosted #8819.\n</ag-reply>\n\nmore notes")
+    assert split.ok and split.reply == "Posted #8819."
+
+
+def test_a_four_backtick_block_closed_with_three_is_closed_when_it_holds_no_other_fence():
+    split = reply.split_reply("````ag-reply\nAutolab is planning.\n- one\n```")
+    assert split.ok and split.reply == "Autolab is planning.\n- one"
+
+
+def test_a_real_code_block_inside_an_unclosed_reply_is_still_unclosed():
+    split = reply.split_reply("````ag-reply\nRun this:\n```\nls\n```")
+    assert not split.ok and "not closed" in split.error

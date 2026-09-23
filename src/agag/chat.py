@@ -59,6 +59,7 @@ from .zulip import (
     ZulipClient,
     ZulipError,
     ZulipRejected,
+    live_topic_name,
 )
 
 ENV_VARIABLE = "AGENTCHAT_ZULIP_ENV"
@@ -797,8 +798,14 @@ def _run(args, client: ZulipClient, out) -> int:
     if args.command == "trace":
         origin = args.message_id
         if origin is None:
+            # The conversation this run is serving — by its newest message,
+            # not by the run's anchor: a run called back from somebody else's
+            # topic is anchored to the post that named it *there*, and a trace
+            # from it sees only that topic (robust_workflow p1, trial N1).
             home = home_from_environment()
-            origin = home.anchor if home is not None else None
+            if home is not None:
+                live = live_topic_name(client, home.channel, home.topic)
+                origin = client.topic_last_id(home.channel, live) or home.anchor
         if origin is None:
             raise AgentChatError(
                 "trace needs a message id: none was given and this run's "

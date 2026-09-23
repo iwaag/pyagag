@@ -848,3 +848,20 @@ def test_unresolve_of_an_open_topic_changes_nothing(monkeypatch):
     code, out, _ = run(monkeypatch, ["unresolve", CHANNEL, TOPIC], client)
     assert code == 0 and "not resolved" in out
     assert [call for call in calls if call[0] == "rename"] == []
+
+
+
+def test_trace_defaults_to_the_served_conversation_not_the_callback_anchor(monkeypatch):
+    """A run called back from a task topic is anchored to the post there; a
+    trace from that anchor sees only the task (robust_workflow p1, N1)."""
+    calls = []
+    client = Client(calls, messages=[message(id=8850, sender_id=15, sender="Front", content="report")])
+    client.holders = {"front-a": 8850}
+    monkeypatch.setenv(selfnote.HOME_VARIABLE, "front/front-a")
+    monkeypatch.setenv("AGENTCHAT_HOME_ANCHOR", "8860")
+    seen = []
+    from agag import trace as tracing
+
+    monkeypatch.setattr(tracing, "trace", lambda client, origin: seen.append(origin) or tracing.Trace(None, origin, 0))
+    run(monkeypatch, ["trace"], client)
+    assert seen == [8850]

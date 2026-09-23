@@ -108,6 +108,12 @@ def split_reply(output: str) -> ReplySplit:
             else:
                 rest.append(line)
             continue
+        if nested is None and not match and line.strip().lower() == f"</{REPLY_LANGUAGE}>":
+            # An HTML-style close — a slip seen live (robust_workflow p1, N1),
+            # unambiguous outside a code fence.
+            replies.append("\n".join(body).strip("\n"))
+            in_reply = False
+            continue
         if match:
             if nested is None:
                 if not info and fence[0] == outer_char and len(fence) >= outer:
@@ -119,6 +125,18 @@ def split_reply(output: str) -> ReplySplit:
                 nested = None
         body.append(line)
     error = None
+    if in_reply:
+        # One bare fence as the block's last line, and no other fence in it:
+        # the close was written shorter than the opener (````ag-reply …
+        # ```), the slip the repair run made in robust_workflow p1 N1. With
+        # no other fence in the block it cannot be a code block's opening.
+        fences = [i for i, text in enumerate(body) if _FENCE.match(text)]
+        last = max((i for i, text in enumerate(body) if text.strip()), default=-1)
+        if len(fences) == 1 and fences[0] == last:
+            bare = _FENCE.match(body[last])
+            if not bare.group("info").strip() and bare.group("fence")[0] == outer_char:
+                replies.append("\n".join(body[:last]).strip("\n"))
+                in_reply = False
     if in_reply:
         # Unclosed: the text after the opener is kept for the record, but
         # a mark the run did not finish is not a reply it meant to send.

@@ -657,7 +657,7 @@ def next_actions(result: Trace) -> list[str]:
 def trace_lines(result: Trace) -> list[str]:
     """The tree as text: one line per conversation, indented by depth."""
     when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(result.observed_at))
-    lines = [f"trace from message {result.origin}, observed {when} ({result.calls} Zulip calls)"]
+    lines = [f"trace from message {result.origin}, observed {when} ({result.calls} reads)"]
     if result.problem:
         lines.append(f"! {result.problem}")
     if result.root is None:
@@ -688,3 +688,146 @@ def trace_lines(result: Trace) -> list[str]:
         lines.append("owed now:")
         lines.extend(f"  - {line}" for line in owed)
     return lines
+
+
+# --- reading the trace off a mirror (robust_workflow p1 step 4) -------------------
+
+
+class MirrorReader:
+    """The trace's four reads answered from an `agag.mirror.Mirror`: no Zulip
+    call at all. A process that already holds a mirror — every listener, the
+    Observer's worker — traces for free, which is what makes looking at every
+    active request on a timer affordable."""
+
+    def __init__(self, mirror):
+        self.mirror = mirror
+
+    def message(self, message_id: int, *, strict: bool = False) -> dict | None:
+        found = self.mirror.message(int(message_id))
+        return found.as_zulip() if found is not None and not getattr(found, "deleted", False) else None
+
+    def topic_history(self, channel: str, topic: str, num_before: int = HISTORY) -> list[dict]:
+        return self.mirror.history(channel, topic, num_before=num_before, across_resolve=False)
+
+    def public_notes(self, tag: str, num_before: int = NOTE_HISTORY) -> list[dict]:
+        found = []
+        for row in self.mirror.notes(tag=tag)[-num_before:]:
+            message = self.mirror.message(row.message_id)
+            if message is not None:
+                found.append(message.as_zulip())
+        return found
+
+
+# --- stall candidates: the mechanical half of detection ---------------------------
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """One thing the records say is owed and has not happened.
+
+    Elapsed time made it a candidate; it is not a verdict. `judgment` says
+    the facts alone cannot tell a stall from a legitimate wait (a ✔ on live
+    work may be a correction or a mistake; a long silence may be a long job),
+    and a reader with judgment — the Observer — decides those. The rest are
+    mechanical: a task nobody started after its predecessor closed, a post
+    nobody acknowledged, an answer nobody served, a failure notice.
+    """
+
+    kind: str
+    channel: str
+    topic: str
+    identity: str
+    fact: str
+    responsible: str
+    next_action: str
+    since: int
+    evidence: tuple[int, ...] = ()
+    judgment: bool = False
+
+    @property
+    def key(self) -> str:
+        anchor = self.evidence[0] if self.evidence else 0
+        return f"{self.kind}:{self.channel}/{_bare(self.topic)}:{anchor}"
+
+
+#: Seconds before each kind is a candidate — the grace a healthy system
+#: needs to do the thing by itself. Step 5 of the episode sets the targets.
+THRESHOLDS = {
+    "unstarted": 180,
+    "unacknowledged": 300,
+    "undelivered": 300,
+    "failed": 60,
+    "resolved_live": 60,
+    "silent": 2700,
+}
+
+
+def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | None = None) -> list[Candidate]:
+    """Everything in the tree that is owed and overdue."""
+    now = int(now if now is not None else time.time())
+    limits = {**THRESHOLDS, **(thresholds or {})}
+    found: list[Candidate] = []
+
+    def overdue(kind: str, since: int) -> bool:
+        return bool(since) and now - int(since) >= limits[kind]
+
+    root = result.root
+    for node in result.nodes():
+        is_root = node is root
+        resolved = node.topic.startswith(RESOLVED_TOPIC_PREFIX)
+        if node.state == "queued" and overdue("unacknowledged", node.last_activity):
+            found.append(Candidate(
+                "unacknowledged", node.channel, node.topic, node.identity, node.detail,
+                node.owner or "the agent that owns this conversation",
+                f"{node.owner or 'its owner'}'s listener picks up #{node.evidence[0] if node.evidence else '?'} and serves it",
+                node.last_activity, tuple(node.evidence),
+            ))
+        if is_root:
+            continue
+        if node.state == "awaiting_delivery" and overdue("undelivered", node.last_activity):
+            requester = node.requested_by[0].split(" #")[0] if node.requested_by else "the requester"
+            found.append(Candidate(
+                "undelivered", node.channel, node.topic, node.identity, node.detail, requester,
+                f"{requester} is served with the answer #{node.evidence[0] if node.evidence else '?'} and takes it up",
+                node.last_activity, tuple(node.evidence),
+            ))
+        if node.state == "failed" and overdue("failed", node.last_activity):
+            found.append(Candidate(
+                "failed", node.channel, node.topic, node.identity, node.detail,
+                node.owner or "the owner",
+                "whoever asked decides what to do about the failure (retry, change the request, or stop and say so)",
+                node.last_activity, tuple(node.evidence),
+            ))
+        if resolved and node.state in ("queued", "executing", "awaiting_delivery", "awaiting_requester") \
+                and overdue("resolved_live", node.last_activity):
+            found.append(Candidate(
+                "resolved_live", node.channel, node.topic, node.identity,
+                f"✔ while {node.state.replace('_', ' ')}: {node.detail}",
+                "whoever resolved it",
+                f"`agentchat unresolve {node.channel} {_bare(node.topic)}` if the ✔ was a mistake; nothing if it was a deliberate close",
+                node.last_activity, tuple(node.evidence) or (0,), judgment=True,
+            ))
+        if node.state == "executing" and overdue("silent", node.last_activity):
+            found.append(Candidate(
+                "silent", node.channel, node.topic, node.identity, node.detail,
+                node.owner or "the owner",
+                f"{node.owner or 'the owner'} answers, or says the work is still running",
+                node.last_activity, tuple(node.evidence), judgment=True,
+            ))
+        tasks = [child for child in node.children if _task_serial(child.identity)]
+        if tasks and node.note_state == "started":
+            finished_at = 0
+            for child in tasks:
+                if child.state in ("done", "cancelled"):
+                    finished_at = max(finished_at, child.last_activity)
+                    continue
+                if child.state == "not_started" and overdue("unstarted", finished_at or node.last_activity):
+                    found.append(Candidate(
+                        "unstarted", child.channel, child.topic, child.identity,
+                        f"{child.identity} has no post and no start although every task before it is finished",
+                        child.owner or node.owner or "the owner",
+                        f"{child.identity} starts (a post in {child.channel}/{_bare(child.topic)} starts it)",
+                        finished_at or node.last_activity, tuple(child.evidence) or (0,),
+                    ))
+                break
+    return found

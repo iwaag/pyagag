@@ -242,3 +242,60 @@ def test_a_task_its_owner_started_is_queued_then_executing_then_answered():
 def test_a_held_task_is_waiting_on_its_requester_not_owed():
     state, detail, *_ = tracing.classify(_task("[selfnote][state] held"), now=400)
     assert state == "awaiting_requester" and "held" in detail
+
+
+# --- candidates (robust_workflow p1 step 4) --------------------------------------
+
+
+def test_the_p3_stall_is_a_candidate_six_minutes_in():
+    result = tracing.trace(Realm(8425), ORIGIN, now=NOW_STALL)
+    found = tracing.stall_candidates(result, now=NOW_STALL)
+    kinds = [(c.kind, c.topic.split("/")[-1]) for c in found]
+    assert ("unstarted", "workrun-task4-m8298") in kinds
+    unstarted = next(c for c in found if c.kind == "unstarted")
+    assert unstarted.responsible.startswith("autolab") and not unstarted.judgment
+    assert unstarted.key == tracing.stall_candidates(result, now=NOW_STALL + 600)[0].key, "stable across looks"
+
+
+def test_nothing_is_a_candidate_while_the_task_runs_or_before_the_grace():
+    running = tracing.trace(Realm(8413), ORIGIN, now=NOW_STALL - 360)
+    assert not [c for c in tracing.stall_candidates(running, now=NOW_STALL - 360) if "task3" in c.topic]
+    just_closed = tracing.trace(Realm(8425), ORIGIN, now=NOW_STALL)
+    closed_at = next(n for n in just_closed.nodes() if n.topic.endswith("task3-m8298")).last_activity
+    assert not [c for c in tracing.stall_candidates(just_closed, now=closed_at + 60) if c.kind == "unstarted"]
+
+
+def test_a_resolved_conversation_with_live_work_needs_judgment():
+    result = tracing.trace(Realm(8425), ORIGIN, now=NOW_STALL)
+    twin = [c for c in tracing.stall_candidates(result, now=NOW_STALL) if c.kind == "resolved_live"]
+    assert twin and all(c.judgment for c in twin)
+    assert "unresolve" in twin[0].next_action
+
+
+def test_the_mirror_reader_traces_without_a_zulip_call(tmp_path):
+    from agag.mirror import Mirror
+    from agag.mirror.testing import FakeRealm
+
+    realm = FakeRealm()
+    realm.add_channel(3, "front")
+    realm.add_channel(6, "pj-x")
+    origin = realm.post("front", "front-a", "please build it", sender_id=8, sender_name="Developer")
+    realm.post("front", "front-a", SWEEP_ACK, sender_id=15, sender_name="Front")
+    realm.post("pj-x", "workplan-a", "[selfnote][rootchat] front/front-a", sender_id=15, sender_name="Front")
+    realm.post("pj-x", "workplan-a", "Mission: build it", sender_id=15, sender_name="Front")
+    mirror = Mirror.open(tmp_path / "zulip.env", tmp_path / "mirror", client_factory=realm.facet,
+                         log=lambda line: None, start=True, resync_backoff=0.05)
+    try:
+        import time as _time
+        deadline = _time.time() + 5
+        while _time.time() < deadline and mirror.message(origin) is None:
+            _time.sleep(0.05)
+        before = realm.calls if hasattr(realm, "calls") else None
+        result = tracing.trace(tracing.MirrorReader(mirror), origin)
+        assert result.root is not None and result.root.state == "executing"
+        assert [child.topic for child in result.root.children] == ["workplan-a"]
+        assert result.root.children[0].state == "queued"
+        if before is not None:
+            assert realm.calls == before
+    finally:
+        mirror.stop()

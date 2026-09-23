@@ -214,3 +214,31 @@ def test_trace_lines_render_the_tree_and_the_owed_list():
     text = "\n".join(tracing.trace_lines(result))
     assert "task 8298#4" in text and "NOT_STARTED" in text
     assert "owed now:" in text
+
+
+def _task(*extra):
+    base = [
+        {"id": 1, "sender_id": 11, "sender_full_name": "autolab", "sender_realm_str": "", "timestamp": 100,
+         "content": "[selfnote][task] 7#2"},
+        {"id": 2, "sender_id": 11, "sender_full_name": "autolab", "sender_realm_str": "", "timestamp": 100,
+         "content": "# Task 2 spec"},
+    ]
+    return base + [
+        {"id": 3 + n, "sender_id": 11, "sender_full_name": "autolab", "sender_realm_str": "", "timestamp": 200 + n,
+         "content": content}
+        for n, content in enumerate(extra)
+    ]
+
+
+def test_a_task_its_owner_started_is_queued_then_executing_then_answered():
+    """robust_workflow p1 step 3: autolab starts the next task itself."""
+    start = "[selfnote][start] #50 for 15 Front"
+    assert tracing.classify(_task("Starting task 2.", start), now=400)[0] == "queued"
+    assert tracing.classify(_task("Starting task 2.", start, SWEEP_ACK), now=400)[0] == "executing"
+    state, detail, *_ = tracing.classify(_task("Starting task 2.", start, SWEEP_ACK, "@**Front** done"), now=400)
+    assert state == "awaiting_requester" and "started by autolab" in detail
+
+
+def test_a_held_task_is_waiting_on_its_requester_not_owed():
+    state, detail, *_ = tracing.classify(_task("[selfnote][state] held"), now=400)
+    assert state == "awaiting_requester" and "held" in detail

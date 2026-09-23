@@ -273,14 +273,16 @@ def test_send_refuses_the_bare_name_of_a_resolved_topic(monkeypatch):
     client = Client(calls)
     client.holders = {f"✔ {TOPIC}": 77}
     code, out, err = run(monkeypatch, ["send", CHANNEL, TOPIC, "start again"], client)
-    assert code != 0 and "resolved" in err and f"agentchat read {CHANNEL} {TOPIC}" in err
+    # The advice names the correction path, not a new topic (robust_workflow
+    # p1: "a new request goes in a new topic" is what forked p3's twin).
+    assert code != 0 and "resolved" in err and f"agentchat unresolve {CHANNEL} {TOPIC}" in err
     assert [call for call in calls if call[0] == "send"] == []
 
 
 def test_send_refuses_a_resolved_name_outright(monkeypatch):
     calls = []
     code, _, err = run(monkeypatch, ["send", CHANNEL, f"✔ {TOPIC}", "hi"], Client(calls))
-    assert code != 0 and "finished" in err
+    assert code != 0 and "is resolved" in err and "unresolve" in err
     assert [call for call in calls if call[0] == "send"] == []
 
 
@@ -438,7 +440,8 @@ def test_listing_channels_never_touches_subscriptions(monkeypatch):
 
 def test_resolve_renames_the_topic_through_its_last_message(monkeypatch):
     calls = []
-    client = Client(calls)
+    client = Client(calls, messages=[message(id=70, sender_id=15, sender="Front", content="please"),
+                                     message(id=77, content="done, here it is")])
     client.holders = {TOPIC: 77}
     code, out, err = run(monkeypatch, ["resolve", CHANNEL, TOPIC], client)
     assert code == 0 and err == ""
@@ -779,3 +782,69 @@ def test_a_failed_read_records_nothing(monkeypatch):
     monkeypatch.setenv("AGENTCHAT_HOME", "front/front-x")
     assert chat.main(["read", CHANNEL, TOPIC], out=io.StringIO(), err=io.StringIO()) == 1
     assert not [c for c in calls if c[0] == "send"]
+
+
+
+# --- resolve is request-aware; unresolve undoes it (robust_workflow p1 step 3) ---
+
+
+class Renaming(Client):
+    def rename_topic(self, message_id, new_name):
+        self.calls.append(("rename", message_id, new_name))
+
+
+def test_resolve_refuses_while_our_own_post_is_unanswered(monkeypatch):
+    """adventure_game p3 F1: Front resolved the workplan four seconds after
+    posting the mission into it, while autolab was serving it."""
+    calls = []
+    client = Client(calls, messages=[message(id=8292, sender_id=15, sender="Front", content="Mission for autolab …"),
+                                     message(id=8293, sender_id=11, sender="autolab",
+                                             content="Message received. Please wait for the reply.")])
+    client.holders = {TOPIC: 8293}
+    code, _, err = run(monkeypatch, ["resolve", CHANNEL, TOPIC], client)
+    assert code == 1
+    assert "#8292" in err and "acknowledged it and is working on it" in err and "--anyway" in err
+    assert [call for call in calls if call[0] == "resolve"] == []
+
+
+def test_resolve_anyway_resolves(monkeypatch):
+    calls = []
+    client = Client(calls, messages=[message(id=10, sender_id=15, sender="Front", content="thanks, closing")])
+    client.holders = {TOPIC: 10}
+    code, _, _ = run(monkeypatch, ["resolve", CHANNEL, TOPIC, "--anyway"], client)
+    assert code == 0 and ("resolve", 10, TOPIC) in calls
+
+
+def test_resolve_is_allowed_once_the_other_side_answered(monkeypatch):
+    calls = []
+    client = Client(calls, messages=[message(id=10, sender_id=15, sender="Front", content="please"),
+                                     message(id=11, sender_id=11, sender="autolab", content="done")])
+    client.holders = {TOPIC: 11}
+    code, _, _ = run(monkeypatch, ["resolve", CHANNEL, TOPIC], client)
+    assert code == 0 and ("resolve", 11, TOPIC) in calls
+
+
+def test_unresolve_renames_the_resolved_topic_back(monkeypatch):
+    calls = []
+    client = Renaming(calls)
+    client.holders = {f"✔ {TOPIC}": 8325}
+    code, out, _ = run(monkeypatch, ["unresolve", CHANNEL, TOPIC], client)
+    assert code == 0 and ("rename", 8325, TOPIC) in calls and "unresolved" in out
+
+
+def test_unresolve_refuses_to_merge_into_a_twin(monkeypatch):
+    calls = []
+    client = Renaming(calls)
+    client.holders = {f"✔ {TOPIC}": 8325, TOPIC: 8400}
+    code, _, err = run(monkeypatch, ["unresolve", CHANNEL, f"✔ {TOPIC}"], client)
+    assert code == 1 and "merge" in err
+    assert [call for call in calls if call[0] == "rename"] == []
+
+
+def test_unresolve_of_an_open_topic_changes_nothing(monkeypatch):
+    calls = []
+    client = Renaming(calls)
+    client.holders = {TOPIC: 5}
+    code, out, _ = run(monkeypatch, ["unresolve", CHANNEL, TOPIC], client)
+    assert code == 0 and "not resolved" in out
+    assert [call for call in calls if call[0] == "rename"] == []

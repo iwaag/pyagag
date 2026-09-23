@@ -288,3 +288,48 @@ def test_a_queue_file_from_before_the_schema_key_is_rebuilt_not_crashed(tmp_path
     again = Queue(path)
     assert len(again) == 1
     again.close()
+
+
+# --- an owner's own start (robust_workflow p1 step 3) ------------------------------
+
+
+def test_an_owner_s_start_note_is_served_once_and_survives_a_restart(tmp_path):
+    """autolab starts the next task of an authorized mission itself: a
+    visible line and a `[selfnote][start]` of its own in a topic nobody else
+    has posted into. Until now such a topic was never owed — its last speaker
+    was the owner — which is why every task needed a relay's post."""
+    realm = realm_with_channels()
+    realm.post("pj-x", "workplan-t2", "Task 2 spec", sender_id=BOT, sender_name="Mirror Bot")
+    h = Harness(realm, tmp_path).start()
+    realm.post("pj-x", "workplan-t2", "Starting task 2: task 1 was accepted.", sender_id=BOT,
+               sender_name="Mirror Bot")
+    realm.post("pj-x", "workplan-t2", "[selfnote][start] #5 for 7 Dev", sender_id=BOT, sender_name="Mirror Bot")
+    wait_until(lambda: (OWNER, "pj-x", "workplan-t2") in h.served, what="the start to be served")
+    time.sleep(0.5)
+    assert h.served.count((OWNER, "pj-x", "workplan-t2")) == 1, "answered once, then nothing owed"
+    h.stop()
+
+    again = Harness(realm, tmp_path).start()
+    time.sleep(0.5)
+    assert (OWNER, "pj-x", "workplan-t2") not in again.served, "the answer after the note spends it"
+    again.stop()
+
+
+def test_a_start_note_left_unanswered_by_a_crash_is_recovered(tmp_path):
+    realm = realm_with_channels()
+    realm.post("pj-x", "workplan-t3", "Task 3 spec", sender_id=BOT, sender_name="Mirror Bot")
+    realm.post("pj-x", "workplan-t3", "[selfnote][start] #5 for 7 Dev", sender_id=BOT, sender_name="Mirror Bot")
+    realm.post("pj-x", "workplan-t3", ACK, sender_id=BOT, sender_name="Mirror Bot")  # acked, then the crash
+    h = Harness(realm, tmp_path).start()
+    wait_until(lambda: (OWNER, "pj-x", "workplan-t3") in h.served, what="recovery to serve the start")
+    h.stop()
+
+
+def test_somebody_else_s_start_note_is_not_our_work(tmp_path):
+    realm = realm_with_channels()
+    realm.post("pj-x", "workplan-t4", "Task 4 spec", sender_id=BOT, sender_name="Mirror Bot")
+    h = Harness(realm, tmp_path).start()
+    realm.post("pj-x", "workplan-t4", "[selfnote][start] #5 for 7 Dev", sender_id=OTHER, sender_name="Other")
+    time.sleep(0.6)
+    assert (OWNER, "pj-x", "workplan-t4") not in h.served
+    h.stop()

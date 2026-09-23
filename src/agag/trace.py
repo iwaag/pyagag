@@ -64,7 +64,9 @@ from .selfnote import (
     SERVED_TAG,
     Conversation,
     is_speech,
+    owed_start,
     parse_note,
+    parse_start,
     parse_rootchat,
     parse_rootchat_moved,
     parse_served,
@@ -98,6 +100,8 @@ IDENTITY_TAGS = ("mission", "task", "asset", "assetrun", "change")
 STATE_TAG = "state"
 #: `agag.chat.OPFAIL_TAG`, spelled here so the reader needs no CLI import.
 OPFAIL_TAG = "opfail"
+#: A task its owner will not start by itself: the requester asked it to wait.
+HELD_WORD = "held"
 DONE_WORDS = frozenset({"completed", "accepted", "done", "delivered"})
 CANCELLED_WORDS = frozenset({"cancelled", "replaced", "retired"})
 #: A post by the owner whose text begins with one of these is a failure
@@ -276,6 +280,10 @@ def _identity(messages: list[dict]) -> tuple[str, int | None]:
     return "", None
 
 
+def _by_id(messages: list[dict], message_id: int) -> dict:
+    return next((m for m in messages if int(m.get("id") or 0) == int(message_id)), {})
+
+
 def _task_serial(identity: str) -> tuple[int, int] | None:
     match = re.match(r"^task (\d+)\s*#\s*(\d+)$", identity)
     return (int(match.group(1)), int(match.group(2))) if match else None
@@ -397,6 +405,39 @@ def classify(
     if last_other is None:
         if human:
             return "awaiting_human", "only the agent has spoken", identity, owner_name, [], last_activity
+        starts = [m for m in messages
+                  if m.get("sender_id") == owner and parse_start(m.get("content")) is not None]
+        pending = owed_start(messages, owner, is_ack=is_ack)
+        if pending is not None:
+            acked = [m for m in acks if mid(m) > pending["id"]]
+            if acked:
+                newest = max([acked[-1], *progress[-1:]], key=mid)
+                return (
+                    "executing",
+                    f"started by {owner_name} at #{pending['id']} for {pending['sender_full_name']}; "
+                    f"last sign of work {_age(now, int(newest.get('timestamp') or 0))} ago",
+                    identity, owner_name, [pending["id"], mid(acked[-1])], int(newest.get("timestamp") or 0),
+                )
+            return (
+                "queued",
+                f"started by {owner_name} at #{pending['id']}, not picked up for "
+                f"{_age(now, int(_by_id(messages, pending['id']).get('timestamp') or 0))}",
+                identity, owner_name, [pending["id"]], last_activity,
+            )
+        if starts and last_answer is not None and mid(last_answer) > mid(starts[-1]):
+            start = parse_start(starts[-1].get("content"))
+            return (
+                "awaiting_requester",
+                f"started by {owner_name} at #{mid(starts[-1])}; answered #{mid(last_answer)} "
+                f"for {start[2] if start else 'the requester'} {_age(now, int(last_answer.get('timestamp') or 0))} ago",
+                identity, owner_name, [mid(last_answer)], last_activity,
+            )
+        if word == HELD_WORD:
+            return (
+                "awaiting_requester",
+                "held: the requester asked for this task to wait; a post here starts it",
+                identity, owner_name, [word_id] if word_id else [], last_activity,
+            )
         where = f" (opened by {owner_name})" if owner_name else ""
         return (
             "not_started",
@@ -599,8 +640,8 @@ def next_actions(result: Trace) -> list[str]:
             for child in tasks:
                 if child.state == "not_started" and finished and node.note_state == "started":
                     lines.append(
-                        f"{child.channel}/{child.topic}: {child.identity} has no post since it was opened, "
-                        "and every task before it is finished"
+                        f"{child.channel}/{child.topic}: {child.identity} has no post and no start since it "
+                        "was opened, and every task before it is finished"
                     )
                     break
                 finished = finished and child.state in ("done", "cancelled")

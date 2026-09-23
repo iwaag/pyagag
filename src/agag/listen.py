@@ -90,7 +90,8 @@ from .delivery import DeliveryError
 from .memo import is_memo_channel
 from .mirror import Change, Mirror, Message, bare_topic
 from .selfnote import (
-    SELFNOTE_MARKER, Conversation, is_selfnote, is_speech, note as selfnote_line, parse_served, served_note,
+    SELFNOTE_MARKER, Conversation, is_selfnote, is_speech, note as selfnote_line, owed_start, parse_served,
+    parse_start, served_note,
 )
 from .serving import ACKED, DELIVERED, EXECUTED, FAILED, INTERRUPTED, PREPARED, RECEIVED, Serving
 from .status import StatusWriter, default_status_path
@@ -608,8 +609,15 @@ class Listener:
 
                 history = [m.as_zulip() for m in self.mirror.messages(entry.channel, index.live_name,
                                                                        across_resolve=False)]
-                return index.live_name if unprocessed_input(history, self.self_id, record.input_up_to) else None
+                if unprocessed_input(history, self.self_id, record.input_up_to):
+                    return index.live_name
+                start = self.pending_start(entry.channel, index.live_name)
+                return index.live_name if start is not None and start["id"] > record.input_up_to else None
         last = self._last_real(entry.channel, index.live_name)
+        if entry.route == OWNER and (last is None or last.sender_id == self.self_id):
+            # Nobody else owes us an answer here — unless we started it
+            # ourselves and no serving has answered the start yet.
+            return index.live_name if self.pending_start(entry.channel, index.live_name) is not None else None
         if last is None:
             # A listed topic holds messages; if none is speech, nobody spoke.
             return None
@@ -621,6 +629,12 @@ class Listener:
                                        marks.get((entry.channel, entry.topic), 0)) is None:
                 return None
         return index.live_name
+
+    def pending_start(self, channel: str, live_name: str) -> dict | None:
+        """Our own start note in this conversation that no serving has
+        answered (`agag.selfnote.owed_start`), or None."""
+        history = [m.as_zulip() for m in self.mirror.messages(channel, live_name, across_resolve=False)]
+        return owed_start(history, self.self_id, is_ack=self.is_ack)
 
     def unanswered_mention(self, channel: str, live_name: str, mark: int) -> Message | None:
         """The newest post naming this bot above its served mark, or None.
@@ -650,7 +664,15 @@ class Listener:
             return  # a memo is read, never answered: no post, mention or rename there is work
         if change.kind == "message" and change.message_id is not None:
             message = self.mirror.message(change.message_id)
-            if message is None or message.sender_id == self.self_id or is_selfnote(message.content):
+            if message is None:
+                return
+            if message.sender_id == self.self_id and parse_start(message.content) is not None:
+                # Our own deliberate start (`agag.selfnote.start_note`): the
+                # one note of ours that is work — for a conversation we own.
+                if not message.resolved and topic_matches(message.channel, message.topic, self.topic_filter):
+                    self._enqueue(message.channel, bare_topic(message.topic), OWNER, change.revision, message.id)
+                return
+            if message.sender_id == self.self_id or is_selfnote(message.content):
                 return
             if is_memo_channel(message.channel):
                 return  # the change row may predate the channel's name; the message knows it
@@ -696,6 +718,12 @@ class Listener:
             if last is not None and last.sender_id == self.self_id and self.is_ack(last.content.strip()):
                 last = self._last_real(index.channel, index.live_name)  # our ack answers nothing
             if last is None or last.sender_id == self.self_id:
+                start = None
+                if topic_matches(index.channel, index.live_name, self.topic_filter):
+                    start = self.pending_start(index.channel, index.live_name)
+                if start is not None and self.queue.enqueue(index.channel, index.name, OWNER,
+                                                            revision=revision, message_id=start["id"]):
+                    added += 1
                 continue
             if topic_matches(index.channel, index.live_name, self.topic_filter):
                 route, newest = OWNER, last.id

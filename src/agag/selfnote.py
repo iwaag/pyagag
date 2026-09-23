@@ -82,6 +82,7 @@ __all__ = [
     "ROOTCHAT_TAG",
     "SELFNOTE_MARKER",
     "SERVED_TAG",
+    "START_TAG",
     "Conversation",
     "effective_rootchat",
     "home_from_environment",
@@ -102,6 +103,10 @@ __all__ = [
     "rootchat_moved_note",
     "rootchat_note",
     "served_note",
+    "owed_start",
+    "parse_start",
+    "start_note",
+    "is_progress",
     "without_selfnotes",
 ]
 
@@ -261,6 +266,82 @@ def replaced_anchor(messages) -> int | None:
         if anchor is not None:
             return anchor
     return None
+
+
+#: The tag of an owner's deliberate start of its own conversation
+#: (`robust_workflow` p1 step 3).
+START_TAG = "start"
+#: A line of live progress (`🔧 tool: detail`, `💬 text`) — autolab's
+#: `RunProgress` — is evidence that a run is working, not an answer.
+_PROGRESS = re.compile(r"^(\U0001F527|\U0001F4AC)")
+
+
+def is_progress(content) -> bool:
+    """Whether a post is nothing but progress lines."""
+    lines = [line.strip() for line in str(content or "").splitlines() if line.strip()]
+    return bool(lines) and all(_PROGRESS.match(line) for line in lines)
+
+
+def start_note(because_id: int, requester_id: int, requester_name: str) -> str:
+    """`[selfnote][start] #<because> for <user id> <name>`.
+
+    An owner's own decision to serve one of its conversations that nobody
+    else has posted into: autolab starting the next task of a mission the
+    requester authorized, after the requester accepted the previous one.
+    Until `robust_workflow` p1 the only thing that could start a
+    conversation was somebody else's post, so every task needed a relay —
+    and the relay was the step adventure_game p3 lost 24 minutes to.
+
+    `because` is the post that made the start due (the acceptance), so the
+    record says why; the requester is who the answer is handed to, because
+    in a conversation where only its owner has spoken there is nobody else
+    to hand it to. It is a selfnote — it buys nobody *else* a run; it is the
+    owner owing itself one.
+    """
+    name = " ".join(str(requester_name or "").split())
+    return note(START_TAG, f"#{int(because_id)} for {int(requester_id)} {name}".rstrip())
+
+
+_START = re.compile(r"^#(?P<because>\d+)\s+for\s+(?P<user>\d+)(?:\s+(?P<name>.+))?$")
+
+
+def parse_start(content) -> tuple[int, int, str] | None:
+    """`(because id, requester id, requester name)`, or None."""
+    value = parse_note(content, START_TAG)
+    if value is None:
+        return None
+    match = _START.match(value.strip())
+    if match is None:
+        return None
+    return int(match.group("because")), int(match.group("user")), (match.group("name") or "").strip()
+
+
+def owed_start(messages, self_id: int, is_ack=lambda content: False) -> dict | None:
+    """The newest start note of this bot that no serving has answered yet,
+    as a requester-shaped message (`id`, `sender_id`, `sender_full_name`,
+    `because`), or None.
+
+    Answered means: this bot said something after the note that is neither
+    its ack nor a progress line. An ack or progress alone is a run that
+    started and did not finish — a crash there leaves the start owed, which
+    is the rule every other serving already follows.
+    """
+    pending = None
+    for message in messages:
+        if message.get("sender_id") != self_id:
+            continue
+        parsed = parse_start(message.get("content"))
+        if parsed is not None:
+            because, requester, name = parsed
+            pending = {"id": int(message.get("id") or 0), "sender_id": requester,
+                       "sender_full_name": name, "because": because}
+            continue
+        content = str(message.get("content") or "")
+        if pending is None or is_selfnote(content) or is_ack(content.strip()) or is_progress(content):
+            continue
+        if not is_system_notice(message):
+            pending = None
+    return pending
 
 
 def served_note(remote: Conversation, message_id: int) -> str:

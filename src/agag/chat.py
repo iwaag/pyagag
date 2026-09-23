@@ -44,7 +44,9 @@ from .memo import is_memo_channel
 from .selfnote import (
     Conversation,
     home_from_environment,
+    is_progress,
     is_selfnote,
+    is_speech,
     note,
     own_rootchat,
     parse_conversation,
@@ -129,6 +131,9 @@ Examples
   # Mark a conversation finished, once you have read it and it is finished.
   agentchat resolve <their-channel> <topic>
 
+  # Resolved by mistake? Put it back: same conversation, same record.
+  agentchat unresolve <their-channel> <topic>
+
   # Who can be asked to run under a particular execution option, and what
   # each of their options costs and covers.
   agentchat options
@@ -170,10 +175,12 @@ Notes
   A topic that somebody marks resolved is renamed to "✔ <topic>". Keep using
   the name you know: reading follows the topic across that rename, so the
   close-out itself is not what makes you lose sight of it. `resolve` takes
-  the name you know too, and says so when it was already resolved. `send`
-  refuses a resolved conversation: a post under its old name would open an
-  empty topic beside it, not reach it. What comes next is a new request,
-  where that agent's introduction says new requests go.
+  the name you know too, and says so when it was already resolved. A resolve
+  is only a rename — it stops no work — so `resolve` refuses while your own
+  post there is still unanswered, and `unresolve` undoes one: the
+  conversation, everything anchored to it and the work in it stay as they
+  were. `send` refuses a resolved conversation, because a post under its old
+  name would open an empty topic beside it rather than reach it.
 
   Resolving is somebody's decision, not a tidying reflex. Read the
   conversation, satisfy yourself that it is over, and resolve it when you
@@ -567,6 +574,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     resolve.add_argument("channel", help="channel name, without the leading '#'")
     resolve.add_argument("topic", help="topic name, resolved or not")
+    resolve.add_argument(
+        "--anyway", action="store_true",
+        help=(
+            "resolve even though your own latest post there has not been "
+            "answered — for a conversation you know is finished regardless"
+        ),
+    )
+
+    unresolve = subcommands.add_parser(
+        "unresolve",
+        help="undo a resolve: rename '✔ <topic>' back to '<topic>'",
+        description=(
+            "Rename '✔ <topic>' back to '<topic>'. A resolve is only a "
+            "rename, so this restores the conversation exactly: its messages, "
+            "every note anchored in it and any work its agent is doing stay "
+            "the same. Refused when a topic of the bare name already has "
+            "messages, because the rename would merge the two."
+        ),
+    )
+    unresolve.add_argument("channel", help="channel name, without the leading '#'")
+    unresolve.add_argument("topic", help="topic name, with or without the '✔ '")
 
     options = subcommands.add_parser(
         "options",
@@ -676,21 +704,55 @@ def refuse_resolved(client: ZulipClient, channel: str, topic: str) -> None:
     to nothing. A finished conversation is read, not written to; what comes
     next goes where that agent's introduction says a new request goes.
     """
+    bare = topic[len(RESOLVED_TOPIC_PREFIX):] if topic.startswith(RESOLVED_TOPIC_PREFIX) else topic
+    advice = (
+        f"If it was resolved by mistake, `agentchat unresolve {channel} {bare}` "
+        "puts it back — same conversation, same record, nothing forked — and "
+        "then post. If the work there is really finished, what comes next is a "
+        "new request, where that agent's introduction says new requests go."
+    )
     if topic.startswith(RESOLVED_TOPIC_PREFIX):
-        raise AgentChatError(
-            f"#{channel} > {topic} is a resolved conversation: it is finished. "
-            "Read it; a new request goes in a new topic."
-        )
+        raise AgentChatError(f"#{channel} > {topic} is resolved, so nothing is posted into it. {advice}")
     resolved = f"{RESOLVED_TOPIC_PREFIX}{topic}"
     if client.topic_last_id(channel, resolved) and not client.topic_last_id(
         channel, topic
     ):
         raise AgentChatError(
-            f"#{channel} > {topic} was resolved (it is now {resolved!r}): that "
-            "conversation is finished, and a post under the old name would open "
-            "an empty topic beside it. Read it with `agentchat read "
-            f"{channel} {topic}`; a new request goes in a new topic."
+            f"#{channel} > {topic} is resolved (it is now {resolved!r}), and a "
+            f"post under the old name would open an empty topic beside it. {advice}"
         )
+
+
+def unanswered_request(history, me: dict) -> str | None:
+    """Why resolving this conversation would cut off our own request, or None.
+
+    `robust_workflow` p1 step 3. Front resolved a `workplan-` topic four
+    seconds after posting the mission into it (adventure_game p3); autolab
+    was already serving it. A resolve renames and stops nothing, so the
+    only thing it did was hide a live request. The check is about the
+    request, not the clock: our newest real post is the newest one there
+    and nobody has answered it — whether the other side only acknowledged
+    it (the work is running) or has not even done that.
+    """
+    from .agent import is_ack
+
+    self_id = int(me.get("user_id") or 0)
+    speech = [m for m in history if is_speech(m)]
+    answers = [m for m in speech if not is_ack(str(m.get("content") or "").strip()) and not is_progress(m.get("content"))]
+    if not answers or answers[-1].get("sender_id") != self_id:
+        return None
+    mine = answers[-1]
+    acks = [m for m in speech if m.get("sender_id") != self_id and int(m.get("id", 0)) > int(mine.get("id", 0))]
+    doing = (
+        f"{acks[-1].get('sender_full_name') or 'the other side'} has acknowledged it and is working on it"
+        if acks else "nobody has answered or acknowledged it yet"
+    )
+    return (
+        f"your post #{mine.get('id')} is the newest word here and {doing}. A resolve "
+        "only renames the conversation — it does not stop or withdraw anything. "
+        "To withdraw the request, say so in the conversation; if it is finished "
+        "regardless, add --anyway."
+    )
 
 
 def _run(args, client: ZulipClient, out) -> int:
@@ -768,14 +830,38 @@ def _run(args, client: ZulipClient, out) -> int:
         if client.topic_last_id(args.channel, resolved):
             print(f"#{args.channel} > {bare} is already resolved", file=out)
             return 0
-        message_id = client.topic_last_id(args.channel, bare)
-        if not message_id:
+        history = client.topic_history(args.channel, bare, num_before=LAST_SPEAKER_LOOKBACK)
+        if not history:
             raise AgentChatError(
                 f"no messages in #{args.channel} > {bare}: there is no "
                 "conversation here to resolve"
             )
-        client.resolve_topic(message_id, bare)
+        if not args.anyway:
+            unanswered = unanswered_request(history, client.whoami())
+            if unanswered:
+                raise AgentChatError(f"#{args.channel} > {bare}: {unanswered}")
+        client.resolve_topic(int(history[-1]["id"]), bare)
         print(f"resolved #{args.channel} > {bare}", file=out)
+        return 0
+    if args.command == "unresolve":
+        bare = args.topic
+        if bare.startswith(RESOLVED_TOPIC_PREFIX):
+            bare = bare[len(RESOLVED_TOPIC_PREFIX):]
+        resolved = f"{RESOLVED_TOPIC_PREFIX}{bare}"
+        message_id = client.topic_last_id(args.channel, resolved)
+        if not message_id:
+            if client.topic_last_id(args.channel, bare):
+                print(f"#{args.channel} > {bare} is not resolved", file=out)
+                return 0
+            raise AgentChatError(f"no conversation #{args.channel} > {resolved} to unresolve")
+        if client.topic_last_id(args.channel, bare):
+            raise AgentChatError(
+                f"#{args.channel} > {bare} already has messages beside {resolved!r}: "
+                "renaming it back would merge two conversations. Read both, and "
+                "continue in the one the work belongs to."
+            )
+        client.rename_topic(message_id, bare)
+        print(f"unresolved #{args.channel} > {bare}", file=out)
         return 0
     if args.command == "options":
         lines = exec_options_lines(harvest_intros(client), args.agent)

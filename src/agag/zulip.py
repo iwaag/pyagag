@@ -1584,6 +1584,41 @@ def inherited_rootchat(
     )
 
 
+def parent_rootchat(
+    client: ZulipClient,
+    history: list[dict],
+    self_id: int,
+    num_before: int = ROOTCHAT_HISTORY,
+) -> Conversation | None:
+    """This bot's anchor, found through the conversation **this one was
+    opened for**, one hop.
+
+    `robust_workflow` p1 step 3. A conversation an agent opens on behalf of
+    another — autolab's task topics under a mission's `workplan-` topic —
+    carries its opener's root note naming that parent. The requester that
+    asked in the parent has an anchor *there*; when the opener starts the
+    child itself, nobody has posted into the child on the requester's
+    behalf, so the child holds no note of the requester's. The answer the
+    child sends back still belongs to the conversation that asked for the
+    work, and this finds it: the earliest root note written by somebody
+    else names the parent, and the parent's own anchor of ours is home.
+
+    One hop, like `inherited_rootchat`, and never an override: a note of our
+    own in this conversation always wins (`rootchat_home`).
+    """
+    for message in history:
+        if message.get("sender_id") == self_id:
+            continue
+        parent = parse_rootchat(message.get("content"))
+        if parent is None:
+            continue
+        return effective_rootchat(
+            topic_history_across_resolve(client, parent.channel, parent.topic, num_before),
+            self_id,
+        )
+    return None
+
+
 def rootchat_home(
     client: ZulipClient,
     channel: str,
@@ -1603,15 +1638,18 @@ def rootchat_home(
 
     **This topic's own anchor always wins.** Only when there is none is the
     `replaces` relation followed, one hop, into the conversation this one was
-    opened to replace (`inherited_rootchat`). An inherited anchor is a
-    fallback for a conversation that has not been anchored yet, never an
-    override of one that has.
+    opened to replace (`inherited_rootchat`), and then the opener's root note
+    into the conversation this one was opened for (`parent_rootchat`). An
+    inherited anchor is a fallback for a conversation that has not been
+    anchored yet, never an override of one that has.
     """
     history = topic_history_across_resolve(client, channel, topic, num_before)
     home = effective_rootchat(history, self_id)
     if home is not None:
         return home
-    return inherited_rootchat(client, history, self_id, num_before)
+    return inherited_rootchat(client, history, self_id, num_before) or parent_rootchat(
+        client, history, self_id, num_before
+    )
 
 
 def served_marks(

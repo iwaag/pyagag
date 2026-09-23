@@ -40,7 +40,7 @@ from .execopt import ExecOptions, Selection
 from .memo import is_memo_channel
 from .continuation import CONTINUATION_GUIDE, continuation_note, split_continuation
 from .reply import REPLY_GUIDE, record_reply_outcome, resolve_reply
-from .selfnote import is_selfnote, is_speech
+from .selfnote import is_selfnote, is_speech, owed_start
 from .serving import NullJournal, Serving
 from .selfnote import Conversation
 from .zulip import (
@@ -648,7 +648,7 @@ class TopicContext:
         return any(
             m.get("sender_id") != self.self_id and not is_selfnote(m.get("content"))
             for m in self.history
-        )
+        ) or owed_start(self.history, self.self_id, is_ack=_is_ack) is not None
 
 
 
@@ -709,7 +709,16 @@ def requester_of(history, self_id: int, up_to: int | None = None) -> dict | None
         if message.get("sender_id") == self_id or not is_speech(message):
             continue
         return message
-    return None
+    # A conversation only its owner has spoken in, started by the owner's own
+    # start note: the answer goes to whoever the note names.
+    bounded = [m for m in history if up_to is None or int(m.get("id", 0)) <= up_to]
+    return owed_start(bounded, self_id, is_ack=_is_ack)
+
+
+def _is_ack(content: str) -> bool:
+    from .agent import is_ack  # `agag.agent` imports this module
+
+    return is_ack(content)
 
 
 def mention_of(message: dict | None) -> str:

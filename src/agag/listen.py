@@ -598,9 +598,7 @@ class Listener:
         topic renamed after it was served used to lose its mark and be served
         again at the next restart (robust_workflow p2 step 1, L1)."""
         marks: dict[tuple[str, str], int] = {}
-        if self.self_id is None:
-            return marks
-        for note in self.mirror.notes(tag="served", sender_id=self.self_id):
+        for note in (self.mirror.notes(tag="served", sender_id=self.self_id) if self.self_id is not None else ()):
             parsed = parse_served(selfnote_line("served", note.value))
             if parsed is None:
                 continue
@@ -608,7 +606,18 @@ class Listener:
             key = served_key(self.mirror, remote, message_id)
             if message_id > marks.get(key, 0):
                 marks[key] = message_id
+        # Marks this listener has just written count at once: the note
+        # reaches the mirror a moment later, and a mention judged in that
+        # moment was served a second time (p2 step 5, trial A2).
+        for key, message_id in getattr(self, "_written_marks", {}).items():
+            if message_id > marks.get(key, 0):
+                marks[key] = message_id
         return marks
+
+    def _wrote_mark(self, remote: Conversation, message_id: int) -> None:
+        written = self.__dict__.setdefault("_written_marks", {})
+        key = served_key(self.mirror, remote, message_id)
+        written[key] = max(int(message_id), written.get(key, 0))
 
     def owed(self, entry: Entry, marks: dict[tuple[str, str], int] | None = None) -> str | None:
         """The live topic name to serve, or None when nothing is owed here."""
@@ -929,6 +938,7 @@ class Listener:
             live = where[1] if where is not None and where[0] == home.channel else \
                 live_topic_name(self.client, home.channel, home.topic)
             self.client.send_to_channel(home.channel, live, served_note(remote, record.trigger_id))
+            self._wrote_mark(remote, record.trigger_id)
         except Exception as error:  # noqa: BLE001 - the mark is retried with the entry
             raise DeliveryError(f"could not write the served mark for {remote} in {home}: {error!r}",
                                 terminal=False, last=error) from error
@@ -963,6 +973,7 @@ class Listener:
             if answer <= marks.get(key, 0):
                 continue
             self.client.send_to_channel(live.channel, live.live_name, served_note(remote, answer))
+            self._wrote_mark(remote, answer)
             marks[key] = answer
             written.append(f"{remote} up to {answer}")
         record.extra["owed_marked"] = True

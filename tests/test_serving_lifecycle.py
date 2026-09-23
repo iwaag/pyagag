@@ -26,7 +26,7 @@ from agag.delivery import DeliveryError
 from agag.listen import MENTION, OWNER, Listener
 from agag.mirror import Mirror
 from agag.mirror.testing import FakeRealm
-from agag.selfnote import parse_served
+from agag.selfnote import Conversation, parse_served
 from agag.zulip import ZulipError, ZulipRejected
 
 BOT, DEV, OTHER = 42, 7, 9
@@ -520,3 +520,15 @@ def test_an_owed_answer_in_the_processed_input_is_marked_served_after_the_reply(
     assert [(n[0].as_pair(), n[1]) for n in notes] == [(("pj-x", "task-x"), answer)]
     assert h.replies(HOME, "home"), "after the reply, never instead of it"
     h.stop()
+
+
+def test_a_receipt_just_written_counts_before_the_mirror_has_it(tmp_path):
+    """Trial A2: the owner route wrote the receipt for an owed answer, and the
+    mention route judged the same answer a moment later — before the note had
+    reached the mirror — and served it again."""
+    realm = realm_with_channels()
+    answer = realm.post("pj-x", "task-x", "@**Mirror Bot** done", sender_id=OTHER, sender_name="autolab", quiet=True)
+    h = Harness(realm, tmp_path)
+    h.listener._wrote_mark(Conversation("pj-x", "task-x"), answer)
+    assert h.listener.served_marks()[("pj-x", "task-x")] == answer
+    h.mirror.stop()

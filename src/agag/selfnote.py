@@ -280,8 +280,15 @@ _PROGRESS = re.compile(r"^(\U0001F527|\U0001F4AC)")
 
 
 def is_progress(content) -> bool:
-    """Whether a post is nothing but progress lines."""
-    lines = [line.strip() for line in str(content or "").splitlines() if line.strip()]
+    """Whether a post is a progress report: one that says so
+    (`ag-post intent=progress`, `agag.post`), or one made of nothing but
+    progress lines."""
+    from .post import PROGRESS, parse_post
+
+    parsed = parse_post(content)
+    if parsed.intent is not None:
+        return parsed.intent == PROGRESS  # what the post says it is wins
+    lines = [line.strip() for line in parsed.text.splitlines() if line.strip()]
     return bool(lines) and all(_PROGRESS.match(line) for line in lines)
 
 

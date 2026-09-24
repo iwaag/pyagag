@@ -300,6 +300,17 @@ Zulip said so, and a call that got no answer is raised instead of being
 flattened into "it is gone". That distinction is what lets a caller retry an
 outage and stop only on a real deletion.
 
+### What a post is for
+
+A mention says whose turn it is, not whether an answer is wanted. A post
+says that itself with one `ag-post` line at its end (`agag.post`,
+`docs/post-intent-v1.md`): `intent=progress`, `intent=report`, or
+`intent=response_request to=<user id>` — and `re=<id>` for the request a
+post answers. A run declares it on its `ag-reply` fence and the listener
+writes the line into the prepared reply, so it is journaled and redelivered
+with the words; `agentchat send --intent … --to … --re …` writes the same
+line. A post without it is unclassified, and unclassified is never "waiting".
+
 ### Correcting an anchor, deliberately
 
 The default is that **a topic is anchored once**: `own_rootchat` takes the

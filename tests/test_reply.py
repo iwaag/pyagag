@@ -214,7 +214,8 @@ def test_an_unmarked_output_is_repaired_once_and_a_second_failure_is_posted_as_s
 
     client, record = serve(lambda ctx: topics.TopicResult(output="prose", repair=lambda why: "more prose",
                                                           notices=["— note kept"]))
-    assert client.sent[-1] == failure_line("the output contains no ag-reply block") + "\n\n— note kept"
+    assert client.sent[-1] == (failure_line("the output contains no ag-reply block") + "\n\n— note kept"
+                               "\n\n`ag-post intent=report`"), "a failure is information, never a question"
     assert record.reply_marked is False and "no ag-reply block" in record.reply_failure
     assert record.state == serving.DELIVERED, "the failure is a delivered answer: the conversation is not left hanging"
 

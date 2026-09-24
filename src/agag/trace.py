@@ -63,6 +63,7 @@ from .selfnote import (
     ROOTCHAT_TAG,
     SERVED_TAG,
     Conversation,
+    is_progress,
     is_speech,
     owed_start,
     parse_note,
@@ -267,8 +268,7 @@ def _note_state(messages: list[dict], owner: int | None) -> tuple[str, int | Non
 
 
 def _is_progress(content: str) -> bool:
-    lines = [line for line in str(content or "").splitlines() if line.strip()]
-    return bool(lines) and all(PROGRESS_LINE.match(line.strip()) for line in lines)
+    return is_progress(content)
 
 
 def _is_failure(content: str) -> bool:

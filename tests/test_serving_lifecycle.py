@@ -149,6 +149,8 @@ class Harness:
             text = self.reply(ctx)
             if isinstance(text, Exception):
                 raise text
+            if isinstance(text, topics.TopicResult):
+                return text
             return topics.TopicResult([text], resolve_after=self.resolve)
 
         def handler(channel, topic):
@@ -315,7 +317,8 @@ def test_a_handler_exception_is_an_explicit_failure_reply_and_the_entry_is_done(
     h = Harness(realm, tmp_path, reply=lambda ctx: RuntimeError("claude_code timed out")).start()
     realm.post("pj-x", "workplan-a", "please", sender_id=DEV, sender_name="Dev")
     wait_until(lambda: h.replies("pj-x", "workplan-a"), what="the failure reply")
-    assert h.replies("pj-x", "workplan-a") == ["@**Dev**\n\nfailed during chatlog: claude_code timed out"]
+    assert h.replies("pj-x", "workplan-a") == [
+        "@**Dev**\n\nfailed during chatlog: claude_code timed out\n\n`ag-post intent=report`"]
     wait_until(lambda: len(h.listener.queue) == 0, what="the entry to clear")
     record = h.listener.queue.latest_serving(("pj-x", "workplan-a", OWNER))
     assert record.state == serving.DELIVERED and record.delivered_id is not None

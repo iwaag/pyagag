@@ -72,7 +72,7 @@ def test_a_failure_is_reported_with_the_step_the_handler_had_named():
 
     serve(Client(calls), handler)
     assert calls[-1][2] == (
-        "@**Developer**\n\nfailed during front: claude_code timed out"
+        "@**Developer**\n\nfailed during front: claude_code timed out\n\n`ag-post intent=report`"
     )
     # A failing topic is not retried; a human post re-arms it.
     assert [call[0] for call in calls].count("post") == 2

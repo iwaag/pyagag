@@ -41,6 +41,7 @@ from pathlib import Path
 from . import execopt
 from .intro import AGENTS_CHANNEL, harvest_intros, parse_exec_options
 from .memo import is_memo_channel
+from .post import ASKS, INTENTS, RESPONSE_REQUEST, PostMeta, compose, describe, parse_post
 from .selfnote import (
     Conversation,
     home_from_environment,
@@ -121,6 +122,16 @@ Examples
   # Multi-line text is fine; Zulip renders Markdown.
   agentchat send <their-channel> <topic> "$(cat request.md)"
 
+  # Say what the post is for, so a reader sees at once whether you are
+  # asking them for something: a progress note, a report, or a request for their answer.
+  agentchat send <channel> <topic> --intent progress "Rendering 2 of 5 scenes."
+  agentchat send <channel> <topic> --intent report "All five scenes are in files/."
+  agentchat send <their-channel> <topic> --intent response_request \
+      --to "<their Zulip name or user id>" --ask question "Which palette should I use?"
+
+  # Answering somebody's request: name it, so it stops being outstanding.
+  agentchat send <their-channel> <topic> --intent report --re <message id> "Use palette B."
+
   # Everything newer than a message you have already seen.
   agentchat read <their-channel> <topic> --since <message-id>
 
@@ -172,6 +183,19 @@ Notes
   run on nothing. Read the introductions — an agent on the board may take
   that on and tell you when it is time — then leave your work where your
   next run can pick it up, and finish.
+
+  --intent is what the post means, and it is carried inside the post itself
+  (a short `ag-post …` line at its end, which rooms and `read` show as a
+  label). progress: work is under way, nobody has to answer. report:
+  information or a result, nobody has to answer. response_request: you
+  cannot go on until --to answers; --ask question|confirmation says which
+  kind of answer. A post without --intent is unclassified, and unclassified
+  is never read as asking anybody — so a real question you leave
+  unmarked is easy to miss, and a report marked as a request tells somebody
+  to reply for nothing. --re <id> says which request a post answers; when
+  two questions to the same person are open, it is the only way to say
+  which one this is. A mention still decides who is served next; the intent
+  only says what the post is.
 
   Every message printed carries its id in its header, and that id is what
   --since takes, so a long conversation can be followed one step at a time
@@ -331,16 +355,57 @@ def _timestamp(value) -> str:
 
 def format_messages(messages: list[dict]) -> str:
     """One `[time] sender (message id):` header per message, body below it,
-    oldest first. The id is printed because it is what `--since` takes."""
+    oldest first. The id is printed because it is what `--since` takes.
+    What a post is for (`agag.post`) is said in the header, and its machine
+    line is left out of the body."""
+    names = {int(m["sender_id"]): str(m["sender_full_name"]) for m in messages
+             if m.get("sender_id") is not None and m.get("sender_full_name")}
     blocks = []
     for message in messages:
         sender = message.get("sender_full_name") or f"user{message.get('sender_id')}"
-        content = str(message.get("content", "")).strip()
+        parsed = parse_post(message.get("content", ""))
         header = f"[{_timestamp(message.get('timestamp'))}] {sender}"
+        details = []
         if message.get("id") is not None:
-            header += f" (message {message['id']})"
-        blocks.append(f"{header}:\n{content}")
+            details.append(f"message {message['id']}")
+        meaning = describe(parsed.meta, names.get)
+        if meaning:
+            details.append(meaning)
+        if details:
+            header += f" ({', '.join(details)})"
+        blocks.append(f"{header}:\n{parsed.text}")
     return "\n\n".join(blocks)
+
+
+def send_meta(client: ZulipClient, args) -> PostMeta | None:
+    """The `ag-post` meaning `send`'s flags ask for, validated before
+    anything is posted."""
+    to = None
+    if args.to_user is not None:
+        to = resolve_user(client, args.to_user)
+    if args.intent is None and (to is not None or args.ask):
+        raise AgentChatError("--to and --ask describe a request: give --intent response_request")
+    meta = PostMeta(intent=args.intent, to=to, ask=args.ask, re=tuple(dict.fromkeys(args.re_ids or ())))
+    problem = meta.problem()
+    if problem is not None:
+        if args.intent == RESPONSE_REQUEST and to is None:
+            problem = "--intent response_request needs --to <user id or Zulip name>: whose answer do you need?"
+        raise AgentChatError(problem)
+    return None if meta.empty else meta
+
+
+def resolve_user(client: ZulipClient, value: str) -> int:
+    """A user id as given, or the one realm member whose name is exactly
+    `value` (case aside); anything else is refused rather than guessed."""
+    text = str(value).strip().removeprefix("@").strip("*")
+    if text.isdigit():
+        return int(text)
+    matches = [u for u in client.users() if str(u.get("full_name") or "").casefold() == text.casefold()
+               and u.get("is_active", True)]
+    if len(matches) != 1:
+        raise AgentChatError(f"--to {value!r} names {'nobody' if not matches else 'several people'}; "
+                             "give their user id or their exact Zulip name")
+    return int(matches[0]["user_id"])
 
 
 
@@ -496,6 +561,14 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("channel", help="channel name, without the leading '#'")
     send.add_argument("topic", help="topic name; a new name starts a new conversation")
     send.add_argument("text", nargs="+", help="the message; Markdown is rendered")
+    send.add_argument("--intent", choices=INTENTS, default=None,
+                      help="what the post is for: progress, report, or response_request")
+    send.add_argument("--to", dest="to_user", default=None, metavar="USER",
+                      help="whose answer a response_request asks for: a user id or an exact Zulip name")
+    send.add_argument("--ask", choices=ASKS, default=None,
+                      help="the kind of answer a response_request wants")
+    send.add_argument("--re", dest="re_ids", type=int, action="append", default=[], metavar="MESSAGE_ID",
+                      help="the request this post answers (repeatable)")
 
     read = subcommands.add_parser(
         "read",
@@ -790,6 +863,7 @@ def _run(args, client: ZulipClient, out) -> int:
         text = " ".join(args.text).strip()
         if not text:
             raise AgentChatError("refusing to send an empty message")
+        text = compose(text, send_meta(client, args))
         refuse_resolved(client, args.channel, args.topic)
         joined = join_and_record(client, args.channel, args.topic, out)
         ensure_rootchat(client, args.channel, args.topic, out)

@@ -39,6 +39,7 @@ from .delivery import DeliveryError, deliver, redeliver
 from .execopt import ExecOptions, Selection
 from .memo import is_memo_channel
 from .continuation import CONTINUATION_GUIDE, continuation_note, split_continuation
+from .post import REPORT, RESPONSE_REQUEST, PostMeta, compose, label as post_label
 from .reply import REPLY_GUIDE, record_reply_outcome, resolve_reply
 from .selfnote import is_selfnote, is_speech, owed_start
 from .serving import NullJournal, Serving, note_input
@@ -81,6 +82,7 @@ __all__ = [
     "TopicResult",
     "chatlog_path",
     "format_chatlog",
+    "sender_names",
     "generation_dir",
     "workspace_identity",
     "guide",
@@ -184,6 +186,7 @@ def format_chatlog(messages: list[dict], self_id: int, *, drop=None) -> str:
     the deterministic record they were is gone.
     """
     lines = []
+    names = sender_names(messages)
     for message in messages:
         content = str(message.get("content", "")).strip()
         if is_selfnote(content):
@@ -194,8 +197,19 @@ def format_chatlog(messages: list[dict], self_id: int, *, drop=None) -> str:
         speaker = message.get("sender_full_name") or f"user{message.get('sender_id')}"
         if own:
             speaker = f"{speaker} (you)"
-        lines.append(f"[{speaker}] {content}")
+        text, meaning = post_label(content, names.get)
+        lines.append(f"[{speaker}] {meaning}{text}")
     return "\n".join(lines) + ("\n" if lines else "")
+
+
+def sender_names(messages) -> dict[int, str]:
+    """User id → display name, from who spoke in these messages: enough to
+    say whom a response request in them is addressed to."""
+    names: dict[int, str] = {}
+    for message in messages or ():
+        if message.get("sender_id") is not None and message.get("sender_full_name"):
+            names[int(message["sender_id"])] = str(message["sender_full_name"])
+    return names
 
 
 def chatlog_path(directory: Path) -> Path:
@@ -683,6 +697,10 @@ class TopicResult:
     output: str | None = None
     notices: list[str] = field(default_factory=list)
     repair: Callable[[str], str] | None = None
+    #: What the post is for (`agag.post`) when the handler posts literal
+    #: sections and no model output — a delivery, a status line. The model's
+    #: own reply declares it on its `ag-reply` fence and wins over this.
+    meta: PostMeta | None = None
 
 
 # --- the completion rule ------------------------------------------------------
@@ -984,6 +1002,7 @@ def serve_topic(
 
         parts: list[str] = []
         carried = None
+        meta = result.meta if completed else PostMeta(intent=REPORT)
         if result.output is not None:
             # The agent's carry-forward (`agag.continuation`) is a machine
             # block read off the whole output first; it is never posted and
@@ -1000,6 +1019,9 @@ def serve_topic(
                     f"{'' if split.ok else ' and still had no usable mark'}")
             if not split.ok:
                 log(f"no usable reply for {reply_channel!r}/{reply_topic!r}: {split.error}; posting the failure")
+            if split.meta_error:
+                log(f"reply intent unusable in {reply_channel!r}/{reply_topic!r}: {split.meta_error}; posted unclassified")
+            meta = (split.meta or meta) if split.ok else PostMeta(intent=REPORT)
             parts.append(text)
         parts += [section for section in result.sections if section]
         parts += [notice for notice in result.notices if notice]
@@ -1016,7 +1038,7 @@ def serve_topic(
         _remember(journal, reply_anchor=int(anchor or 0))
         if body:
             mention = mention_of(requester) if handoff else ""
-            text = f"{mention}\n\n{body}" if mention else body
+            text = _with_meta(f"{mention}\n\n{body}" if mention else body, meta, requester, journal, log)
             journal.prepared(destination.channel, destination.topic, text,
                              resolve_after=bool(result.resolve_after), after_id=after_id)
             # `DeliveryError` escapes on purpose: the text is prepared and
@@ -1105,6 +1127,28 @@ def _destination(client, channel: str, topic: str, anchor: int, journal, log) ->
     return found
 
 
+def _with_meta(text: str, meta: PostMeta | None, requester: dict | None, journal, log) -> str:
+    """The reply with its `ag-post` line (`agag.post`): one message, so the
+    meaning is prepared, journaled and redelivered with the words. A request
+    written without `to=` is addressed to the requester this serving
+    recorded; with nobody recorded it cannot be addressed, and is posted
+    unclassified rather than as a request to nobody."""
+    if meta is not None and meta.intent == RESPONSE_REQUEST and meta.to is None:
+        to = (requester or {}).get("sender_id")
+        if to is None:
+            log("reply asks for a response but this serving recorded no requester; posted unclassified")
+            meta = PostMeta(re=meta.re) if meta.re else None
+        else:
+            meta = PostMeta(intent=meta.intent, to=int(to), ask=meta.ask, re=meta.re)
+    try:
+        composed = compose(text, meta)
+    except ValueError as error:
+        log(f"reply intent refused ({error}); posted unclassified")
+        meta, composed = None, compose(text, None)
+    _remember(journal, intent=(meta.as_dict() if meta is not None else {}))
+    return composed
+
+
 def _remember(journal, **values) -> None:
     """Keep small facts about this serving in its record's `extra`."""
     record = journal.serving() if hasattr(journal, "serving") else None
@@ -1127,7 +1171,7 @@ def _annotate_record(journal) -> None:
         record.run_record, marked=record.reply_marked, blocks=record.reply_blocks,
         failure=record.reply_failure or None, delivered_id=record.delivered_id,
         posted_to=f"{record.reply_channel}/{record.reply_topic}" if record.reply_channel else None,
-        serving_id=record.id or None,
+        serving_id=record.id or None, intent=record.extra.get("intent") or None,
     )
 
 

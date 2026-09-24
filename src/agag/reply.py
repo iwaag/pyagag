@@ -51,10 +51,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from .post import PostMeta, merge, parse_attributes
+
 #: The fence's info string.
 REPLY_LANGUAGE = "ag-reply"
 
 _FENCE = re.compile(r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})[ \t]*(?P<info>[^`\n]*?)[ \t]*$")
+_ATTRIBUTE = re.compile(r"^[a-z_]+=\S+$")
 
 __all__ = [
     "REPLY_GUIDE",
@@ -79,6 +82,12 @@ class ReplySplit:
     rest: str
     blocks: int
     error: str | None = None
+    #: What the reply is for (`agag.post`), from the attributes written on
+    #: its fence(s): None when no block declared one.
+    meta: PostMeta | None = None
+    #: Why a declared intent could not be used; the reply is still posted,
+    #: unclassified — a misspelt attribute never costs the answer.
+    meta_error: str | None = None
 
     @property
     def marked(self) -> bool:
@@ -92,6 +101,8 @@ class ReplySplit:
 def split_reply(output: str) -> ReplySplit:
     """Split a run's output into what is said and what is not."""
     replies: list[str] = []
+    metas: list[PostMeta] = []
+    meta_errors: list[str] = []
     rest: list[str] = []
     body: list[str] = []
     in_reply = False
@@ -103,8 +114,18 @@ def split_reply(output: str) -> ReplySplit:
         fence = match.group("fence") if match else ""
         info = match.group("info").strip() if match else ""
         if not in_reply:
-            if match and info.lower() == REPLY_LANGUAGE:
+            words = info.split(None, 1)
+            # The mark is `ag-reply` followed by nothing but `key=value`
+            # attributes (`agag.post`); any other word is another info string.
+            if match and words and words[0].lower() == REPLY_LANGUAGE and (
+                    len(words) == 1 or all(_ATTRIBUTE.match(word) for word in words[1].split())):
                 in_reply, outer, outer_char, nested, body = True, len(fence), fence[0], None, []
+                if len(words) > 1:
+                    meta, problem = parse_attributes(words[1], require_to=False)
+                    if problem is None:
+                        metas.append(meta)
+                    else:
+                        meta_errors.append(f"`{info}`: {problem}")
             else:
                 rest.append(line)
             continue
@@ -151,7 +172,8 @@ def split_reply(output: str) -> ReplySplit:
             error = f"the output contains no {REPLY_LANGUAGE} block"
         elif not reply:
             error = f"the {REPLY_LANGUAGE} block is empty"
-    return ReplySplit(reply, rest_text, len(replies), error)
+    meta = None if meta_errors else merge(metas)
+    return ReplySplit(reply, rest_text, len(replies), error, meta, "; ".join(meta_errors) or None)
 
 
 REPLY_GUIDE = f"""\
@@ -165,7 +187,25 @@ What you say, exactly as it should appear.
 
 Everything outside such blocks — notes to yourself, reasoning, a draft you discard — is yours: it stays in the run record and is not posted, and nothing forbids it. Several `{REPLY_LANGUAGE}` blocks are posted as one message, in order, so you may write the reply in pieces as you work. A reply may itself contain code fences; open the reply block with four backticks (````{REPLY_LANGUAGE}) when it does. Any machine block a guide asks for (`ag-argue`, `ag-routinerun`, …) is read wherever it is in your output and is never posted, so its place relative to the reply does not matter.
 
-An output with no `{REPLY_LANGUAGE}` block, or an empty one, is a failed reply: you are asked once more for the reply alone, and if that fails too the conversation is told that this run produced no reply."""
+An output with no `{REPLY_LANGUAGE}` block, or an empty one, is a failed reply: you are asked once more for the reply alone, and if that fails too the conversation is told that this run produced no reply.
+
+## Say what the reply is for
+
+Write on the opening fence what your reply is, so a reader sees at a glance whether you are waiting for them:
+
+- `intent=report` — information or a result; nobody has to answer. Most final replies are this.
+- `intent=progress` — work is under way and you are only saying how far it got.
+- `intent=response_request` — you cannot go on until somebody answers. It is addressed to the person you are replying to; add `to=<user id>` only to ask somebody else. `ask=question` or `ask=confirmation` says which kind of answer you want.
+
+```{REPLY_LANGUAGE} intent=response_request ask=confirmation
+I would open a workplan in pj-demo for the three steps above. Shall I go ahead?
+```
+
+```{REPLY_LANGUAGE} intent=report
+The plan is posted in pj-demo › workplan-login; autolab has started task 1.
+```
+
+Ask only when you really wait for the answer: a question left in a report is not seen as one, and a report marked as a request tells somebody to reply for nothing. A reply without `intent=` is posted unclassified — never read as waiting. The label is written into the post for you; do not type it yourself. `agentchat send --help` says how to mark a post you send elsewhere the same way."""
 
 
 def repair_prompt(previous_output: str, reason: str) -> str:
@@ -176,7 +216,8 @@ def repair_prompt(previous_output: str, reason: str) -> str:
     shown = body if body else "(the output was empty)"
     return (
         f"Your previous output for this serving could not be posted: {reason}.\n\n"
-        f"Write the reply now, inside one fenced `{REPLY_LANGUAGE}` block, and nothing else. "
+        f"Write the reply now, inside one fenced `{REPLY_LANGUAGE}` block (with the `intent=` it should carry "
+        f"on its opening fence), and nothing else. "
         f"Do not run any tool or take any action: everything the previous output did has already "
         f"happened, and any machine block it contained has already been applied — do not include one again. "
         f"If the previous output already contains the words you meant to say, put those words in the block.\n\n"

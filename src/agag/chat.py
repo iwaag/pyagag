@@ -135,6 +135,10 @@ Examples
   # Resolved by mistake? Put it back: same conversation, same record.
   agentchat unresolve <their-channel> <topic>
 
+  # The requester has accepted a whole mission: record it — whose decision,
+  # on which post — and the mission is done. No post, nobody is served.
+  agentchat accept <any message id in the mission's conversation> --evidence <message id>
+
   # Who can be asked to run under a particular execution option, and what
   # each of their options costs and covers.
   agentchat options
@@ -215,6 +219,15 @@ Notes
   conversation of its own, owned by whoever facilitates argues (its
   introduction says so): you are not served in it by posting there, and the
   human is the one expected to speak next. A stem already in use is refused.
+
+  `accept` records a mission's acceptance where the mission is, with the post
+  it rests on: the requester's own words, which you quote, never your own
+  judgment. It writes selfnotes only — each finished task `accepted`, the
+  acceptance note, `done` — and resolves the mission's conversation, so it
+  buys nobody a run; posting the acceptance into the plan's conversation
+  instead asks its agent to plan again. It refuses, and writes nothing, while
+  a task is still open, for a mission called off, or without evidence.
+  Running it again is safe: what is already recorded is not written twice.
 
   `use` posts one command line and returns. It is configuration, not a
   request: the agent answers it with a line of its own and starts no work, so
@@ -597,6 +610,22 @@ def build_parser() -> argparse.ArgumentParser:
     unresolve.add_argument("channel", help="channel name, without the leading '#'")
     unresolve.add_argument("topic", help="topic name, with or without the '✔ '")
 
+    accept = subcommands.add_parser(
+        "accept",
+        help="record that the requester accepted a whole mission, which makes it done",
+        description=(
+            "Record a mission's acceptance in its own conversation: each finished task "
+            "`accepted`, then whose decision it was and on which post, then `done`; the "
+            "conversation is resolved. Selfnotes only, so nobody is served. Refused, with "
+            "nothing written, while a task is unfinished, for a cancelled or replaced "
+            "mission, or without --evidence. Safe to repeat."
+        ),
+    )
+    accept.add_argument("message_id", type=int,
+                        help="the mission: its mission note's id (m<id> without the m) or any post in its conversation")
+    accept.add_argument("--evidence", type=int, default=None,
+                        help="the post where the requester accepted the mission (their words, not yours)")
+
     options = subcommands.add_parser(
         "options",
         help="what each agent published about how it can be asked to execute",
@@ -875,6 +904,15 @@ def _run(args, client: ZulipClient, out) -> int:
         folded = f" (folding in {len(twin)} stray post(s) made under the old name after the ✔)" if twin else ""
         print(f"unresolved #{args.channel} > {bare}{folded}", file=out)
         return 0
+    if args.command == "accept":
+        from .acceptance import AcceptanceRefused, accept_mission
+
+        try:
+            done = accept_mission(client, args.message_id, evidence=args.evidence, log=lambda line: None)
+        except AcceptanceRefused as refused:
+            raise AgentChatError(str(refused)) from refused
+        print(done.summary(), file=out)
+        return 0
     if args.command == "options":
         lines = exec_options_lines(harvest_intros(client), args.agent)
         if not lines:
@@ -988,7 +1026,7 @@ def _run(args, client: ZulipClient, out) -> int:
 #: The commands that change the realm. A failure of one of them is an event
 #: the run's own report may leave out; `OPFAIL_TAG` keeps it where a reader
 #: of the request can find it (`agag.trace`).
-WRITE_COMMANDS = ("send", "resolve", "unresolve", "use", "anchor", "argue")
+WRITE_COMMANDS = ("send", "resolve", "unresolve", "use", "anchor", "argue", "accept")
 OPFAIL_TAG = "opfail"
 
 
@@ -1008,6 +1046,8 @@ def record_failure(client, args, error, environ=None) -> None:
     if home is None or client is None:
         return
     target = "/".join(str(part) for part in (getattr(args, "channel", ""), getattr(args, "topic", "")) if part)
+    if not target and getattr(args, "message_id", None):
+        target = f"#{args.message_id}"
     kind = "refused" if isinstance(error, (AgentChatError, ZulipRejected)) else "uncertain"
     reason = " ".join(str(error).split())[:300]
     try:

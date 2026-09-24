@@ -103,6 +103,26 @@ reference without knowing this contract: `agag.post.quoted_ids` reads the
   logged. A handler failure and the "produced no reply" line are `report`s.
   A handler posting literal sections says what they are with
   `TopicResult(meta=PostMeta(...))`.
+- **Handler and run together** (`agag.post.combine`, `clearer_chat_ui`
+  ex1). One delivered post can carry a run's words and a handler's state
+  (autolab's task serving: the run reports its work, the handler still
+  waits for the requester to agree). The two metas combine by role, not
+  by strength:
+
+  | handler `TopicResult.meta` | run's fence | post |
+  |---|---|---|
+  | `response_request` (a **requirement**) | anything, or nothing | `response_request`; `to` and `ask` are the handler's; a `to`/`ask` the handler left out comes from the run's request (`ask` only when it asked the same person); a `to` still missing is the recorded requester |
+  | `progress` / `report` (a **default**) | an intent | the run's |
+  | `progress` / `report` | none | the handler's |
+  | none | anything | the run's |
+
+  `re=` is the union (run's first); `seen` is always the listener's. A
+  failed reply (no usable mark after the repair) counts as the run
+  declaring `report` — a requirement still stands over it. A handler that
+  raised reached no state and requires nothing: its failure line is a
+  `report`. A request with nobody to address (no requester recorded, or
+  only the bot itself) falls back to the run's own non-request intent, or
+  to unclassified.
 - **`agentchat send`** takes `--intent`, `--to <user id | exact Zulip name>`,
   `--ask` and `--re <id>` (repeatable). A request without `--to` is refused
   before anything is posted.

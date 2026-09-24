@@ -39,7 +39,7 @@ from .delivery import DeliveryError, deliver, redeliver
 from .execopt import ExecOptions, Selection
 from .memo import is_memo_channel
 from .continuation import CONTINUATION_GUIDE, continuation_note, split_continuation
-from .post import REPORT, RESPONSE_REQUEST, PostMeta, compose, label as post_label
+from .post import REPORT, RESPONSE_REQUEST, PostMeta, combine, compose, label as post_label
 from .reply import REPLY_GUIDE, record_reply_outcome, resolve_reply
 from .selfnote import is_selfnote, is_speech, owed_start
 from .serving import NullJournal, Serving, note_input
@@ -697,9 +697,12 @@ class TopicResult:
     output: str | None = None
     notices: list[str] = field(default_factory=list)
     repair: Callable[[str], str] | None = None
-    #: What the post is for (`agag.post`) when the handler posts literal
-    #: sections and no model output — a delivery, a status line. The model's
-    #: own reply declares it on its `ag-reply` fence and wins over this.
+    #: What the post is for (`agag.post`), as the handler's own state knows
+    #: it (`agag.post.combine`). A `response_request` is a **requirement** —
+    #: the handler waits for somebody's answer, so the post asks whatever
+    #: the run's fence declared, with the handler's `to` and `ask`. Any other
+    #: intent is a default for words that declared none (literal sections, a
+    #: reply without an intent). A handler that failed states nothing.
     meta: PostMeta | None = None
 
 
@@ -1002,7 +1005,11 @@ def serve_topic(
 
         parts: list[str] = []
         carried = None
-        meta = result.meta if completed else PostMeta(intent=REPORT)
+        # What the handler's state requires or suggests, and what the words
+        # declare, combine once below (`agag.post.combine`): a failed handler
+        # never reached a state, so it requires nothing and its line is a report.
+        required = result.meta if completed else None
+        declared = None if completed else PostMeta(intent=REPORT)
         if result.output is not None:
             # The agent's carry-forward (`agag.continuation`) is a machine
             # block read off the whole output first; it is never posted and
@@ -1021,7 +1028,7 @@ def serve_topic(
                 log(f"no usable reply for {reply_channel!r}/{reply_topic!r}: {split.error}; posting the failure")
             if split.meta_error:
                 log(f"reply intent unusable in {reply_channel!r}/{reply_topic!r}: {split.meta_error}; posted unclassified")
-            meta = (split.meta or meta) if split.ok else PostMeta(intent=REPORT)
+            declared = split.meta if split.ok else PostMeta(intent=REPORT)
             parts.append(text)
         parts += [section for section in result.sections if section]
         parts += [notice for notice in result.notices if notice]
@@ -1036,10 +1043,16 @@ def serve_topic(
             max((int(m.get("id", 0)) for m in (context.reply_history or [])), default=0))
         destination = _destination(client, reply_channel, reply_topic, anchor, journal, log)
         _remember(journal, reply_anchor=int(anchor or 0))
+        meta = combine(declared, required)
+        if declared is not None and meta is not None and (declared.intent, declared.to) != (meta.intent, meta.to) \
+                and declared.intent is not None:
+            log(f"the handler's {meta.intent} to={meta.to} stands over the reply's intent={declared.intent}"
+                f"{f' to={declared.to}' if declared.to is not None else ''}")
         if body:
             mention = mention_of(requester) if handoff else ""
             text = _with_meta(f"{mention}\n\n{body}" if mention else body, meta, requester, journal, log,
-                              seen=context.processed_up_to if replies_here else 0)
+                              seen=context.processed_up_to if replies_here else 0,
+                              fallback=declared, self_id=self_id)
             journal.prepared(destination.channel, destination.topic, text,
                              resolve_after=bool(result.resolve_after), after_id=after_id)
             # `DeliveryError` escapes on purpose: the text is prepared and
@@ -1128,17 +1141,22 @@ def _destination(client, channel: str, topic: str, anchor: int, journal, log) ->
     return found
 
 
-def _with_meta(text: str, meta: PostMeta | None, requester: dict | None, journal, log, *, seen: int = 0) -> str:
+def _with_meta(text: str, meta: PostMeta | None, requester: dict | None, journal, log, *, seen: int = 0,
+               fallback: PostMeta | None = None, self_id: int | None = None) -> str:
     """The reply with its `ag-post` line (`agag.post`): one message, so the
     meaning is prepared, journaled and redelivered with the words. A request
     written without `to=` is addressed to the requester this serving
-    recorded; with nobody recorded it cannot be addressed, and is posted
-    unclassified rather than as a request to nobody."""
+    recorded; with nobody to address (none recorded, or only this bot) it
+    is posted as what the words declared (`fallback`) when that is not a
+    request, else unclassified — never as a request to nobody."""
     if meta is not None and meta.intent == RESPONSE_REQUEST and meta.to is None:
         to = (requester or {}).get("sender_id")
-        if to is None:
-            log("reply asks for a response but this serving recorded no requester; posted unclassified")
-            meta = PostMeta(re=meta.re) if meta.re else None
+        if to is None or (self_id is not None and int(to) == int(self_id)):
+            kept = fallback if fallback is not None and fallback.intent not in (None, RESPONSE_REQUEST) else None
+            log("reply asks for a response but this serving recorded no requester to ask; posted "
+                + (f"as {kept.intent}" if kept else "unclassified"))
+            meta = (PostMeta(intent=kept.intent, re=meta.re) if kept else PostMeta(re=meta.re)) \
+                if (kept or meta.re) else None
         else:
             meta = PostMeta(intent=meta.intent, to=int(to), ask=meta.ask, re=meta.re)
     if meta is not None and meta.intent == RESPONSE_REQUEST and seen:

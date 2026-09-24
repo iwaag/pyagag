@@ -76,6 +76,7 @@ __all__ = [
     "TOKEN",
     "ParsedPost",
     "PostMeta",
+    "combine",
     "compose",
     "describe",
     "label",
@@ -288,6 +289,39 @@ def merge(metas) -> PostMeta | None:
         return None
     base = chosen or PostMeta()
     return replace(base, re=tuple(dict.fromkeys(refs)))
+
+
+def combine(declared: PostMeta | None, handler: PostMeta | None) -> PostMeta | None:
+    """One meta for a post whose words a run wrote (`declared`, from its
+    `ag-reply` fence) and whose handler knows a state of its own
+    (`TopicResult.meta`). Strength alone cannot decide this: it says nothing
+    about whose recipient or which kind of request wins.
+
+    - A handler's `response_request` is a **requirement**: the handler's
+      own state needs somebody's answer (a task waiting for its requester's
+      agreement), whatever the run called its words. The post is a request;
+      `to` and `ask` are the handler's. Where the handler left one out, a
+      request the run declared supplies it (`ask` only when the run asked
+      the same person); a `to` still missing is filled by the listener
+      with the requester it recorded.
+    - Any other handler intent is a **default** for words that declared
+      none: a run's own `progress`, `report` or question stands.
+    - `re=` is the union, the run's references first; `seen` is written by
+      the listener afterwards, never taken from either side.
+    """
+    refs = tuple(dict.fromkeys([*(declared.re if declared else ()), *(handler.re if handler else ())]))
+    if handler is not None and handler.intent == RESPONSE_REQUEST:
+        asked = declared if declared is not None and declared.intent == RESPONSE_REQUEST else None
+        to = handler.to if handler.to is not None else (asked.to if asked else None)
+        ask = handler.ask
+        if ask is None and asked is not None and (asked.to is None or asked.to == to):
+            ask = asked.ask
+        return PostMeta(intent=RESPONSE_REQUEST, to=to, ask=ask, re=refs)
+    chosen = declared if declared is not None and declared.intent is not None else handler
+    if chosen is None and not refs:
+        return None
+    base = chosen or PostMeta()
+    return PostMeta(intent=base.intent, to=base.to, ask=base.ask, re=refs)
 
 
 def describe(meta: PostMeta | None, name_of=None) -> str:

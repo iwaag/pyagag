@@ -41,7 +41,7 @@ from pathlib import Path
 from . import execopt
 from .intro import AGENTS_CHANNEL, harvest_intros, parse_exec_options
 from .memo import is_memo_channel
-from .post import ASKS, INTENTS, RESPONSE_REQUEST, PostMeta, compose, describe, parse_post
+from .post import ASKS, INTENTS, NONE, RESPONSE_REQUEST, PostMeta, compose, describe, parse_post
 from .selfnote import (
     Conversation,
     home_from_environment,
@@ -194,7 +194,9 @@ Notes
   unmarked is easy to miss, and a report marked as a request tells somebody
   to reply for nothing. --re <id> says which request a post answers; when
   two questions to the same person are open, it is the only way to say
-  which one this is. A mention still decides who is served next; the intent
+  which one this is. Otherwise a post by the person a request is addressed
+  to is taken as its answer when only one is open; --not-answer says it is
+  not (an aside, an update), and the request stays open. A mention still decides who is served next; the intent
   only says what the post is.
 
   Every message printed carries its id in its header, and that id is what
@@ -385,11 +387,14 @@ def send_meta(client: ZulipClient, args) -> PostMeta | None:
         to = resolve_user(client, args.to_user)
     if args.intent is None and (to is not None or args.ask):
         raise AgentChatError("--to and --ask describe a request: give --intent response_request")
-    meta = PostMeta(intent=args.intent, to=to, ask=args.ask, re=tuple(dict.fromkeys(args.re_ids or ())))
+    meta = PostMeta(intent=args.intent, to=to, ask=args.ask, re=tuple(dict.fromkeys(args.re_ids or ())),
+                    answer=NONE if getattr(args, "not_answer", False) else None)
     problem = meta.problem()
     if problem is not None:
         if args.intent == RESPONSE_REQUEST and to is None:
             problem = "--intent response_request needs --to <user id or Zulip name>: whose answer do you need?"
+        elif meta.not_answer and meta.re:
+            problem = "--not-answer and --re contradict: a post answers the requests it names, or none"
         raise AgentChatError(problem)
     return None if meta.empty else meta
 
@@ -569,6 +574,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="the kind of answer a response_request wants")
     send.add_argument("--re", dest="re_ids", type=int, action="append", default=[], metavar="MESSAGE_ID",
                       help="the request this post answers (repeatable)")
+    send.add_argument("--not-answer", dest="not_answer", action="store_true",
+                      help="this post answers no request, even the only one open for you")
 
     read = subcommands.add_parser(
         "read",

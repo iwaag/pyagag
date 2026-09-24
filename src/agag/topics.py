@@ -28,7 +28,7 @@ address the person it is answering.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _replace
 from pathlib import Path
 
 import re
@@ -1155,13 +1155,13 @@ def _with_meta(text: str, meta: PostMeta | None, requester: dict | None, journal
             kept = fallback if fallback is not None and fallback.intent not in (None, RESPONSE_REQUEST) else None
             log("reply asks for a response but this serving recorded no requester to ask; posted "
                 + (f"as {kept.intent}" if kept else "unclassified"))
-            meta = (PostMeta(intent=kept.intent, re=meta.re) if kept else PostMeta(re=meta.re)) \
-                if (kept or meta.re) else None
+            meta = PostMeta(intent=kept.intent if kept else None, re=meta.re, answer=meta.answer)
+            meta = None if meta.empty else meta
         else:
-            meta = PostMeta(intent=meta.intent, to=int(to), ask=meta.ask, re=meta.re)
+            meta = _replace(meta, to=int(to))
     if meta is not None and meta.intent == RESPONSE_REQUEST and seen:
         # The input boundary this request was written from (`agag.outstanding`).
-        meta = PostMeta(intent=meta.intent, to=meta.to, ask=meta.ask, re=meta.re, seen=int(seen))
+        meta = _replace(meta, seen=int(seen))
     try:
         composed = compose(text, meta)
     except ValueError as error:

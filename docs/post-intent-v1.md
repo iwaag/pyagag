@@ -12,7 +12,7 @@ One line at the very end of the message's raw Markdown, outside any code
 fence, as an inline code span:
 
 ```
-`ag-post intent=<intent> [to=<user id>] [ask=<kind>] [re=<id>[,<id>…]]`
+`ag-post intent=<intent> [to=<user id>] [ask=<kind>] [re=<id>[,<id>…] | answer=none] [seen=<id>]`
 ```
 
 | key | values | meaning |
@@ -23,6 +23,7 @@ fence, as an inline code span:
 | `to` | Zulip user id | whose answer is requested — **required** with `response_request`, refused otherwise |
 | `ask` | `question`, `confirmation` | optional nuance of a request; refused without one |
 | `re` | message id(s), comma separated | the request(s) this post answers — or, from the asker, withdraws or supersedes; may stand alone, without `intent` |
+| `answer` | `none` | the post answers **no** request — not even the one the next-post rule would give it (`clearer_chat_ui` ex1); may stand alone; contradicts `re=` |
 | `seen` | message id | the newest post the poster had read when it wrote this (a listener's processed-input boundary); written on requests |
 
 Rules:
@@ -36,8 +37,13 @@ Rules:
 - **A malformed line is still a machine line.** It is removed from what a
   person reads, and the post is read as unclassified; `parse_post` returns
   why (`error`). Unknown keys, repeated keys, non-numeric ids, an unknown
-  intent or ask, `to=` without a request and a request without `to=` are all
+  intent or ask, `to=` without a request, a request without `to=`, an
+  `answer=` other than `none` and `answer=none` together with `re=` are all
   malformed.
+- **Three correlation choices.** No `re=`/`answer=`: let the reader
+  correlate (the next-post rule). `re=<ids>`: answers exactly those.
+  `answer=none`: answers nothing. The two explicit choices exclude each
+  other.
 - **One message, one write.** The line is part of the content, so it is
   prepared, journaled and delivered with the words: `agag.delivery` matches a
   read-back on the whole content, and a redelivery after a crash or a
@@ -78,6 +84,15 @@ A person answering through a room (the relay writes the reference):
 Go ahead with B.
 
 `ag-post re=9120`
+```
+
+A person writing something else while a question waits for them (the room's
+"not an answer"):
+
+```
+Unrelated: the staging box is back up.
+
+`ag-post answer=none`
 ```
 
 A person answering in Zulip itself with *Quote and reply* makes the same
@@ -124,7 +139,7 @@ reference without knowing this contract: `agag.post.quoted_ids` reads the
   only the bot itself) falls back to the run's own non-request intent, or
   to unclassified.
 - **`agentchat send`** takes `--intent`, `--to <user id | exact Zulip name>`,
-  `--ask` and `--re <id>` (repeatable). A request without `--to` is refused
+  `--ask`, `--re <id>` (repeatable) and `--not-answer` (refused with `--re`). A request without `--to` is refused
   before anything is posted.
 - **Anything else** calls `agag.post.compose(text, PostMeta(...))`, which
   refuses a meta it could not read back.
@@ -156,7 +171,9 @@ conversation; `pending` again if it is reopened).
 Correlation: an explicit `re=` or a Zulip quote-and-reply by the recipient
 settles exactly what it names; otherwise a post by the recipient settles
 their one pending request, and only when there is exactly one — with two
-or more it settles none and is listed in `unmatched`. Progress, acks,
+or more it settles none and is listed in `unmatched`. A post marked
+`answer=none` settles nothing and is never `unmatched` (a quote in it
+included); it still overtakes a request composed before it. Progress, acks,
 selfnotes, system notices and anybody but the recipient settle nothing. A
 receipt is not approval, acceptance or completion.
 

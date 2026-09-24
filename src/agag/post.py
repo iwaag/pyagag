@@ -23,6 +23,12 @@ the very end of a post, outside any code fence:
 - `re` names the request(s) a post answers, by message id
   (`re=9001` or `re=9001,9005`), and may stand without an intent: a
   human's reply through a room carries only that.
+- `answer=none` says the post is **not** an answer to anything, even
+  where the next-post rule would have read it as one (a person's aside
+  while a question waits). It is the explicit third choice beside "let the
+  next post decide" (no field) and "this answers #n" (`re=`); the two
+  explicit ones contradict each other, so `answer=none` with `re=` is
+  malformed.
 - `seen` is the newest message the poster had read when it wrote the
   post — a serving's processed-input boundary. The listener writes it on
   a request, so a reader can tell that the recipient spoke *after* the
@@ -56,6 +62,9 @@ PROGRESS, REPORT, RESPONSE_REQUEST = "progress", "report", "response_request"
 INTENTS = (PROGRESS, REPORT, RESPONSE_REQUEST)
 QUESTION, CONFIRMATION = "question", "confirmation"
 ASKS = (QUESTION, CONFIRMATION)
+#: `answer=` values: only the explicit non-answer; an answer is `re=`.
+NONE = "none"
+ANSWERS = (NONE,)
 #: When several marked blocks of one reply disagree, the post is the
 #: strongest thing any of them is: a report that also asks is a request.
 STRENGTH = {PROGRESS: 0, REPORT: 1, RESPONSE_REQUEST: 2}
@@ -65,9 +74,11 @@ _FENCE = re.compile(r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})(?P<info>[^\n]*)$")
 _PAIR = re.compile(r"^(?P<key>[a-z_]+)=(?P<value>\S+)$")
 
 __all__ = [
+    "ANSWERS",
     "ASKS",
     "CONFIRMATION",
     "INTENTS",
+    "NONE",
     "PROGRESS",
     "QUESTION",
     "REPORT",
@@ -98,10 +109,16 @@ class PostMeta:
     ask: str | None = None
     re: tuple[int, ...] = field(default_factory=tuple)
     seen: int | None = None
+    #: `none`: explicitly not an answer to any request (see the module doc).
+    answer: str | None = None
 
     @property
     def empty(self) -> bool:
-        return self.intent is None and not self.re
+        return self.intent is None and not self.re and self.answer is None
+
+    @property
+    def not_answer(self) -> bool:
+        return self.answer == NONE
 
     @property
     def requests_response(self) -> bool:
@@ -119,7 +136,11 @@ class PostMeta:
             return "ask= is only for a response_request"
         if self.ask is not None and self.ask not in ASKS:
             return f"unknown ask {self.ask!r} (one of {', '.join(ASKS)})"
-        if self.seen is not None and self.empty:
+        if self.answer is not None and self.answer not in ANSWERS:
+            return f"unknown answer {self.answer!r} (only answer=none; an answer names its request with re=)"
+        if self.answer is not None and self.re:
+            return "answer=none and re= contradict: a post either answers the named requests or none"
+        if self.seen is not None and self.intent is None and not self.re:
             return "seen= says nothing without an intent or re="
         return None
 
@@ -136,6 +157,8 @@ class PostMeta:
             words.append(f"ask={self.ask}")
         if self.re:
             words.append("re=" + ",".join(str(int(i)) for i in self.re))
+        if self.answer:
+            words.append(f"answer={self.answer}")
         if self.seen is not None:
             words.append(f"seen={int(self.seen)}")
         return "`" + " ".join(words) + "`"
@@ -150,6 +173,8 @@ class PostMeta:
             out["ask"] = self.ask
         if self.re:
             out["re"] = [int(i) for i in self.re]
+        if self.answer:
+            out["answer"] = self.answer
         if self.seen is not None:
             out["seen"] = int(self.seen)
         return out
@@ -190,6 +215,8 @@ def parse_attributes(text: str, *, require_to: bool = True) -> tuple[PostMeta, s
             values["intent"] = value.lower()
         elif key == "ask":
             values["ask"] = value.lower()
+        elif key == "answer":
+            values["answer"] = value.lower()
         elif key == "to":
             if not value.isdigit():
                 return PostMeta(), f"to={value} is not a user id"
@@ -288,7 +315,7 @@ def merge(metas) -> PostMeta | None:
     if chosen is None and not refs:
         return None
     base = chosen or PostMeta()
-    return replace(base, re=tuple(dict.fromkeys(refs)))
+    return replace(base, re=tuple(dict.fromkeys(refs)), answer=None if refs else base.answer)
 
 
 def combine(declared: PostMeta | None, handler: PostMeta | None) -> PostMeta | None:
@@ -310,18 +337,20 @@ def combine(declared: PostMeta | None, handler: PostMeta | None) -> PostMeta | N
       the listener afterwards, never taken from either side.
     """
     refs = tuple(dict.fromkeys([*(declared.re if declared else ()), *(handler.re if handler else ())]))
+    # An explicit non-answer is the words' own claim and yields to any reference.
+    aside = None if refs else next((m.answer for m in (declared, handler) if m is not None and m.answer), None)
     if handler is not None and handler.intent == RESPONSE_REQUEST:
         asked = declared if declared is not None and declared.intent == RESPONSE_REQUEST else None
         to = handler.to if handler.to is not None else (asked.to if asked else None)
         ask = handler.ask
         if ask is None and asked is not None and (asked.to is None or asked.to == to):
             ask = asked.ask
-        return PostMeta(intent=RESPONSE_REQUEST, to=to, ask=ask, re=refs)
+        return PostMeta(intent=RESPONSE_REQUEST, to=to, ask=ask, re=refs, answer=aside)
     chosen = declared if declared is not None and declared.intent is not None else handler
-    if chosen is None and not refs:
+    if chosen is None and not refs and aside is None:
         return None
     base = chosen or PostMeta()
-    return PostMeta(intent=base.intent, to=base.to, ask=base.ask, re=refs)
+    return PostMeta(intent=base.intent, to=base.to, ask=base.ask, re=refs, answer=aside)
 
 
 def describe(meta: PostMeta | None, name_of=None) -> str:
@@ -340,6 +369,8 @@ def describe(meta: PostMeta | None, name_of=None) -> str:
         words.append(f"asks {who} to answer" + (f" ({meta.ask})" if meta.ask else ""))
     if meta.re:
         words.append("answers " + ", ".join(f"#{i}" for i in meta.re))
+    if meta.not_answer:
+        words.append("not an answer to any request")
     return "; ".join(words)
 
 

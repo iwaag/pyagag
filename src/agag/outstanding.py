@@ -37,6 +37,10 @@ after it:
    reply so a room can ask which question it answered; two questions never
    both disappear because somebody spoke. A post whose `re=` names no open
    request is about something else and settles nothing.
+3. An explicit non-answer: a post by `to` marked `answer=none` settles
+   nothing and is never `unmatched`, however many requests are pending —
+   the person said so. It is still their speech, so it overtakes a request
+   composed before it like any other post.
 
 Only speech by `to` counts. Progress posts, acknowledgements, selfnotes,
 Zulip's system notices and anybody else's posts — a third party, another
@@ -217,8 +221,8 @@ def read_requests(
                     request.state = PENDING
 
         # The recipient speaking: explicit references first, else the one
-        # unambiguous pending request.
-        if not progress:
+        # unambiguous pending request — unless they said it answers nothing.
+        if not progress and not (meta is not None and meta.not_answer):
             mine = [r for r in requests.values() if r.to == sender and r.sender_id != sender]
             named = [r for r in mine if r.id in refs and r.open]
             if named:

@@ -23,6 +23,11 @@ the very end of a post, outside any code fence:
 - `re` names the request(s) a post answers, by message id
   (`re=9001` or `re=9001,9005`), and may stand without an intent: a
   human's reply through a room carries only that.
+- `seen` is the newest message the poster had read when it wrote the
+  post — a serving's processed-input boundary. The listener writes it on
+  a request, so a reader can tell that the recipient spoke *after* the
+  asker read the conversation and *before* the question landed
+  (`agag.outstanding`: the question is overtaken, not awaiting them).
 
 Semantic intent is deliberately apart from everything else a post can be:
 the sender is Zulip's, an ack is a transport receipt (`agag.agent.is_ack`),
@@ -91,6 +96,7 @@ class PostMeta:
     to: int | None = None
     ask: str | None = None
     re: tuple[int, ...] = field(default_factory=tuple)
+    seen: int | None = None
 
     @property
     def empty(self) -> bool:
@@ -112,6 +118,8 @@ class PostMeta:
             return "ask= is only for a response_request"
         if self.ask is not None and self.ask not in ASKS:
             return f"unknown ask {self.ask!r} (one of {', '.join(ASKS)})"
+        if self.seen is not None and self.empty:
+            return "seen= says nothing without an intent or re="
         return None
 
     def line(self) -> str:
@@ -127,6 +135,8 @@ class PostMeta:
             words.append(f"ask={self.ask}")
         if self.re:
             words.append("re=" + ",".join(str(int(i)) for i in self.re))
+        if self.seen is not None:
+            words.append(f"seen={int(self.seen)}")
         return "`" + " ".join(words) + "`"
 
     def as_dict(self) -> dict:
@@ -139,6 +149,8 @@ class PostMeta:
             out["ask"] = self.ask
         if self.re:
             out["re"] = [int(i) for i in self.re]
+        if self.seen is not None:
+            out["seen"] = int(self.seen)
         return out
 
 
@@ -181,6 +193,10 @@ def parse_attributes(text: str, *, require_to: bool = True) -> tuple[PostMeta, s
             if not value.isdigit():
                 return PostMeta(), f"to={value} is not a user id"
             values["to"] = int(value)
+        elif key == "seen":
+            if not value.isdigit():
+                return PostMeta(), f"seen={value} is not a message id"
+            values["seen"] = int(value)
         elif key == "re":
             ids = value.split(",")
             if not all(part.isdigit() and int(part) > 0 for part in ids):
@@ -293,12 +309,15 @@ def describe(meta: PostMeta | None, name_of=None) -> str:
     return "; ".join(words)
 
 
-def label(content, name_of=None) -> tuple[str, str]:
+def label(content, name_of=None, message_id: int | None = None) -> tuple[str, str]:
     """`(text, "(meaning) ")` for an agent-facing rendering: the post
     without its line, and a parenthesized prefix saying what it is ("" for
-    an unclassified post)."""
+    an unclassified post). A request is labelled with its own id, which is
+    what `re=` takes."""
     parsed = parse_post(content)
     words = describe(parsed.meta, name_of)
+    if words and message_id and parsed.meta is not None and parsed.meta.intent == RESPONSE_REQUEST:
+        words = f"{words}; request #{int(message_id)}"
     return parsed.text, (f"({words}) " if words else "")
 
 

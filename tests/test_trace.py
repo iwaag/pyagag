@@ -166,9 +166,13 @@ def test_each_conversation_appears_once_under_its_most_specific_anchor():
     assert any(a.startswith("autolab") for a in task5.requested_by)
 
 
-def test_the_origin_is_awaiting_the_human_when_the_agent_answered_last():
+def test_an_answer_that_asks_nothing_is_answered_not_awaiting_the_human():
+    """Recorded before `ag.post.v1`: Front answered last and asked nothing
+    explicitly. Until clearer_chat_ui step 2 that inference read as
+    `awaiting_human`; every report ever posted matched it."""
     result = tracing.trace(Realm(8425), ORIGIN, now=NOW_STALL)
-    assert result.root.state == "awaiting_human"
+    assert result.root.state == "answered"
+    assert "nothing is asked" in result.root.detail
     assert result.root.owner == "Front"
 
 

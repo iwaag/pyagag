@@ -22,7 +22,8 @@ fence, as an inline code span:
 | | `response_request` | the poster cannot go on until `to` answers |
 | `to` | Zulip user id | whose answer is requested — **required** with `response_request`, refused otherwise |
 | `ask` | `question`, `confirmation` | optional nuance of a request; refused without one |
-| `re` | message id(s), comma separated | the request(s) this post answers; may stand alone, without `intent` |
+| `re` | message id(s), comma separated | the request(s) this post answers — or, from the asker, withdraws or supersedes; may stand alone, without `intent` |
+| `seen` | message id | the newest post the poster had read when it wrote this (a listener's processed-input boundary); written on requests |
 
 Rules:
 
@@ -119,3 +120,31 @@ reference without knowing this contract: `agag.post.quoted_ids` reads the
 - `agag.selfnote.is_progress` is true for `intent=progress` (and, as before,
   for posts made of nothing but `🔧`/`💬` progress lines); a declared other
   intent wins over the line shapes.
+
+## Outstanding requests (`agag.outstanding`, `ag.outstanding.v1`)
+
+`read_requests(messages, complete=…, closed=…, stale=…, is_ack=…)` is the
+shared read model: a pure function of one conversation's history, so a
+restart or a rebuilt mirror concludes the same. A request is its message
+id; its post keeps its intent forever, and its **state** is derived:
+`pending`, `overtaken` (the recipient spoke after `seen` and before the
+request landed — their input is owed a serving, so they are not being
+asked yet), `answered` (by `reference`, `quote` or `next_post`), `withdrawn`
+/ `superseded` (the asker's own `re=`), `closed` (unanswered in a ✔'d
+conversation; `pending` again if it is reopened).
+
+Correlation: an explicit `re=` or a Zulip quote-and-reply by the recipient
+settles exactly what it names; otherwise a post by the recipient settles
+their one pending request, and only when there is exactly one — with two
+or more it settles none and is listed in `unmatched`. Progress, acks,
+selfnotes, system notices and anybody but the recipient settle nothing. A
+receipt is not approval, acceptance or completion.
+
+`complete=False` marks next-post answers `certain=False`; `stale=True` and
+`complete=False` are said in `uncertain`. Edits are read as the post is
+now; a deleted request is absent, a deleted answer returns its request to
+`pending`.
+
+`agag.trace` builds on it: in a person's conversation that the agent
+answered last, `awaiting_human` now means an explicit request is pending,
+`queued` an overtaken one, and `answered` that nothing is asked of anybody.

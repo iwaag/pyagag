@@ -1,0 +1,40 @@
+{
+  "about": "A Front Desk conversation recorded as the realm would hold it (clearer_chat_ui step 2). Users: 8 Developer (human), 15 Front (the asker), 11 autolab (a third party). Every transition of agag.outstanding appears once.",
+  "channel": "front",
+  "topic": "front-desk-20260925-100000",
+  "messages": [
+    {"id": 100, "sender_id": 8, "sender_full_name": "Developer", "content": "Please build the login page."},
+    {"id": 101, "sender_id": 15, "sender_full_name": "Front", "content": "Message received. Please wait for the reply."},
+    {"id": 102, "sender_id": 15, "sender_full_name": "Front", "content": "Reading the project.\n\n`ag-post intent=progress`"},
+    {"id": 103, "sender_id": 15, "sender_full_name": "Front", "content": "@**Developer**\n\nWhich auth provider should the login use?\n\n`ag-post intent=response_request to=8 ask=question seen=101`"},
+    {"id": 104, "sender_id": 15, "sender_full_name": "Front", "content": "@**Developer**\n\nMay I open a workplan in pj-demo for it?\n\n`ag-post intent=response_request to=8 ask=confirmation seen=103`"},
+    {"id": 105, "sender_id": 11, "sender_full_name": "autolab", "content": "I can take this once it is planned."},
+    {"id": 106, "sender_id": 15, "sender_full_name": "Front", "content": "Still reading the project.\n\n`ag-post intent=progress`"},
+    {"id": 107, "sender_id": 8, "sender_full_name": "Developer", "content": "GitHub."},
+    {"id": 108, "sender_id": 8, "sender_full_name": "Developer", "content": "Yes, go ahead.\n\n`ag-post re=104`"},
+    {"id": 109, "sender_id": 15, "sender_full_name": "Front", "content": "Message received. Please wait for the reply."},
+    {"id": 110, "sender_id": 15, "sender_full_name": "Front", "content": "@**Developer**\n\nThe workplan is open in pj-demo.\n\n`ag-post intent=report`"},
+    {"id": 111, "sender_id": 8, "sender_full_name": "Developer", "content": "@_**Front|15** [said](http://zulip.example/#narrow/channel/24-front/topic/front-desk-20260925-100000/near/103):\n```quote\nWhich auth provider should the login use?\n```\nGitHub, as I said."},
+    {"id": 112, "sender_id": 8, "sender_full_name": "Developer", "content": "Also add a logout button."},
+    {"id": 113, "sender_id": 15, "sender_full_name": "Front", "content": "Message received. Please wait for the reply."},
+    {"id": 114, "sender_id": 8, "sender_full_name": "Developer", "content": "And dark mode, please."},
+    {"id": 115, "sender_id": 15, "sender_full_name": "Front", "content": "@**Developer**\n\nWhere should the logout button go?\n\n`ag-post intent=response_request to=8 ask=question seen=113`"},
+    {"id": 116, "sender_id": 15, "sender_full_name": "Front", "content": "Message received. Please wait for the reply."},
+    {"id": 117, "sender_id": 15, "sender_full_name": "Front", "content": "@**Developer**\n\nDark mode is added to the workplan.\n\n`ag-post intent=report`"},
+    {"id": 118, "sender_id": 15, "sender_full_name": "Front", "content": "@**Developer**\n\nShall I ask autolab to start task 1 now?\n\n`ag-post intent=response_request to=8 ask=confirmation seen=117`"},
+    {"id": 119, "sender_id": 15, "sender_full_name": "Front", "content": "Never mind the logout placement: it goes in the header like the rest of pj-demo.\n\n`ag-post intent=report re=115`"}
+  ],
+  "states_after": {
+    "104": {"103": "pending", "104": "pending"},
+    "106": {"103": "pending", "104": "pending"},
+    "107": {"103": "pending", "104": "pending"},
+    "108": {"103": "pending", "104": "answered"},
+    "111": {"103": "answered", "104": "answered"},
+    "115": {"103": "answered", "104": "answered", "115": "overtaken"},
+    "116": {"115": "overtaken"},
+    "117": {"115": "pending"},
+    "118": {"115": "pending", "118": "pending"},
+    "119": {"103": "answered", "104": "answered", "115": "withdrawn", "118": "pending"}
+  },
+  "unmatched": {"107": [103, 104]}
+}

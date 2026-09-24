@@ -197,7 +197,7 @@ def format_chatlog(messages: list[dict], self_id: int, *, drop=None) -> str:
         speaker = message.get("sender_full_name") or f"user{message.get('sender_id')}"
         if own:
             speaker = f"{speaker} (you)"
-        text, meaning = post_label(content, names.get)
+        text, meaning = post_label(content, names.get, message.get("id"))
         lines.append(f"[{speaker}] {meaning}{text}")
     return "\n".join(lines) + ("\n" if lines else "")
 
@@ -1038,7 +1038,8 @@ def serve_topic(
         _remember(journal, reply_anchor=int(anchor or 0))
         if body:
             mention = mention_of(requester) if handoff else ""
-            text = _with_meta(f"{mention}\n\n{body}" if mention else body, meta, requester, journal, log)
+            text = _with_meta(f"{mention}\n\n{body}" if mention else body, meta, requester, journal, log,
+                              seen=context.processed_up_to if replies_here else 0)
             journal.prepared(destination.channel, destination.topic, text,
                              resolve_after=bool(result.resolve_after), after_id=after_id)
             # `DeliveryError` escapes on purpose: the text is prepared and
@@ -1127,7 +1128,7 @@ def _destination(client, channel: str, topic: str, anchor: int, journal, log) ->
     return found
 
 
-def _with_meta(text: str, meta: PostMeta | None, requester: dict | None, journal, log) -> str:
+def _with_meta(text: str, meta: PostMeta | None, requester: dict | None, journal, log, *, seen: int = 0) -> str:
     """The reply with its `ag-post` line (`agag.post`): one message, so the
     meaning is prepared, journaled and redelivered with the words. A request
     written without `to=` is addressed to the requester this serving
@@ -1140,6 +1141,9 @@ def _with_meta(text: str, meta: PostMeta | None, requester: dict | None, journal
             meta = PostMeta(re=meta.re) if meta.re else None
         else:
             meta = PostMeta(intent=meta.intent, to=int(to), ask=meta.ask, re=meta.re)
+    if meta is not None and meta.intent == RESPONSE_REQUEST and seen:
+        # The input boundary this request was written from (`agag.outstanding`).
+        meta = PostMeta(intent=meta.intent, to=meta.to, ask=meta.ask, re=meta.re, seen=int(seen))
     try:
         composed = compose(text, meta)
     except ValueError as error:

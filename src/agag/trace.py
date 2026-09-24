@@ -29,7 +29,8 @@ otherwise.
   | `executing` | the owner acknowledged the newest post and has not answered yet (the age says for how long) |
   | `awaiting_requester` | the owner answered last; the requester has not taken it up |
   | `awaiting_delivery` | the owner answered the requester by name and the requester's listener has not marked the answer served |
-  | `awaiting_human` | the conversation a human asked in: the agent answered last |
+  | `awaiting_human` | the conversation a human asked in holds a response request (`agag.post`) still pending for its recipient |
+  | `answered` | the conversation a human asked in: the agent answered last and asks nobody anything |
   | `failed` | the newest word is a failure notice (a run that produced no reply, a refused start) |
   | `done` / `cancelled` | the owner's `[state]` note says so |
   | `unobservable` | the conversation could not be read; nothing is concluded about the work |
@@ -92,6 +93,7 @@ STATES = (
     "executing",
     "awaiting_requester",
     "awaiting_human",
+    "answered",
     "unobservable",
     "done",
     "cancelled",
@@ -450,7 +452,8 @@ def classify(
 
     if last_other is None:
         if human:
-            return "awaiting_human", "only the agent has spoken", identity, owner_name, [], last_activity
+            return _human_state(messages, complete, identity, owner_name, last_activity,
+                                "only the agent has spoken", [])
         starts = [m for m in messages
                   if m.get("sender_id") == owner and parse_start(m.get("content")) is not None]
         pending = owed_start(messages, owner, is_ack=is_ack)
@@ -507,10 +510,10 @@ def classify(
 
     # The owner answered last.
     if human:
-        return (
-            "awaiting_human",
+        return _human_state(
+            messages, complete, identity, owner_name, last_activity,
             f"{owner_name} answered #{mid(last_answer)} {_age(now, int(last_answer.get('timestamp') or 0))} ago",
-            identity, owner_name, [mid(last_answer)], last_activity,
+            [mid(last_answer)],
         )
     named = {match.group("name").strip() for match in MENTION.finditer(str(last_answer.get("content") or ""))}
     for requester_id, home in (homes or {}).items():
@@ -537,6 +540,31 @@ def classify(
         f"{owner_name} answered #{mid(last_answer)} {_age(now, int(last_answer.get('timestamp') or 0))} ago",
         identity, owner_name, [mid(last_answer)], last_activity,
     )
+
+
+def _human_state(messages, complete, identity, owner_name, last_activity, answered_detail, evidence):
+    """The state of a human's conversation whose agent spoke last, from the
+    explicit requests in it (`agag.outstanding`) rather than from who spoke
+    last: until `clearer_chat_ui` step 2 every report read as
+    `awaiting_human`, which is true of every conversation ever answered."""
+    from .outstanding import OVERTAKEN, read_requests
+
+    found = read_requests(messages, complete=complete, is_ack=is_ack)
+    waiting = found.pending
+    if waiting:
+        asks = "; ".join(f"#{r.id} {r.sender_name or r.sender_id} asks {r.to_name or r.to}"
+                         + (f" ({r.ask})" if r.ask else "") for r in waiting)
+        return "awaiting_human", asks, identity, owner_name, [r.id for r in waiting], last_activity
+    overtaken = [r for r in found.requests if r.state == OVERTAKEN]
+    if overtaken:
+        request = overtaken[-1]
+        return (
+            "queued",
+            f"#{request.id} was asked before reading #{', #'.join(map(str, request.overtaken_by))}; "
+            f"that input is owed a serving",
+            identity, owner_name, [request.id, *request.overtaken_by], last_activity,
+        )
+    return "answered", f"{answered_detail}; nothing is asked of anybody", identity, owner_name, evidence, last_activity
 
 
 @dataclass

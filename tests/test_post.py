@@ -40,6 +40,7 @@ pytestmark = pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExc
     PostMeta(intent=RESPONSE_REQUEST, to=8, ask="question"),
     PostMeta(intent=RESPONSE_REQUEST, to=8, ask="confirmation", re=(9001, 9005)),
     PostMeta(re=(9001,)),
+    PostMeta(intent=RESPONSE_REQUEST, to=8, seen=9000),
 ])
 def test_every_intent_round_trips_through_one_message(meta):
     content = compose("Some words.\n\nMore words.", meta)
@@ -169,8 +170,9 @@ def test_a_request_is_addressed_to_the_requester_the_serving_recorded():
     client = ScriptedClient([human("build it", 1)])
     record = topics.serve_topic(client, "c", "t", run_output("```ag-reply intent=response_request\nWhich branch?\n```"),
                                 ack_text="ack", journal=serving.NullJournal(1), log=lambda t: None)
-    assert record.reply_text == "@**Developer**\n\nWhich branch?\n\n`ag-post intent=response_request to=7`"
-    assert record.extra["intent"] == {"intent": RESPONSE_REQUEST, "to": DEV}
+    assert record.reply_text == "@**Developer**\n\nWhich branch?\n\n`ag-post intent=response_request to=7 seen=501`"
+    assert record.extra["intent"] == {"intent": RESPONSE_REQUEST, "to": DEV, "seen": 501}, \
+        "seen= is the processed input boundary (the ack is the newest post the serving read)"
 
 
 def test_a_report_carries_its_line_and_the_mention_stays_first():
@@ -225,7 +227,7 @@ def test_the_repair_run_is_asked_to_keep_the_intent():
     record = topics.serve_topic(client, "c", "t",
                                 lambda ctx: topics.TopicResult(output="no mark here", repair=repair),
                                 ack_text="ack", journal=serving.NullJournal(1), log=lambda t: None)
-    assert parse_post(record.reply_text).meta == PostMeta(intent=RESPONSE_REQUEST, to=DEV, ask="question")
+    assert parse_post(record.reply_text).meta == PostMeta(intent=RESPONSE_REQUEST, to=DEV, ask="question", seen=501)
     from agag.reply import repair_prompt
     assert "intent=" in repair_prompt("x", "why")
 
@@ -233,7 +235,13 @@ def test_the_repair_run_is_asked_to_keep_the_intent():
 # --- delivery: retries, crashes, restarts ------------------------------------------------
 
 ASKING = "```ag-reply intent=response_request ask=question\nWhich branch?\n```"
-EXPECTED = "@**Dev**\n\nWhich branch?\n\n`ag-post intent=response_request to=7 ask=question`"
+EXPECTED_WORDS = "@**Dev**\n\nWhich branch?"
+
+
+def is_expected(content):
+    parsed = parse_post(content)
+    return (parsed.text == EXPECTED_WORDS and parsed.meta is not None and parsed.meta.intent == RESPONSE_REQUEST
+            and parsed.meta.to == DEV and parsed.meta.ask == "question" and parsed.meta.seen)
 
 
 def test_a_dropped_send_is_redelivered_with_its_meaning(tmp_path):
@@ -270,12 +278,13 @@ def test_a_crash_before_the_send_redelivers_the_request_after_a_restart_without_
                and h.listener.queue.latest_serving(("pj-x", "workplan-a", OWNER)).state == serving.PREPARED),
                what="the prepared record")
     h.crash()
-    assert h.listener.queue.latest_serving(("pj-x", "workplan-a", OWNER)).reply_text == EXPECTED
+    prepared = h.listener.queue.latest_serving(("pj-x", "workplan-a", OWNER)).reply_text
+    assert is_expected(prepared)
     h2 = Harness(realm, tmp_path, reply=lambda ctx: topics.TopicResult(output="```ag-reply\nWRONG\n```")).start()
-    wait_until(lambda: h.replies("pj-x", "workplan-a") == [EXPECTED], what="the redelivery")
+    wait_until(lambda: h.replies("pj-x", "workplan-a") == [prepared], what="the redelivery")
     time.sleep(0.3)
     assert h2.contexts == [], "the model did not run again"
-    assert h.replies("pj-x", "workplan-a") == [EXPECTED], "one post, with its meaning"
+    assert h.replies("pj-x", "workplan-a") == [prepared], "one post, with its meaning"
     h2.stop()
 
 
@@ -285,13 +294,15 @@ def test_a_crash_after_the_send_is_settled_by_read_back_with_the_meaning(tmp_pat
     h.client.trouble = lambda content: "crash_after" if "ag-post" in content else None
     h.start()
     realm.post("pj-x", "workplan-a", "please", sender_id=DEV, sender_name="Dev")
-    wait_until(lambda: h.replies("pj-x", "workplan-a") == [EXPECTED], what="the send")
+    wait_until(lambda: len(h.replies("pj-x", "workplan-a")) == 1, what="the send")
+    assert is_expected(h.replies("pj-x", "workplan-a")[0])
     h.crash()
     h2 = Harness(realm, tmp_path).start()
     wait_until(lambda: h2.listener.queue.latest_serving(("pj-x", "workplan-a", OWNER)).state == serving.DELIVERED,
                what="the read-back")
     time.sleep(0.3)
-    assert h.replies("pj-x", "workplan-a") == [EXPECTED] and h2.contexts == []
+    replies = h.replies("pj-x", "workplan-a")
+    assert len(replies) == 1 and is_expected(replies[0]) and h2.contexts == []
     h2.stop()
 
 
@@ -309,7 +320,7 @@ def test_the_chatlog_says_what_a_post_is_and_hides_the_line():
     log = topics.format_chatlog(history, 42)
     assert "ag-post" not in log
     assert "[Bot (you)] (progress) Working." in log
-    assert "[Bot (you)] (asks Dev to answer (question)) @**Dev**" in log
+    assert "[Bot (you)] (asks Dev to answer (question); request #3) @**Dev**" in log
     assert "[Dev] (answers #3) main" in log
     printed = format_messages([{**m, "timestamp": 0} for m in history])
     assert "ag-post" not in printed and "(message 3, asks Dev to answer (question))" in printed

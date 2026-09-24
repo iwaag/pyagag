@@ -205,6 +205,8 @@ I would open a workplan in pj-demo for the three steps above. Shall I go ahead?
 The plan is posted in pj-demo › workplan-login; autolab has started task 1.
 ```
 
+In the conversation you are given, a question is labelled with its id (`request #9120`). When your reply answers one, or an earlier question of yours no longer stands, say which with `re=<id>` on the fence (`re=9120,9125` for several) — that is what takes it off the list of open questions; nothing else does.
+
 Ask only when you really wait for the answer: a question left in a report is not seen as one, and a report marked as a request tells somebody to reply for nothing. A reply without `intent=` is posted unclassified — never read as waiting. The label is written into the post for you; do not type it yourself. `agentchat send --help` says how to mark a post you send elsewhere the same way."""
 
 

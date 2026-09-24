@@ -177,3 +177,10 @@ def test_agentchat_accept_says_what_it_did_and_refuses_out_loud(world, monkeypat
     assert "--evidence" in capsys.readouterr().err
     assert chat.main(["accept", str(mission), "--evidence", str(accepted)]) == 0
     assert f"m{mission} is done: accepted by Omni Agent (#{accepted})" in capsys.readouterr().out
+
+
+def test_naming_the_accepting_post_instead_of_the_mission_is_refused_with_how_to_name_it(world):
+    realm, mission, accepted = world
+    with pytest.raises(AcceptanceRefused) as refused:
+        accept_mission(Client(realm, FRONT), accepted, evidence=accepted)
+    assert "Name the mission first" in str(refused.value) and f"--evidence {accepted}" in str(refused.value)

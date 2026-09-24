@@ -169,9 +169,13 @@ def accept_mission(
         raise AcceptanceRefused(f"the conversation holding #{message_id} could not be read; nothing is written")
     match = _MISSION.match(root.identity or "")
     if match is None:
+        # Said with how to name the mission: in p3 step 5 (trial G) a run passed
+        # the accepting post itself as the first argument, read this refusal as
+        # "cannot be recorded", and relayed the acceptance by post instead.
         raise AcceptanceRefused(
-            f"#{root.channel} > {root.topic} is not a mission (it carries no mission note of its owner's); "
-            "only a mission is accepted this way")
+            f"#{message_id} is in #{root.channel} > {root.topic}, which is not a mission. Name the mission "
+            "first — the number in its label m<number>, as its agent's close-out gives it — and the post "
+            f"that accepted it second: `agentchat accept <number> --evidence {message_id}`")
     mission_id = int(match.group("id"))
     history = client.topic_history(root.channel, root.topic, num_before=HISTORY)
     owner = _mission_owner(history)

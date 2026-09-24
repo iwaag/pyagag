@@ -46,6 +46,7 @@ from agag.selfnote import (
     own_rootchat,
     parse_rootchat,
     parse_rootchat_moved,
+    parse_start,
     replaced_anchor,
     parse_served,
     served_note,
@@ -1410,6 +1411,62 @@ def remotes_for_home(
         remote = Conversation(remote_channel, remote_topic)
         if remote not in found:
             found.append(remote)
+    found.extend(child for child in started_for(client, found, num_before) if child not in found)
+    return found
+
+
+def started_for(client, parents: list[Conversation], num_before: int = ROOTCHAT_HISTORY) -> list[Conversation]:
+    """Conversations opened for one of `parents` by their owner and started
+    by it **for this bot** — the parent hop (`parent_rootchat`), seen from
+    the requester's side.
+
+    robust_workflow p3 step 4. Since p1 autolab starts a mission's next task
+    itself; the requester never posts there, so no root note of its own
+    names the task, and the task's answer reaches it only through the
+    mission it asked in. Callbacks and the trace follow that hop; the
+    requester's `threads/` did not — so a serving of its conversation that
+    was about something else relayed the task's report by reading it with a
+    tool, wrote no receipt for it, and the report's own callback was served
+    once more for "nothing new" (p2 trial A3, #9609 and #9664). Now the
+    child is one of the serving's threads, which is what makes it input.
+
+    A child is recognised by its opener's root note naming a parent (by
+    anchor when the note has one, else by name across ✔) and by a start
+    note in it naming this bot as the requester. One hop, like the callback.
+    """
+    if not parents or not hasattr(client, "public_notes"):
+        return []
+    try:
+        self_id = int(client.whoami()["user_id"])
+        notes = client.public_notes(ROOTCHAT_TAG, num_before)
+    except (ZulipError, KeyError, TypeError, ValueError):
+        return []
+    wanted = {(parent.channel, _bare_topic(parent.topic)) for parent in parents}
+    found: list[Conversation] = []
+    for message in notes:
+        if message.get("type") not in (None, "stream") or message.get("sender_id") == self_id:
+            continue
+        parent = parse_rootchat(message.get("content"))
+        channel, topic = channel_name(message), str(message.get("subject") or "")
+        if parent is None or not channel or not topic:
+            continue
+        where = (parent.channel, _bare_topic(parent.topic))
+        if parent.anchor and hasattr(client, "message"):
+            located = conversation_of(client, int(parent.anchor))
+            if located is not None:
+                where = (located.channel, _bare_topic(located.topic))
+        if where not in wanted:
+            continue
+        child = Conversation(channel, _bare_topic(topic))
+        if child in found or (child.channel, child.topic) in wanted:
+            continue
+        try:
+            history = topic_history_across_resolve(client, child.channel, child.topic, num_before)
+        except (ZulipError, ValueError):
+            continue
+        if any(m.get("sender_id") != self_id and (start := parse_start(m.get("content"))) is not None
+               and start[1] == self_id for m in history):
+            found.append(child)
     return found
 
 

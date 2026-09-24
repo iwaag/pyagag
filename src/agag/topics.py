@@ -41,7 +41,7 @@ from .memo import is_memo_channel
 from .continuation import CONTINUATION_GUIDE, continuation_note, split_continuation
 from .reply import REPLY_GUIDE, record_reply_outcome, resolve_reply
 from .selfnote import is_selfnote, is_speech, owed_start
-from .serving import NullJournal, Serving
+from .serving import NullJournal, Serving, note_input
 from .selfnote import Conversation
 from .zulip import (
     RESOLVED_TOPIC_PREFIX,
@@ -251,6 +251,9 @@ def write_threads(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(format_chatlog(messages, self_id, drop=drop), encoding="utf-8")
         written.append(path)
+        # What this serving is handed, for the receipts written after its
+        # reply is delivered (robust_workflow p3 step 4).
+        note_input(channel, topic, messages, complete=len(messages) < history_messages)
     return written
 
 

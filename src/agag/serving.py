@@ -60,6 +60,7 @@ __all__ = [
     "Serving",
     "bound",
     "current",
+    "note_input",
 ]
 
 
@@ -209,3 +210,21 @@ def bound(journal: Journal):
         yield journal
     finally:
         _local.journal = previous
+
+
+def note_input(channel: str, topic: str, messages, *, complete: bool) -> None:
+    """Record that this serving was handed `messages` of another
+    conversation — a thread beside the one being served.
+
+    robust_workflow p3 step 4. A delegated answer is taken up by the serving
+    that is *given* it, whichever route started that serving, and the
+    receipt (`[selfnote][served]`) is written only for what was given: the
+    span of ids the thread held and whether the read reached its beginning.
+    An answer that arrives after the thread was read is newer than the span
+    and stays owed. A no-op outside a listener's serving."""
+    journal = current()
+    record = getattr(journal, "inputs", None)
+    ids = [int(m.get("id") or 0) for m in messages or () if int(m.get("id") or 0)]
+    if record is None or not ids:
+        return
+    record(channel, topic, first=min(ids), last=max(ids), complete=bool(complete))

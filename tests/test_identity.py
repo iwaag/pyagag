@@ -250,3 +250,38 @@ def test_an_answer_in_a_task_its_owner_started_is_owed_to_the_parent_s_requester
     settle(mirror, lambda: mirror.message(mark) is not None)
     node = next(n for n in tree(mirror, ask, now=later).nodes() if n.topic == auto)
     assert node.state == "done"
+
+
+def test_a_task_its_owner_started_for_this_bot_is_one_of_home_s_threads(world):
+    """robust_workflow p3 step 4: autolab starts task 2 itself for Front
+    (`[selfnote][start] … for 15 Front`); Front never posts there, so no root
+    note of Front's names it. Its answer reaches Front through the plan —
+    and a serving of Front's conversation is now handed it as a thread,
+    which is what makes it input the serving can be given a receipt for. A
+    task started for somebody else is not."""
+    from agag.zulip import remotes_for_home
+
+    realm, mirror, ask, mission, task, _ = world
+    for serial, requester in ((2, (FRONT, "Front")), (3, (DEV, "Developer"))):
+        topic = f"workrun-task{serial}-m{mission}"
+        post(realm, "work-m1", topic, f"[selfnote][task] {mission}#{serial}", AUTOLAB)
+        post(realm, "work-m1", topic, f"[selfnote][rootchat] pj-x/workplan-a #{mission}", AUTOLAB)
+        post(realm, "work-m1", topic, f"[selfnote][start] #{ask} for {requester[0]} {requester[1]}", AUTOLAB)
+
+    class Client(NotesClient):
+        def whoami(self, refresh=False):
+            return {"user_id": self.self_id}
+
+        def public_notes(self, tag, num_before=1000):
+            return [dict(m) for m in sorted(self.realm.messages.values(), key=lambda m: m["id"])
+                    if f"[selfnote][{tag}]" in m["content"]]
+
+        def topic_history(self, channel, topic, num_before=50):
+            return self.history(channel, topic)[-num_before:]
+
+    client = Client(realm, FRONT)
+    found = [c.topic for c in remotes_for_home(client, "front", "front-a",
+                                                home_messages=client.history("front", "front-a"))]
+    assert f"workrun-task2-m{mission}" in found
+    assert f"workrun-task3-m{mission}" not in found
+    assert found.count(task) == 1

@@ -488,6 +488,26 @@ class QueueJournal:
         extra["recheck_failed"] = reason
         self.queue.update_serving(self.id, extra=extra)
 
+    def inputs(self, channel: str, topic: str, *, first: int, last: int, complete: bool) -> None:
+        """A thread this serving was handed (`agag.serving.note_input`): kept
+        with the record, so the receipts written after its delivery — and
+        after a restart that came before them — cover exactly this."""
+        record = self.serving()
+        if record is None:
+            return
+        extra = dict(record.extra)
+        rows = [dict(row) for row in extra.get("inputs") or []]
+        for row in rows:
+            if (row["channel"], row["topic"]) == (channel, topic):
+                row.update(first=min(int(row["first"]), int(first)), last=max(int(row["last"]), int(last)),
+                           complete=bool(row["complete"]) and bool(complete))
+                break
+        else:
+            rows.append({"channel": channel, "topic": topic, "first": int(first), "last": int(last),
+                         "complete": bool(complete)})
+        extra["inputs"] = rows
+        self.queue.update_serving(self.id, extra=extra)
+
     def last_delivered_for(self, channel: str, topic: str) -> Serving | None:
         """The newest delivered serving of the conversation `channel/topic`
         as home, before this one, whatever route brought it — what the
@@ -793,6 +813,7 @@ class Listener:
                 continue
             if self.queue.enqueue(index.channel, index.name, route, revision=revision, message_id=newest):
                 added += 1
+        added += self._recover_resolved_mentions(marks, revision)
         self.recoveries += 1
         self.log(f"recovery ({reason}): {added} conversation(s) queued from the index, "
                  f"{len(self.queue)} pending")
@@ -804,6 +825,53 @@ class Listener:
         with self._wake:
             self._wake.notify_all()
         return added
+
+    def _recover_resolved_mentions(self, marks: dict[tuple[str, str], int], revision: int) -> int:
+        """Callbacks in somebody else's ✔'d conversations, owed since the
+        horizon (robust_workflow p3 step 4, S2).
+
+        autolab resolves a task in the second after its closing report, so
+        the report very often sits under ✔. The index pass above reads open
+        topics only; a callback that arrived while this listener was down
+        was found again only when Observer asked for it. Here a ✔'d topic
+        this bot does not own, holding a post that names it above its
+        receipt, is queued like any mention — served at home, never into
+        the ✔'d topic, so nothing is reopened and no twin is made.
+
+        Only posts newer than the **horizon** — the newest message the mirror
+        held when this rule first ran for this listener, kept in the queue
+        file — count: the realm's older ✔ history has callbacks from before
+        receipts were reliable (robust_workflow p2 step 5), and replaying
+        them would buy a run for every one."""
+        if self.on_mention is None:
+            return 0
+        horizon = self._resolved_horizon()
+        added = 0
+        for index in self.mirror.topics(include_resolved=True):
+            if not index.resolved or is_memo_channel(index.channel) or index.max_id <= horizon:
+                continue
+            if topic_matches(index.channel, index.live_name, self.topic_filter):
+                continue  # a finished conversation of our own is finished
+            mark = max(marks.get((index.channel, index.name), 0), horizon)
+            mention = self.unanswered_mention(index.channel, index.live_name, mark)
+            if mention is None:
+                continue
+            if self.queue.enqueue(index.channel, index.name, MENTION, revision=revision, message_id=mention.id):
+                self.log(f"recovery: #{mention.id} in {index.channel!r}/{index.live_name!r} names us "
+                         "and has no receipt")
+                added += 1
+        return added
+
+    def _resolved_horizon(self) -> int:
+        with self.queue._lock:
+            row = self.queue._db.execute("SELECT value FROM meta WHERE key = 'resolved_horizon'").fetchone()
+            if row is not None:
+                return int(row["value"])
+            newest = int(self.mirror.store.newest_id() or 0) if hasattr(self.mirror, "store") else 0
+            self.queue._db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('resolved_horizon', ?)",
+                                   (str(newest),))
+        self.log(f"callbacks under ✔ are recovered from #{newest} on")
+        return newest
 
     def _resume_running(self) -> None:
         """Entries a crash left `running`: every one is queued again and
@@ -855,10 +923,10 @@ class Listener:
             self.queue.requeue(entry)  # then judge what is owed now, once more
             return
         record = self.queue.latest_serving(entry.key, states=(DELIVERED,))
-        if record is not None and entry.route == MENTION and not record.extra.get("served_marked"):
-            # Delivered, and the restart came before the served mark: mark
-            # it now, then judge again — the mark is what keeps the mention
-            # from being served twice.
+        if record is not None and self._receipts_pending(entry, record):
+            # Delivered, and the restart came before the receipts: write
+            # them now, then judge again — a receipt is what keeps an answer
+            # the serving was given from being served twice.
             self._after_delivery(entry, record)
             self.queue.requeue(entry)
             return
@@ -924,8 +992,12 @@ class Listener:
         this serving processed."""
         if record is not None and entry.route == OWNER:
             self._mark_owed(record)
+            self._mark_inputs(record)
             return
-        if record is None or entry.route != MENTION or record.extra.get("served_marked"):
+        if record is None or entry.route != MENTION:
+            return
+        if record.extra.get("served_marked"):
+            self._mark_inputs(record)
             return
         if self.self_id is None or not record.trigger_id:
             return
@@ -934,9 +1006,7 @@ class Listener:
         try:
             # Home by its anchor first: renamed or ✔'d since the serving,
             # the mark still goes where the conversation is.
-            where = whereabouts(self.mirror, int(record.extra.get("home_anchor") or 0))
-            live = where[1] if where is not None and where[0] == home.channel else \
-                live_topic_name(self.client, home.channel, home.topic)
+            live = self._home_live(record, home)
             self.client.send_to_channel(home.channel, live, served_note(remote, record.trigger_id))
             self._wrote_mark(remote, record.trigger_id)
         except Exception as error:  # noqa: BLE001 - the mark is retried with the entry
@@ -946,6 +1016,79 @@ class Listener:
         extra["served_marked"] = record.trigger_id
         self.queue.update_serving(record.id, extra=extra)
         self.log(f"marked {remote} served up to {record.trigger_id} in {home}")
+        record = self.queue.serving(record.id) or record
+        self._mark_inputs(record)
+
+    def _home_live(self, record: Serving, home: Conversation) -> str:
+        """Home's name now: by the anchor the serving recorded, else by name
+        across ✔."""
+        where = whereabouts(self.mirror, int(record.extra.get("home_anchor") or 0))
+        if where is not None and where[0] == home.channel:
+            return where[1]
+        return live_topic_name(self.client, home.channel, home.topic)
+
+    def _receipts_pending(self, entry: Entry, record: Serving) -> bool:
+        """Whether a delivered serving's receipts are not all written yet."""
+        if entry.route == MENTION and record.trigger_id and not record.extra.get("served_marked"):
+            return True
+        if entry.route == OWNER and record.input_up_to is not None and not record.extra.get("owed_marked"):
+            return True
+        return bool(record.extra.get("inputs")) and not record.extra.get("inputs_marked")
+
+    def _mark_inputs(self, record: Serving) -> None:
+        """Receipts for the delegated answers this serving was **given** —
+        the threads it was handed (`agag.serving.note_input`) — once its
+        reply is confirmed delivered, on every route (robust_workflow p3
+        step 4).
+
+        Until now an answer got a receipt only on the route that triggered
+        the serving (the mention's own id) or when Observer named it
+        (`[owed]`). An owner-route serving — a human's post, Observer asking
+        about something else — that read a new answer in its threads and
+        relayed it left the answer owed, and the mention route served it
+        again for "nothing new" (p2 A2/A3).
+
+        Per thread: the newest post naming this bot inside the span it was
+        handed and above the receipt already written is marked. A post
+        arriving after the thread was read is outside the span and stays
+        owed. A thread read in part (its history longer than the read) is
+        marked only when no post naming this bot lies between the last
+        receipt and the start of the span — a receipt must never cover an
+        answer nobody was given."""
+        inputs = list(record.extra.get("inputs") or [])
+        if self.self_id is None or not inputs or record.extra.get("inputs_marked"):
+            return
+        home = Conversation(record.home_channel or record.channel, record.home_topic or record.topic)
+        marks = self.served_marks()
+        written = []
+        for item in inputs:
+            first, last = int(item.get("first") or 0), int(item.get("last") or 0)
+            newest = self.mirror.message(last)
+            if newest is None:
+                continue
+            remote = Conversation(newest.channel, bare_topic(newest.topic))
+            if (remote.channel, remote.topic) == (home.channel, bare_topic(home.topic)):
+                continue
+            key = served_key(self.mirror, remote, last)
+            mark = marks.get(key, 0)
+            named = [m for m in self.mirror.messages(newest.channel, newest.topic, across_resolve=True)
+                     if mark < m.id <= last and m.sender_id != self.self_id and is_speech(m.as_zulip())
+                     and mentions_bot(m.content, self.bot_name)]
+            if not named:
+                continue
+            if not item.get("complete", True) and min(m.id for m in named) < first:
+                self.log(f"{remote}: a post naming us lies before what this serving was given; left owed")
+                continue
+            answer = max(m.id for m in named)
+            self.client.send_to_channel(home.channel, self._home_live(record, home), served_note(remote, answer))
+            self._wrote_mark(remote, answer)
+            marks[key] = answer
+            written.append(f"{remote} up to {answer}")
+        extra = dict((self.queue.serving(record.id) or record).extra)
+        extra["inputs_marked"] = True
+        self.queue.update_serving(record.id, extra=extra)
+        for line in written:
+            self.log(f"marked {line} served in {home} (an answer this serving was given)")
 
     def _mark_owed(self, record: Serving) -> None:
         """An answer somebody asked us to deal with — Observer's request for
@@ -957,12 +1100,13 @@ class Listener:
             return
         from .selfnote import parse_owed
 
-        live = self._live(record.home_channel or record.channel, record.home_topic or record.topic)
-        if live is None:
-            return
+        # Home by the serving's anchor, ✔ or not: a home resolved between the
+        # reply and this receipt still gets it (p3 step 1's code fact).
+        home = Conversation(record.home_channel or record.channel, record.home_topic or record.topic)
+        live = self._home_live(record, home)
         marks = self.served_marks()
         written = []
-        for message in self.mirror.messages(live.channel, live.live_name, across_resolve=True):
+        for message in self.mirror.messages(home.channel, live, across_resolve=True):
             if message.id > int(record.input_up_to):
                 break
             owed = parse_owed(message.content)
@@ -972,14 +1116,14 @@ class Listener:
             key = served_key(self.mirror, remote, answer)
             if answer <= marks.get(key, 0):
                 continue
-            self.client.send_to_channel(live.channel, live.live_name, served_note(remote, answer))
+            self.client.send_to_channel(home.channel, live, served_note(remote, answer))
             self._wrote_mark(remote, answer)
             marks[key] = answer
             written.append(f"{remote} up to {answer}")
         record.extra["owed_marked"] = True
         self.queue.update_serving(record.id, extra=record.extra)
         for line in written:
-            self.log(f"marked {line} served in {live.channel}/{live.live_name} (an owed answer this serving took up)")
+            self.log(f"marked {line} served in {home.channel}/{live} (an owed answer this serving took up)")
 
     # -- lifecycle -----------------------------------------------------------------------------
 

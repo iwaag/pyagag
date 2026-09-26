@@ -52,7 +52,10 @@ def test_generated_project_is_small_and_loads(tmp_path, monkeypatch):
     # The config is a valid v2 with a grant per role.
     config, overlay = load_config(root / "agents.toml")
     for role in ("front", "worker"):
-        assert resolve_role(config, overlay, role, profile_override="stub", check_available=False).allowed_tools
+        grant = resolve_role(config, overlay, role, profile_override="stub", check_available=False).allowed_tools
+        # A new instance reads the shared contexts from its first run (give_context_easier p1).
+        assert "Bash(agrefs:*)" in grant
+    assert "agrefs list" in (root / "agent/guides/agechoplan_front/guide.md").read_text(encoding="utf-8")
     # No template variable survived.
     for path in root.rglob("*"):
         if path.is_file():

@@ -14,4 +14,6 @@ model = "anthropic/claude-sonnet-5"
 # Every role carries its own tool grant (claude_code's --allowedTools).
 # Without one claude_code waits on a permission prompt until the timeout.
 # `agentchat` is how a run reads and writes the chat as this instance.
+# `agrefs` reads the contexts the developer publishes for every agent
+# (the host's shared catalog; `agrefs list`).
 $roles

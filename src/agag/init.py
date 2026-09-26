@@ -33,7 +33,7 @@ from pathlib import Path
 
 #: The grant every generated role starts with: enough to read the chat, write
 #: its own workspace and speak as the instance. Widen it in `agents.toml`.
-DEFAULT_ALLOWED_TOOLS = "Read,Write,Edit,Glob,Grep,Bash(agentchat:*)"
+DEFAULT_ALLOWED_TOOLS = "Read,Write,Edit,Glob,Grep,Bash(agentchat:*),Bash(agrefs:*)"
 DEFAULT_PROFILE = "sonnet"
 DEFAULT_ROLES = ("front",)
 AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")

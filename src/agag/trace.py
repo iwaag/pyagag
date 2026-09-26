@@ -1323,6 +1323,8 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
     newest = max((node.last_activity for node in below), default=0)
     if not human_wait and overdue("quiet", newest):
         for node in below:
+            if any(child.identity and child.state not in ("done", "cancelled") for child in node.children):
+                continue  # the unfinished unit below it is the one to ask about, once
             if node.identity and node.holder in ("unknown", "requester") \
                     and not node.topic.startswith(RESOLVED_TOPIC_PREFIX):
                 found.append(Candidate(

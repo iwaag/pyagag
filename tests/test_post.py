@@ -389,3 +389,11 @@ def test_send_posts_words_and_meaning_in_one_message(monkeypatch):
     chat._run(parsed_send("--intent", "response_request", "--to", "Developer", "Which one?"), Client(), out)
     assert sent == ["Which one?\n\n`ag-post intent=response_request to=8`"]
     assert "sent message 77" in out.getvalue()
+
+
+def test_a_reply_is_not_handed_to_a_post_that_answers_nothing():
+    """failsafe p1: Front's answers went to Observer's recovery request."""
+    history = [human("build it", 1),
+               {"id": 2, "sender_id": 23, "sender_full_name": "agobserver-agstudio1", "content":
+                "**[Observer]** it stopped\n\n`ag-post intent=report answer=none`"}]
+    assert topics.requester_of(history, 99)["sender_id"] == DEV

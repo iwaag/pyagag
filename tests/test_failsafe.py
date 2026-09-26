@@ -198,3 +198,24 @@ def test_once_a_person_is_asked_about_the_stall_it_is_theirs():
                                 "`ag-post intent=response_request to=8 ask=question`"})
     _, result = task_node(messages, origin, now=at)
     assert "unheld" not in [c.kind for c in tracing.stall_candidates(result, now=at)]
+
+
+def test_quiet_asks_about_the_deepest_unfinished_unit_only():
+    """Trial T3: the mission and its task each opened an incident."""
+    post = Posts()
+    origin = post("front", "front-a", "Please do it.", DEV, 100)
+    post("front", "front-a", ACK, FRONT, 101)
+    post("pj-x", "workplan-a", f"[selfnote][rootchat] front/front-a #{origin}", FRONT, 102)
+    post("pj-x", "workplan-a", "@**autolab-agstudio1** plan it", FRONT, 102)
+    ack = post("pj-x", "workplan-a", ACK, AUTOLAB, 103)
+    mission = post("pj-x", "workplan-a", "[selfnote][mission] x", AUTOLAB, 104)
+    planned = post("pj-x", "workplan-a", f"@**Front** planned.\n\n`ag-post intent=report end={ack}`", AUTOLAB, 105)
+    post("front", "front-a", f"[selfnote][served] pj-x/workplan-a {planned}", FRONT, 105)
+    post("work-m1", "workrun-task1-m9", f"[selfnote][task] {mission}#1", AUTOLAB, 106)
+    post("work-m1", "workrun-task1-m9", f"[selfnote][rootchat] pj-x/workplan-a #{mission}", AUTOLAB, 106)
+    post("work-m1", "workrun-task1-m9", f"[selfnote][start] #{origin} for {FRONT} Front", AUTOLAB, 107)
+    tack = post("work-m1", "workrun-task1-m9", ACK, AUTOLAB, 108)
+    post("work-m1", "workrun-task1-m9", f"@**Front** started; still running.\n\n`ag-post end={tack}`", AUTOLAB, 110)
+    at = 110 + tracing.THRESHOLDS["quiet"]
+    result = tracing.trace(Realm(10**9, post.messages), origin, now=at)
+    assert [(c.kind, c.topic) for c in tracing.stall_candidates(result, now=at)] == [("quiet", "workrun-task1-m9")]

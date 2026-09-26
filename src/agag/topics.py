@@ -39,7 +39,7 @@ from .delivery import DeliveryError, deliver, redeliver
 from .execopt import ExecOptions, Selection
 from .memo import is_memo_channel
 from .continuation import CONTINUATION_GUIDE, continuation_note, split_continuation
-from .post import PROGRESS, REPORT, RESPONSE_REQUEST, PostMeta, combine, compose, label as post_label
+from .post import PROGRESS, REPORT, RESPONSE_REQUEST, PostMeta, combine, compose, label as post_label, parse_post
 from .reply import REPLY_GUIDE, record_reply_outcome, resolve_reply
 from .selfnote import is_selfnote, is_speech, owed_start
 from .serving import NullJournal, Serving, note_input
@@ -739,6 +739,13 @@ def requester_of(history, self_id: int, up_to: int | None = None) -> dict | None
         if up_to is not None and int(message.get("id", 0)) > up_to:
             continue
         if message.get("sender_id") == self_id or not is_speech(message):
+            continue
+        meta = parse_post(message.get("content")).meta
+        if meta is not None and meta.not_answer and meta.intent != RESPONSE_REQUEST:
+            # A post that declares it answers nothing is an aside, not who
+            # the reply is for: failsafe p1 saw Front hand its answers — and
+            # its questions — to Observer's recovery request instead of to
+            # the person who asked for the work.
             continue
         return message
     # A conversation only its owner has spoken in, started by the owner's own

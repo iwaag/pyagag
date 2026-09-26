@@ -264,3 +264,17 @@ def test_a_four_backtick_block_closed_with_three_is_closed_when_it_holds_no_othe
 def test_a_real_code_block_inside_an_unclosed_reply_is_still_unclosed():
     split = reply.split_reply("````ag-reply\nRun this:\n```\nls\n```")
     assert not split.ok and "not closed" in split.error
+
+
+# --- a quiet progress reply (sage p2 step 2) ---
+
+
+def test_a_quiet_progress_reply_names_nobody_and_a_report_still_hands_off():
+    progress = "```ag-reply intent=progress\nSetup asked of autolab; I continue when it answers.\n```"
+    client, _ = serve(lambda ctx: topics.TopicResult(output=progress, quiet_progress=True), handoff=True)
+    assert not client.sent[-1].startswith("@**") and "intent=progress" in client.sent[-1]
+    report = "```ag-reply intent=report\nThe study is ready.\n```"
+    client, _ = serve(lambda ctx: topics.TopicResult(output=report, quiet_progress=True), handoff=True)
+    assert client.sent[-1].startswith("@**Developer**")
+    client, _ = serve(lambda ctx: topics.TopicResult(output=progress), handoff=True)
+    assert client.sent[-1].startswith("@**Developer**"), "off by default"

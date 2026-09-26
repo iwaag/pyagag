@@ -130,6 +130,20 @@ names the files that differ between two revisions. A revision must be named
 (`latest` fetches and prints what it resolved to), so what a run records is
 a commit, never a moving target.
 
+`agproject` and `agroutine` (`agag.project`, `agag.routine`; sage p2) are
+the mechanical half of establishing a project or a study: the `pj-<slug>`
+channel with its members, its goal or research plan, and a setup request
+to the agent that prepares workspaces; and a routine's `routine-<name>`
+channel with its guide, read back after posting. Both **create or
+continue** — a repeat after a failure half way does only what is missing —
+and `agproject status` / `agroutine show` report what exists and what
+remains. Channels are created with the provisioner credential the process
+is given (`AGAG_PROVISIONER_ENV`); every post is the caller's. The setup
+request carries a fenced `ag-setup` block (`ag.project-setup.v1`) so the
+workspace agent lays a study out before any model reads it, and the study
+is `ready` only once its answer names the repository and commit
+(`study layout established: …`). Neither starts work.
+
 ### A run is one reply; waiting is just not being your turn
 
 There is no `agentchat wait`. An agent does one piece of work, says something, and its

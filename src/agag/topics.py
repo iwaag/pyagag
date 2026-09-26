@@ -39,7 +39,7 @@ from .delivery import DeliveryError, deliver, redeliver
 from .execopt import ExecOptions, Selection
 from .memo import is_memo_channel
 from .continuation import CONTINUATION_GUIDE, continuation_note, split_continuation
-from .post import REPORT, RESPONSE_REQUEST, PostMeta, combine, compose, label as post_label
+from .post import PROGRESS, REPORT, RESPONSE_REQUEST, PostMeta, combine, compose, label as post_label
 from .reply import REPLY_GUIDE, record_reply_outcome, resolve_reply
 from .selfnote import is_selfnote, is_speech, owed_start
 from .serving import NullJournal, Serving, note_input
@@ -704,6 +704,12 @@ class TopicResult:
     #: intent is a default for words that declared none (literal sections, a
     #: reply without an intent). A handler that failed states nothing.
     meta: PostMeta | None = None
+    #: A reply whose words declare `intent=progress` names nobody: a
+    #: progress post is not the requester's turn, and naming them buys a
+    #: run to read "still waiting" (sage p2: archsage waiting on a setup it
+    #: delegated). Off by default; only the handler knows its progress is
+    #: worth nobody's run.
+    quiet_progress: bool = False
 
 
 # --- the completion rule ------------------------------------------------------
@@ -1049,7 +1055,8 @@ def serve_topic(
             log(f"the handler's {meta.intent} to={meta.to} stands over the reply's intent={declared.intent}"
                 f"{f' to={declared.to}' if declared.to is not None else ''}")
         if body:
-            mention = mention_of(requester) if handoff else ""
+            quiet = result.quiet_progress and declared is not None and declared.intent == PROGRESS
+            mention = mention_of(requester) if handoff and not quiet else ""
             text = _with_meta(f"{mention}\n\n{body}" if mention else body, meta, requester, journal, log,
                               seen=context.processed_up_to if replies_here else 0,
                               fallback=declared, self_id=self_id)

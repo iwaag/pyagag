@@ -10,6 +10,8 @@ license = { file = "LICENSE" }
 agentchat = "agag.chat:main"
 agag = "agag.cli:main"
 agrefs = "agag.refs:main"
+agproject = "agag.project:main"
+agroutine = "agag.routine:main"
 
 [dependency-groups]
 dev = [

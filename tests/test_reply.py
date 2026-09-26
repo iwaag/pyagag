@@ -16,6 +16,7 @@ from pathlib import Path
 
 from agag import reply, serving, topics
 from agag.reply import REPLY_GUIDE, ReplySplit, failure_line, repair_prompt, resolve_reply, split_reply
+from endmark import plain
 
 FIXTURES = Path(__file__).parent / "fixtures" / "reply"
 BOT, DEV = 11, 8
@@ -201,7 +202,7 @@ def test_the_post_is_the_reply_then_sections_then_notices():
     output = "I should reflect it back first.\n\n" + marked("Is this fair?")
     client, record = serve(lambda ctx: topics.TopicResult(
         output=output, sections=["```ag-routinerun\n{}\n```"], notices=["— the desire is on record as message 7225."]))
-    assert client.sent[-1] == "Is this fair?\n\n```ag-routinerun\n{}\n```\n\n— the desire is on record as message 7225."
+    assert plain(client.sent[-1]) == "Is this fair?\n\n```ag-routinerun\n{}\n```\n\n— the desire is on record as message 7225."
     assert record.reply_marked is True and record.reply_blocks == 1 and record.reply_failure == ""
 
 
@@ -209,12 +210,12 @@ def test_an_unmarked_output_is_repaired_once_and_a_second_failure_is_posted_as_s
     calls = []
     client, record = serve(lambda ctx: topics.TopicResult(
         output="I will answer now. Yes, that is fair.", repair=lambda why: calls.append(why) or marked("Yes, that is fair.")))
-    assert client.sent[-1] == "Yes, that is fair." and calls == ["the output contains no ag-reply block"]
+    assert plain(client.sent[-1]) == "Yes, that is fair." and calls == ["the output contains no ag-reply block"]
     assert record.reply_marked is True
 
     client, record = serve(lambda ctx: topics.TopicResult(output="prose", repair=lambda why: "more prose",
                                                           notices=["— note kept"]))
-    assert client.sent[-1] == (failure_line("the output contains no ag-reply block") + "\n\n— note kept"
+    assert plain(client.sent[-1]) == (failure_line("the output contains no ag-reply block") + "\n\n— note kept"
                                "\n\n`ag-post intent=report`"), "a failure is information, never a question"
     assert record.reply_marked is False and "no ag-reply block" in record.reply_failure
     assert record.state == serving.DELIVERED, "the failure is a delivered answer: the conversation is not left hanging"
@@ -231,13 +232,13 @@ def test_the_outcome_is_recorded_beside_the_run_identity(tmp_path):
     client, record = serve(handler)
     written = json.loads(record_path.read_text(encoding="utf-8"))
     assert written["reply"] == {"marked": True, "blocks": 1, "delivered_id": record.delivered_id,
-                                "posted_to": "argue/argue-x"}
+                                "posted_to": "argue/argue-x", "intent": {"end": 501}}
     assert record.run_record == str(record_path)
 
 
 def test_sections_only_results_post_exactly_as_before():
     client, record = serve(lambda ctx: topics.TopicResult(["a deterministic line"]))
-    assert client.sent[-1] == "a deterministic line" and record.reply_marked is None
+    assert plain(client.sent[-1]) == "a deterministic line" and record.reply_marked is None
 
 
 def test_the_reply_guide_is_appended_once_and_only_on_request():

@@ -22,6 +22,7 @@ from agag import agent, serving, topics
 from agag.listen import MENTION, OWNER
 from agag.selfnote import Conversation, parse_rootchat, parse_served, rootchat_note
 from agag.zulip import locate
+from endmark import plain
 from test_serving_lifecycle import (  # noqa: F401 - the harness
     ACK, BOT, DEV, HOME, OTHER, Harness as _Harness, RealmClient as _RealmClient, realm_with_channels, wait_until,
 )
@@ -77,7 +78,7 @@ def test_a_topic_resolved_during_the_run_receives_the_reply_under_its_closed_nam
     realm.resolve("pj-x", "workplan-a")
     gate.set()
     wait_until(lambda: h.replies("pj-x", "workplan-a") == ["@**Dev**\n\nthe answer"], what="the reply")
-    assert [m["subject"] for m in realm.messages.values() if m["content"] == "@**Dev**\n\nthe answer"] == ["✔ workplan-a"]
+    assert [m["subject"] for m in realm.messages.values() if plain(m["content"]) == "@**Dev**\n\nthe answer"] == ["✔ workplan-a"]
     record = h.listener.queue.latest_serving(("pj-x", "workplan-a", OWNER))
     assert record.extra["destination"]["state"] == "resolved"
     assert not any(m["subject"] == "workplan-a" for m in realm.messages.values()), "no twin was opened"

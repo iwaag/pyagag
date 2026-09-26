@@ -34,6 +34,11 @@ the very end of a post, outside any code fence:
   a request, so a reader can tell that the recipient spoke *after* the
   asker read the conversation and *before* the question landed
   (`agag.outstanding`: the question is overtaken, not awaiting them).
+- `end` names the acknowledgement of the serving this post **ends**
+  (`end=<ack id>`): the listener writes it on the reply that closes a
+  serving (failsafe p1). Without it a reader cannot tell a serving's last
+  word from a live progress line — m11741's final reply said "still
+  running" and nothing was. It says nothing about the words' meaning.
 
 Semantic intent is deliberately apart from everything else a post can be:
 the sender is Zulip's, an ack is a transport receipt (`agag.agent.is_ack`),
@@ -111,10 +116,12 @@ class PostMeta:
     seen: int | None = None
     #: `none`: explicitly not an answer to any request (see the module doc).
     answer: str | None = None
+    #: The ack of the serving this post ends (see the module doc).
+    end: int | None = None
 
     @property
     def empty(self) -> bool:
-        return self.intent is None and not self.re and self.answer is None
+        return self.intent is None and not self.re and self.answer is None and self.end is None
 
     @property
     def not_answer(self) -> bool:
@@ -161,6 +168,8 @@ class PostMeta:
             words.append(f"answer={self.answer}")
         if self.seen is not None:
             words.append(f"seen={int(self.seen)}")
+        if self.end is not None:
+            words.append(f"end={int(self.end)}")
         return "`" + " ".join(words) + "`"
 
     def as_dict(self) -> dict:
@@ -177,6 +186,8 @@ class PostMeta:
             out["answer"] = self.answer
         if self.seen is not None:
             out["seen"] = int(self.seen)
+        if self.end is not None:
+            out["end"] = int(self.end)
         return out
 
 
@@ -221,10 +232,10 @@ def parse_attributes(text: str, *, require_to: bool = True) -> tuple[PostMeta, s
             if not value.isdigit():
                 return PostMeta(), f"to={value} is not a user id"
             values["to"] = int(value)
-        elif key == "seen":
+        elif key in ("seen", "end"):
             if not value.isdigit():
-                return PostMeta(), f"seen={value} is not a message id"
-            values["seen"] = int(value)
+                return PostMeta(), f"{key}={value} is not a message id"
+            values[key] = int(value)
         elif key == "re":
             ids = value.split(",")
             if not all(part.isdigit() and int(part) > 0 for part in ids):
@@ -285,18 +296,38 @@ def strip(content) -> str:
     return parse_post(content).text
 
 
-def compose(text: str, meta: PostMeta | None) -> str:
+#: Zulip keeps the first 10 000 characters of a message and replaces the
+#: rest with `[message truncated]` — the line at the end went with it
+#: (m11741: two progress posts read as the task's answer). A composed post
+#: is cut *before* its line instead, and says so.
+MAX_CONTENT = 10000
+CUT_NOTE = "[… cut by the poster to fit]"
+#: What Zulip leaves at the end of a message it cut: whatever line was
+#: there is gone, so the post is unclassified, never an answer.
+TRUNCATED = "[message truncated]"
+
+
+def is_truncated(content) -> bool:
+    return str(content or "").rstrip().endswith(TRUNCATED)
+
+
+def compose(text: str, meta: PostMeta | None, *, limit: int = MAX_CONTENT) -> str:
     """`text` with `meta`'s line appended — one message, one write. An
     existing line is replaced rather than stacked; an empty meta leaves the
     text unclassified. An invalid meta is refused (`ValueError`): what is
-    written is always readable back."""
+    written is always readable back. A post longer than Zulip keeps is cut
+    before the line, never through it."""
     body = strip(text)
     if meta is None or meta.empty:
         return body
     problem = meta.problem()
     if problem is not None:
         raise ValueError(problem)
-    return f"{body}\n\n{meta.line()}" if body else meta.line()
+    line = meta.line()
+    room = limit - len(line) - 2
+    if len(body) > room:
+        body = body[:max(0, room - len(CUT_NOTE) - 2)].rstrip() + "\n\n" + CUT_NOTE
+    return f"{body}\n\n{line}" if body else line
 
 
 def merge(metas) -> PostMeta | None:

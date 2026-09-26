@@ -40,6 +40,23 @@ could not read is `unobservable` — never "not started". It also does not
 claim that a worker is alive: `executing` means an acknowledgement exists
 and no answer yet, and the age beside it is the evidence, not a promise.
 
+Beside the state, each conversation carries two facts that the state used
+to be made to stand for (failsafe p1):
+
+- **`execution`** — the owner's newest serving: `open` (acknowledged, and
+  nothing has said it ended), `ended` (a reply after the ack says it ends
+  that serving, `ag-post … end=<ack>`, or an answer followed it), or
+  `unknown` (the owner never acknowledged anything here). An open serving
+  is a claim, not proof of life.
+- **`holder`** — who holds the next move of unfinished work: `owner`,
+  `delegate` (a conversation opened from this one still holds something),
+  `requester`, `human`, **`none`**, `unknown` or `done`. `none` is the stall
+  nothing else can see: the last serving ended saying only that work goes
+  on, and nobody was handed anything (m11741, 2026-09-26).
+
+A post Zulip cut (`[message truncated]`) lost its `ag-post` line with its
+tail; it is read as output, never as an answer.
+
 The state is decided from what each message *is*, not from topic names:
 identity notes (`[mission]`, `[task]`, `[asset]`, `[assetrun]`, `[change]`)
 and acks say who owns a conversation; `[state]` words are the owners' own
@@ -74,6 +91,7 @@ from .selfnote import (
     parse_served,
     replaced_anchor,
 )
+from .post import PROGRESS, RESPONSE_REQUEST, is_truncated, parse_post
 from .zulip import RESOLVED_TOPIC_PREFIX, ZulipError, ZulipRejected, channel_name
 
 __all__ = [
@@ -148,6 +166,26 @@ class Node:
     #: serving it tried and that were refused or ended uncertain.
     failures: list[str] = field(default_factory=list)
     children: list["Node"] = field(default_factory=list)
+    #: The owner's newest serving: `open`, `ended` or `unknown` (module doc).
+    execution: str = "unknown"
+    #: Who holds the next move: `owner`, `delegate`, `requester`, `human`,
+    #: `none`, `unknown` or `done` (module doc).
+    holder: str = "unknown"
+    #: The owner's newest acknowledgement here, the post that ended that
+    #: serving (0 while it is open or unknown) and when; the owner's newest
+    #: sign of work (speech that is not an ack, or a `[change]` note).
+    ack: int = 0
+    ended_by: int = 0
+    ended_at: int = 0
+    work: int = 0
+    work_at: int = 0
+    #: The owner's answer here was taken up by its requester (a served mark
+    #: covers it): the move went back to whoever asked.
+    taken_up: bool = False
+    #: Whom the owner's newest serving asked, by name, in this conversation
+    #: and who has not spoken here since — `@**Comfy Notifier** watch …` is
+    #: acked with a reaction and answered by a mention later. They hold it.
+    waiting_on: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -270,7 +308,135 @@ def _note_state(messages: list[dict], owner: int | None) -> tuple[str, int | Non
 
 
 def _is_progress(content: str) -> bool:
-    return is_progress(content)
+    """Progress, or a post Zulip cut: its line went with its tail, and what
+    is left is output, never an answer (m11741's #11758/#11759)."""
+    return is_progress(content) or is_truncated(content)
+
+
+def _waiting_on(messages: list[dict], owner: int, ack: int, served: set[str]) -> list[str]:
+    """Names the owner mentioned after its newest ack that have not posted
+    here since the mention, apart from whoever it serves (`served`)."""
+    owner_name = next((_sender(m) for m in messages if m.get("sender_id") == owner), "")
+    pending: dict[str, int] = {}
+    for message in messages:
+        mid = int(message.get("id") or 0)
+        if message.get("sender_id") == owner and mid > ack and is_speech(message):
+            for match in MENTION.finditer(str(message.get("content") or "")):
+                name = match.group("name").strip()
+                if name and name != owner_name and name not in served:
+                    pending.setdefault(name, mid)
+        elif message.get("sender_id") != owner and is_speech(message):
+            pending.pop(_sender(message), None)
+    return sorted(pending)
+
+
+def _serving(messages: list[dict] | None, owner: int | None, served: set[str] = frozenset()) -> dict:
+    """The owner's newest serving here, from its posts alone.
+
+    `ended` needs positive evidence: the listener's `end=<ack>` on the
+    reply that closed it, or — for an owner that posts nothing between its
+    ack and its reply — an answer after the ack. Progress after the ack
+    ends nothing: it is what a live serving posts, and what m11741's last
+    serving said before nothing was running."""
+    facts = {"execution": "unknown", "ack": 0, "ended_by": 0, "ended_at": 0, "work": 0, "work_at": 0,
+             "ending": None, "waiting_on": []}
+    if not messages or owner is None:
+        return facts
+    for message in messages:
+        if message.get("sender_id") != owner:
+            continue
+        content = str(message.get("content") or "")
+        if (is_speech(message) and not is_ack(content)) or parse_note(content, "change") is not None:
+            facts["work"], facts["work_at"] = int(message.get("id") or 0), int(message.get("timestamp") or 0)
+    owned = [m for m in messages if m.get("sender_id") == owner and is_speech(m)]
+    acks = [m for m in owned if is_ack(str(m.get("content") or ""))]
+    if not acks:
+        return facts
+    ack = acks[-1]
+    facts["ack"] = int(ack.get("id") or 0)
+    # Whoever spoke here before this serving began is who it serves.
+    served = set(served) | {_sender(m) for m in messages
+                            if m.get("sender_id") != owner and int(m.get("id") or 0) < facts["ack"]}
+    served |= {start[2] for m in messages if m.get("sender_id") == owner
+               and (start := parse_start(m.get("content"))) is not None and start[2]}
+    facts["waiting_on"] = _waiting_on(messages, owner, facts["ack"], served)
+    after = [m for m in owned if int(m.get("id") or 0) > facts["ack"] and not is_ack(str(m.get("content") or ""))]
+    ending = next((m for m in after if (parse_post(m.get("content")).meta or _NO_META).end), None)
+    if ending is None:
+        answers = [m for m in after if not _is_progress(m.get("content"))]
+        ending = answers[-1] if answers else None
+    if ending is None:
+        facts["execution"] = "open"
+        return facts
+    facts.update(execution="ended", ended_by=int(ending.get("id") or 0),
+                 ended_at=int(ending.get("timestamp") or 0), ending=ending)
+    return facts
+
+
+class _NoMeta:
+    end = None
+    intent = None
+
+
+_NO_META = _NoMeta()
+
+
+def _answer_taken_up(messages, owner, homes, home_messages, here, receipts_from=0, known_names=None) -> bool:
+    """Whether the owner's newest answer names a requester whose home holds
+    a served mark covering it — the move went back to whoever asked."""
+    if owner is None or not homes or not messages:
+        return False
+    answers = [m for m in messages if m.get("sender_id") == owner and is_speech(m)
+               and not is_ack(str(m.get("content") or "")) and not _is_progress(m.get("content"))]
+    if not answers:
+        return False
+    answer = answers[-1]
+    here_ids = frozenset(int(m.get("id") or 0) for m in messages)
+    complete = len(messages) < HISTORY
+    named = {match.group("name").strip() for match in MENTION.finditer(str(answer.get("content") or ""))}
+    for requester_id in homes:
+        names = {_sender(m) for m in messages if m.get("sender_id") == requester_id}
+        names |= {name for name in [(known_names or {}).get(requester_id)] if name}
+        if names & named and _taken_up((home_messages or {}).get(requester_id), requester_id,
+                                       int(answer.get("id") or 0), here, here_ids, complete, receipts_from):
+            return True
+    return False
+
+
+#: A child holds its parent's work while it is unfinished and has not
+#: handed its answer back: nobody waits on a parent whose delegate is still
+#: at it. A child waiting only on its requester (the parent's owner) holds
+#: nothing — so a wait that goes round in a circle comes out as `none`.
+def _holds(child: "Node") -> bool:
+    if child.holder in ("done", "human"):
+        return False
+    if child.holder == "requester":
+        return not child.taken_up and child.state not in ("awaiting_delivery", "failed")
+    return True
+
+
+def _holder(node: "Node", ending: dict | None) -> str:
+    """Who holds the next move of `node` (module doc), its children decided."""
+    if node.state in ("done", "cancelled"):
+        return "done"
+    if node.state == "queued" or node.execution == "open":
+        return "owner"
+    if node.waiting_on or any(_holds(child) for child in node.children):
+        return "delegate"
+    if node.state in ("awaiting_delivery", "failed") or node.note_state == HELD_WORD:
+        return "requester"
+    if node.state == "awaiting_human":
+        return "human"
+    if node.execution == "ended":
+        meta = parse_post((ending or {}).get("content")).meta
+        if meta is not None and meta.intent == PROGRESS:
+            return "none"
+        return "requester"
+    if node.state in ("not_started", "executing"):
+        return "owner"
+    if node.state in ("awaiting_requester", "answered"):
+        return "requester"
+    return "unknown"
 
 
 def _is_failure(content: str) -> bool:
@@ -842,6 +1008,9 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
         anchor = min(stable) if stable else min((int(m.get("id") or 0) for m in messages or ()), default=0)
         if depth == 0:
             anchor = min((int(m.get("id") or 0) for m in messages or ()), default=anchor)
+        owner_id = owner_id or _owner_by_ack(messages or [])
+        facts = _serving(messages, owner_id, {name for _, name, _ in requested})
+        ending = facts.pop("ending")
         node = Node(
             channel=key[0], topic=live, state=state, detail=detail, identity=identity, anchor=anchor,
             owner=owner, note_state=word, evidence=evidence, last_activity=last,
@@ -850,8 +1019,13 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
                 for m in messages or ()
                 if (value := parse_note(m.get("content"), OPFAIL_TAG)) is not None
             ],
+            taken_up=state == "awaiting_requester" and _answer_taken_up(
+                messages, owner_id, homes, home_messages, key, receipts_from,
+                {requester: name for requester, name, _ in requested}),
+            **facts,
         )
         if depth >= max_depth:
+            node.holder = _holder(node, ending)
             return node
         seen = seen | {key}
         order: list[tuple[str, str]] = []
@@ -880,6 +1054,7 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
             built.requested_by = [f"{link.author_name} #{link.note_id}" for link in notes_for]
             node.children.append(built)
         _order_tasks(node)
+        node.holder = _holder(node, ending)
         return node
 
     result.root = build(root_key, 0, set(), True, [])
@@ -945,6 +1120,14 @@ def trace_lines(result: Trace) -> list[str]:
         detail = node.detail
         if node.note_state and node.note_state not in detail:
             detail = f"{detail}; state note: {node.note_state}" if detail else f"state note: {node.note_state}"
+        if node.holder not in ("done",):
+            serving = {"open": f"serving open since ack #{node.ack}",
+                       "ended": f"last serving ended at #{node.ended_by}",
+                       "unknown": "no serving on record"}[node.execution]
+            held = {"none": "NOBODY holds the next move", "delegate": "held by a conversation opened from it",
+                    "owner": "held by its owner", "requester": "held by its requester",
+                    "human": "held by a person", "unknown": "holder unknown"}[node.holder]
+            detail = f"{detail}; {serving}; {held}" if detail else f"{serving}; {held}"
         if detail:
             lines.append(f"{pad}{'  ' if depth else ''}  {detail}")
         if node.requested_by:
@@ -1038,7 +1221,17 @@ THRESHOLDS = {
     "failed": 60,
     "resolved_live": 60,
     "silent": 2700,
+    # failsafe p1: the last serving ended saying work goes on, and nobody
+    # holds it. A listener re-serves input that arrived during a run within
+    # seconds; five minutes is the grace for anything else in flight.
+    "unheld": 300,
+    # Unfinished work whose holder cannot be established (or is an agent
+    # that took it up), with nothing new in the request for this long.
+    "quiet": 1800,
 }
+#: Kinds that exist since failsafe p1: a consumer that tracks requests from
+#: before its deployment may hold them to the older rules.
+FAILSAFE_KINDS = ("unheld", "quiet")
 
 
 def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | None = None) -> list[Candidate]:
@@ -1093,6 +1286,16 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
                 f"{node.owner or 'the owner'} answers, or says the work is still running",
                 node.last_activity, tuple(node.evidence), judgment=True, anchor=node.anchor,
             ))
+        if node.holder == "none" and overdue("unheld", node.ended_at):
+            found.append(Candidate(
+                "unheld", node.channel, node.topic, node.identity,
+                f"the last serving ended at #{node.ended_by} saying the work goes on, and nothing holds it: no "
+                f"serving is open, nothing opened from it is unfinished, nobody was asked anything",
+                _asker(node),
+                f"whoever asked for it decides: resume it (a post in {node.channel}/{_bare(node.topic)} starts a "
+                f"new serving of the same work), report what blocks it, or ask the Developer",
+                node.ended_at, (node.ended_by,), anchor=node.anchor,
+            ))
         tasks = [child for child in node.children if _task_serial(child.identity)]
         if tasks and node.note_state == "started":
             finished_at = 0
@@ -1109,4 +1312,26 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
                         finished_at or node.last_activity, tuple(child.evidence) or (0,), anchor=child.anchor,
                     ))
                 break
+    # A request somebody is explicitly asked about is waiting on them; a
+    # silence there is theirs to break, not a stall.
+    human_wait = any(node.state == "awaiting_human" for node in result.nodes())
+    below = [node for node in result.nodes() if node is not root]
+    newest = max((node.last_activity for node in below), default=0)
+    if not human_wait and overdue("quiet", newest):
+        for node in below:
+            if node.identity and node.holder in ("unknown", "requester") \
+                    and not node.topic.startswith(RESOLVED_TOPIC_PREFIX):
+                found.append(Candidate(
+                    "quiet", node.channel, node.topic, node.identity,
+                    f"{node.identity} is unfinished ({node.state.replace('_', ' ')}; {node.detail}) and nothing "
+                    f"has moved anywhere in the request for a while; whether anybody is still at it cannot be "
+                    f"read from the records",
+                    _asker(node),
+                    f"whoever asked for it checks it and resumes it, reports what blocks it, or says why it waits",
+                    newest, tuple(node.evidence) or (node.anchor,), judgment=True, anchor=node.anchor,
+                ))
     return found
+
+
+def _asker(node: Node) -> str:
+    return node.requested_by[0].split(" #")[0] if node.requested_by else "whoever asked for it"

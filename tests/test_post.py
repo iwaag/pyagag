@@ -25,6 +25,7 @@ from agag.reply import split_reply
 from agag.selfnote import is_progress
 
 from test_serving_lifecycle import ACK, DEV, OWNER, Harness, ScriptedClient, human, realm_with_channels, wait_until
+from endmark import plain
 
 pytestmark = pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 
@@ -170,8 +171,8 @@ def test_a_request_is_addressed_to_the_requester_the_serving_recorded():
     client = ScriptedClient([human("build it", 1)])
     record = topics.serve_topic(client, "c", "t", run_output("```ag-reply intent=response_request\nWhich branch?\n```"),
                                 ack_text="ack", journal=serving.NullJournal(1), log=lambda t: None)
-    assert record.reply_text == "@**Developer**\n\nWhich branch?\n\n`ag-post intent=response_request to=7 seen=501`"
-    assert record.extra["intent"] == {"intent": RESPONSE_REQUEST, "to": DEV, "seen": 501}, \
+    assert record.reply_text == "@**Developer**\n\nWhich branch?\n\n`ag-post intent=response_request to=7 seen=501 end=501`"
+    assert record.extra["intent"] == {"intent": RESPONSE_REQUEST, "to": DEV, "seen": 501, "end": 501}, \
         "seen= is the processed input boundary (the ack is the newest post the serving read)"
 
 
@@ -179,7 +180,7 @@ def test_a_report_carries_its_line_and_the_mention_stays_first():
     client = ScriptedClient([human("build it", 1)])
     record = topics.serve_topic(client, "c", "t", run_output("```ag-reply intent=report\nBuilt.\n```"),
                                 ack_text="ack", journal=serving.NullJournal(1), log=lambda t: None)
-    assert record.reply_text == "@**Developer**\n\nBuilt.\n\n`ag-post intent=report`"
+    assert record.reply_text == "@**Developer**\n\nBuilt.\n\n`ag-post intent=report end=501`"
     assert client.sent == ["ack", record.reply_text], "one delivery holds the words and the meaning"
 
 
@@ -188,7 +189,7 @@ def test_an_unmarked_intent_is_posted_unclassified_and_logged():
     log = []
     record = topics.serve_topic(client, "c", "t", run_output("```ag-reply intent=asking\nBuilt?\n```"),
                                 ack_text="ack", journal=serving.NullJournal(1), log=log.append)
-    assert record.reply_text == "@**Developer**\n\nBuilt?"
+    assert record.reply_text == "@**Developer**\n\nBuilt?\n\n`ag-post end=501`", "unclassified, and still the serving's end"
     assert any("reply intent unusable" in line for line in log)
 
 
@@ -200,12 +201,12 @@ def test_a_handler_failure_and_a_missing_reply_are_reports_not_requests():
 
     record = topics.serve_topic(client, "c", "t", broken, ack_text="ack", journal=serving.NullJournal(1),
                                 log=lambda t: None)
-    assert parse_post(record.reply_text).meta == PostMeta(intent=REPORT)
+    assert plain(parse_post(record.reply_text).meta) == PostMeta(intent=REPORT)
     client = ScriptedClient([human("build it", 1)])
     record = topics.serve_topic(client, "c", "t", run_output("I forgot the mark"), ack_text="ack",
                                 journal=serving.NullJournal(1), log=lambda t: None)
     parsed = parse_post(record.reply_text)
-    assert parsed.meta == PostMeta(intent=REPORT) and "produced no reply" in parsed.text
+    assert plain(parsed.meta) == PostMeta(intent=REPORT) and "produced no reply" in parsed.text
 
 
 def test_a_handler_may_classify_its_literal_sections():
@@ -213,7 +214,7 @@ def test_a_handler_may_classify_its_literal_sections():
     record = topics.serve_topic(client, "c", "t",
                                 lambda ctx: topics.TopicResult(["Delivered: apple.png"], meta=PostMeta(intent=REPORT)),
                                 ack_text="ack", journal=serving.NullJournal(1), log=lambda t: None)
-    assert record.reply_text.endswith("Delivered: apple.png\n\n`ag-post intent=report`")
+    assert plain(record.reply_text).endswith("Delivered: apple.png\n\n`ag-post intent=report`")
 
 
 def test_the_repair_run_is_asked_to_keep_the_intent():
@@ -227,7 +228,7 @@ def test_the_repair_run_is_asked_to_keep_the_intent():
     record = topics.serve_topic(client, "c", "t",
                                 lambda ctx: topics.TopicResult(output="no mark here", repair=repair),
                                 ack_text="ack", journal=serving.NullJournal(1), log=lambda t: None)
-    assert parse_post(record.reply_text).meta == PostMeta(intent=RESPONSE_REQUEST, to=DEV, ask="question", seen=501)
+    assert plain(parse_post(record.reply_text).meta) == PostMeta(intent=RESPONSE_REQUEST, to=DEV, ask="question", seen=501)
     from agag.reply import repair_prompt
     assert "intent=" in repair_prompt("x", "why")
 
@@ -281,10 +282,11 @@ def test_a_crash_before_the_send_redelivers_the_request_after_a_restart_without_
     prepared = h.listener.queue.latest_serving(("pj-x", "workplan-a", OWNER)).reply_text
     assert is_expected(prepared)
     h2 = Harness(realm, tmp_path, reply=lambda ctx: topics.TopicResult(output="```ag-reply\nWRONG\n```")).start()
-    wait_until(lambda: h.replies("pj-x", "workplan-a") == [prepared], what="the redelivery")
+    wait_until(lambda: h.replies("pj-x", "workplan-a") == [plain(prepared)], what="the redelivery")
     time.sleep(0.3)
     assert h2.contexts == [], "the model did not run again"
-    assert h.replies("pj-x", "workplan-a") == [prepared], "one post, with its meaning"
+    assert h.posts("pj-x", "workplan-a")[-1] == prepared and len(h.replies("pj-x", "workplan-a")) == 1, \
+        "one post, with its meaning"
     h2.stop()
 
 

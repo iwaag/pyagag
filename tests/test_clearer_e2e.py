@@ -18,6 +18,7 @@ from agag.outstanding import read_requests
 from agag.post import PROGRESS, PostMeta, compose, parse_post
 
 from test_serving_lifecycle import ACK, BOT, DEV, OTHER, Harness, realm_with_channels, wait_until
+from endmark import plain
 
 pytestmark = pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 
@@ -100,7 +101,7 @@ def test_request_progress_question_answer_report_with_every_fault(tmp_path):
 
     # The Developer finishes; the report asks nothing.
     realm.post("pj-x", TOPIC, "done", sender_id=DEV, sender_name="Dev")
-    wait_until(lambda: h2.posts("pj-x", TOPIC)[-1].endswith("`ag-post intent=report`")
+    wait_until(lambda: plain(h2.posts("pj-x", TOPIC)[-1]).endswith("`ag-post intent=report`")
                and "done" in parse_post(h2.posts("pj-x", TOPIC)[-1]).text, what="the report")
     before = conversation(h2).as_dict()
     h2.stop()

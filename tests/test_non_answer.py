@@ -25,6 +25,7 @@ from agag.post import NONE, REPORT, PostMeta, compose, describe, label, parse_at
 from test_outstanding import ask, dev, open_mirror
 from test_post import Users, parsed_send
 from test_serving_lifecycle import ScriptedClient, human
+from endmark import plain
 
 ASIDE = PostMeta(answer=NONE)
 
@@ -167,7 +168,7 @@ def test_a_reply_declaring_a_non_answer_keeps_it_through_a_dropped_send_and_rede
                            lambda ctx: topics.TopicResult(output="```ag-reply intent=report answer=none\nNoted.\n```"),
                            ack_text="ack", journal=journal, log=lambda t: None, delivery={"sleep": lambda s: None})
     prepared = journal.serving().reply_text
-    assert parse_post(prepared).meta == PostMeta(intent=REPORT, answer=NONE)
+    assert plain(parse_post(prepared).meta) == PostMeta(intent=REPORT, answer=NONE)
     client.trouble = lambda c: None
     topics.resume_prepared(client, journal.serving(), journal, log=lambda t: None)
     assert client.sent.count(prepared) == 1

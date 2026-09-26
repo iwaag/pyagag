@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from agag import continuation as c, serving, topics
 from agag.selfnote import Conversation
+from endmark import plain
 
 BOT, DEV, AUTOLAB, FORGE = 15, 8, 11, 13
 
@@ -200,7 +201,7 @@ def test_serve_topic_keeps_the_block_out_of_the_post_and_writes_the_note_after_t
     record = topics.serve_topic(client, "front", "front-1", lambda ctx: topics.TopicResult(output=output),
                                 ack_text="ack", journal=serving.NullJournal(), log=lambda t: None)
     posted = [content for _, content in client.sent]
-    assert posted[1] == "@**Dev**\n\nOn it." and "ag-continue" not in posted[1]
+    assert plain(posted[1]) == "@**Dev**\n\nOn it." and "ag-continue" not in posted[1]
     assert posted[2].startswith("[selfnote][continuation] ") and record.delivered_id == 102
     found = c.latest_continuation(client.history, BOT)
     assert found.fields == {"goal": "make it", "next": "report when done"} and found.written_after == 101

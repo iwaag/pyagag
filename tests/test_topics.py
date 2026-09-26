@@ -6,6 +6,7 @@ import pytest
 
 from agag import topics
 from agag.zulip import ZulipError
+from endmark import plain
 
 BOT_ID = 11
 HUMAN_ID = 8
@@ -60,7 +61,7 @@ def test_the_ack_precedes_every_step():
     # the requester is read from the history the serving processed.
     assert [call[0] for call in calls] == ["post", "history", "post", "history"]
     assert calls[0][2] == "ack"
-    assert calls[2][2] == "@**Developer**\n\ndone"
+    assert calls[2][2] == "@**Developer**\n\ndone\n\n`ag-post end=1`", "the reply ends the serving its ack began"
 
 
 def test_a_failure_is_reported_with_the_step_the_handler_had_named():
@@ -71,7 +72,7 @@ def test_a_failure_is_reported_with_the_step_the_handler_had_named():
         raise RuntimeError("claude_code timed out")
 
     serve(Client(calls), handler)
-    assert calls[-1][2] == (
+    assert plain(calls[-1][2]) == (
         "@**Developer**\n\nfailed during front: claude_code timed out\n\n`ag-post intent=report`"
     )
     # A failing topic is not retried; a human post re-arms it.
@@ -98,7 +99,7 @@ def test_the_handler_can_post_before_the_final_reply():
 
     serve(Client(calls), handler)
     posted = [call[2] for call in calls if call[0] == "post"]
-    assert posted == ["ack", "an interim answer", "@**Developer**\n\nthe rest"]
+    assert plain(posted) == ["ack", "an interim answer", "@**Developer**\n\nthe rest"]
 
 
 def test_no_sections_means_no_final_post():
@@ -162,7 +163,7 @@ def test_an_empty_topic_is_answered_without_running_the_handler():
         empty_reply="nothing here yet",
     )
     assert ran == []
-    assert [call[2] for call in calls if call[0] == "post"] == ["ack", "nothing here yet"]
+    assert [plain(call[2]) for call in calls if call[0] == "post"] == ["ack", "nothing here yet"]
 
 
 def test_a_topic_holding_only_our_own_posts_counts_as_empty():
@@ -408,7 +409,7 @@ def test_the_reply_names_the_last_other_speaker():
         client, CHANNEL, TOPIC, lambda ctx: topics.TopicResult(["planned"]),
         ack_text="ack", log=lambda _: None,
     )
-    assert client.posts[-1] == (CHANNEL, TOPIC, "@**Front**\n\nplanned")
+    assert client.posts[-1][:2] + (plain(client.posts[-1][2]),) == (CHANNEL, TOPIC, "@**Front**\n\nplanned")
 
 
 def test_a_topic_nobody_else_has_spoken_in_hands_the_turn_to_nobody():
@@ -418,7 +419,7 @@ def test_a_topic_nobody_else_has_spoken_in_hands_the_turn_to_nobody():
         client, CHANNEL, TOPIC, lambda ctx: topics.TopicResult(["still here"]),
         ack_text="ack", log=lambda _: None,
     )
-    assert client.posts[-1] == (CHANNEL, TOPIC, "still here")
+    assert client.posts[-1][:2] + (plain(client.posts[-1][2]),) == (CHANNEL, TOPIC, "still here")
 
 
 def test_a_mention_serving_works_at_home_and_answers_where_it_was_asked():
@@ -481,7 +482,7 @@ def test_an_owner_serving_still_acks_first():
         client, CHANNEL, TOPIC, lambda ctx: topics.TopicResult(["done"]),
         ack_text="ack", log=lambda _: None,
     )
-    assert [text for _, _, text in client.posts] == ["ack", "@**Front**\n\ndone"]
+    assert [plain(text) for _, _, text in client.posts] == ["ack", "@**Front**\n\ndone"]
 
 
 def test_a_mention_serving_does_not_loop_on_its_own_topic():
@@ -647,7 +648,7 @@ def test_handoff_false_posts_the_reply_without_naming_anybody():
     calls = []
     serve(Client(calls), lambda ctx: topics.TopicResult(["done"]), handoff=False)
     posted = [call[2] for call in calls if call[0] == "post"]
-    assert posted == ["ack", "done"]
+    assert plain(posted) == ["ack", "done"]
     # and the lookup it would have needed was not even made
     assert [call for call in calls if call[0] == "history"] == [
         ("history", topics.HISTORY_MESSAGES),
@@ -662,7 +663,7 @@ def test_a_topic_holding_only_selfnotes_counts_as_empty():
         client, CHANNEL, TOPIC, lambda context: topics.TopicResult(["ran"]),
         ack_text="ack", empty_reply="nothing here",
     )
-    assert ("post", TOPIC, "nothing here") in calls
+    assert ("post", TOPIC, "nothing here\n\n`ag-post end=1`") in calls
     assert not any(call[2] == "ran" for call in calls if call[0] == "post")
 
 

@@ -349,6 +349,10 @@ def owed_start(messages, self_id: int, is_ack=lambda content: False) -> dict | N
         content = str(message.get("content") or "")
         if pending is None or is_selfnote(content) or is_ack(content.strip()) or is_progress(content):
             continue
+        from .post import is_truncated
+
+        if is_truncated(content):
+            continue  # a post Zulip cut lost its line: output, never the answer (failsafe p1)
         if not is_system_notice(message):
             pending = None
     return pending

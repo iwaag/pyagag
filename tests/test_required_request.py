@@ -18,6 +18,7 @@ from agag.outstanding import PENDING, read_requests
 from agag.post import CONFIRMATION, PROGRESS, QUESTION, REPORT, RESPONSE_REQUEST, PostMeta, combine, parse_post
 
 from test_serving_lifecycle import BOT, DEV, ScriptedClient, human
+from endmark import plain
 
 REQ = PostMeta(intent=RESPONSE_REQUEST, ask=CONFIRMATION)
 OTHER = 44
@@ -80,7 +81,7 @@ def serve(output, meta=None, *, repair=None, history=None, handler=None):
 def test_a_report_from_the_run_still_asks_for_the_required_confirmation():
     client, record, log = serve("```ag-reply intent=report\nAll tests pass.\n```", REQ)
     parsed = parse_post(record.reply_text)
-    assert parsed.meta == PostMeta(intent=RESPONSE_REQUEST, to=DEV, ask=CONFIRMATION, seen=501)
+    assert plain(parsed.meta) == PostMeta(intent=RESPONSE_REQUEST, to=DEV, ask=CONFIRMATION, seen=501)
     assert "All tests pass." in parsed.text and "not closed" in parsed.text
     assert record.extra["intent"]["ask"] == CONFIRMATION
     assert any("stands over the reply's intent=report" in line for line in log)
@@ -91,7 +92,7 @@ def test_a_report_from_the_run_still_asks_for_the_required_confirmation():
 def test_progress_and_a_question_from_the_run_become_the_required_confirmation():
     for fence in ("intent=progress", "intent=response_request ask=question"):
         _, record, _ = serve(f"```ag-reply {fence}\nStill going?\n```", REQ)
-        assert parse_post(record.reply_text).meta == PostMeta(intent=RESPONSE_REQUEST, to=DEV, ask=CONFIRMATION,
+        assert plain(parse_post(record.reply_text).meta) == PostMeta(intent=RESPONSE_REQUEST, to=DEV, ask=CONFIRMATION,
                                                               seen=501)
 
 
@@ -107,7 +108,7 @@ def test_a_repaired_report_and_a_failed_repair_keep_the_requirement():
     _, record, _ = serve("no mark", REQ, repair=lambda why: "still no mark")
     parsed = parse_post(record.reply_text)
     assert "produced no reply" in parsed.text
-    assert parsed.meta == PostMeta(intent=RESPONSE_REQUEST, to=DEV, ask=CONFIRMATION, seen=501), \
+    assert plain(parsed.meta) == PostMeta(intent=RESPONSE_REQUEST, to=DEV, ask=CONFIRMATION, seen=501), \
         "the reply failed; the task still waits for its requester"
 
 
@@ -116,16 +117,16 @@ def test_a_failed_handler_invents_no_request():
         raise RuntimeError("disk full")
 
     _, record, _ = serve(None, handler=broken)
-    assert parse_post(record.reply_text).meta == PostMeta(intent=REPORT)
+    assert plain(parse_post(record.reply_text).meta) == PostMeta(intent=REPORT)
 
 
 def test_without_a_requirement_a_run_reports_and_asks_as_declared():
     _, record, _ = serve("```ag-reply intent=report\nDone.\n```", PostMeta(intent=REPORT))
-    assert parse_post(record.reply_text).meta == PostMeta(intent=REPORT)
+    assert plain(parse_post(record.reply_text).meta) == PostMeta(intent=REPORT)
     _, record, _ = serve("```ag-reply intent=progress\nHalfway.\n```", PostMeta(intent=REPORT))
-    assert parse_post(record.reply_text).meta == PostMeta(intent=PROGRESS)
+    assert plain(parse_post(record.reply_text).meta) == PostMeta(intent=PROGRESS)
     _, record, _ = serve("```ag-reply intent=response_request ask=question\nWhich?\n```", None)
-    assert parse_post(record.reply_text).meta == PostMeta(intent=RESPONSE_REQUEST, to=DEV, ask=QUESTION, seen=501)
+    assert plain(parse_post(record.reply_text).meta) == PostMeta(intent=RESPONSE_REQUEST, to=DEV, ask=QUESTION, seen=501)
 
 
 def test_a_requirement_nobody_can_be_asked_leaves_the_runs_report():
@@ -136,5 +137,5 @@ def test_a_requirement_nobody_can_be_asked_leaves_the_runs_report():
         client, "c", "t",
         lambda ctx: topics.TopicResult(["waiting"], output="```ag-reply intent=report\nDone.\n```", meta=REQ),
         ack_text="ack", journal=serving.NullJournal(1), log=log.append)
-    assert parse_post(record.reply_text).meta == PostMeta(intent=REPORT)
+    assert plain(parse_post(record.reply_text).meta) == PostMeta(intent=REPORT)
     assert any("no requester to ask; posted as report" in line for line in log)

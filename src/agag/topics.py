@@ -985,9 +985,10 @@ def serve_topic(
             if empty_reply is not None and not context.humans_spoke():
                 log(f"nothing to answer in {channel!r}/{topic!r}: no messages")
                 journal.executed(context.processed_up_to, requester_id=None, requester_name="")
-                journal.prepared(reply_channel, reply_topic, empty_reply, resolve_after=False,
+                empty_text = compose(empty_reply, PostMeta(end=ack_id)) if ack_id else empty_reply
+                journal.prepared(reply_channel, reply_topic, empty_text, resolve_after=False,
                                  after_id=max(ack_id, context.processed_up_to))
-                journal.delivered(deliver(client, reply_channel, reply_topic, empty_reply, self_id=self_id,
+                journal.delivered(deliver(client, reply_channel, reply_topic, empty_text, self_id=self_id,
                                           after_id=max(ack_id, context.processed_up_to), log=log, **delivery))
                 return journal.serving()
             result = handler(context)
@@ -1059,7 +1060,7 @@ def serve_topic(
             mention = mention_of(requester) if handoff and not quiet else ""
             text = _with_meta(f"{mention}\n\n{body}" if mention else body, meta, requester, journal, log,
                               seen=context.processed_up_to if replies_here else 0,
-                              fallback=declared, self_id=self_id)
+                              fallback=declared, self_id=self_id, end=ack_id)
             journal.prepared(destination.channel, destination.topic, text,
                              resolve_after=bool(result.resolve_after), after_id=after_id)
             # `DeliveryError` escapes on purpose: the text is prepared and
@@ -1149,7 +1150,7 @@ def _destination(client, channel: str, topic: str, anchor: int, journal, log) ->
 
 
 def _with_meta(text: str, meta: PostMeta | None, requester: dict | None, journal, log, *, seen: int = 0,
-               fallback: PostMeta | None = None, self_id: int | None = None) -> str:
+               fallback: PostMeta | None = None, self_id: int | None = None, end: int = 0) -> str:
     """The reply with its `ag-post` line (`agag.post`): one message, so the
     meaning is prepared, journaled and redelivered with the words. A request
     written without `to=` is addressed to the requester this serving
@@ -1169,11 +1170,17 @@ def _with_meta(text: str, meta: PostMeta | None, requester: dict | None, journal
     if meta is not None and meta.intent == RESPONSE_REQUEST and seen:
         # The input boundary this request was written from (`agag.outstanding`).
         meta = _replace(meta, seen=int(seen))
+    if end:
+        # This reply closes the serving acknowledged by `end` (failsafe
+        # p1): a reader can tell the serving's last word from a live
+        # progress line, and "work goes on" from somebody doing it.
+        meta = _replace(meta or PostMeta(), end=int(end))
     try:
         composed = compose(text, meta)
     except ValueError as error:
         log(f"reply intent refused ({error}); posted unclassified")
-        meta, composed = None, compose(text, None)
+        meta = PostMeta(end=int(end)) if end else None
+        composed = compose(text, meta)
     _remember(journal, intent=(meta.as_dict() if meta is not None else {}))
     return composed
 

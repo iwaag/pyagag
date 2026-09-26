@@ -29,6 +29,7 @@ from agag.selfnote import Conversation, parse_rootchat, parse_served, rootchat_n
 from agag.zulip import remotes_for_home
 from test_handoff_binding import Harness as _Harness, RealmClient as _RealmClient
 from test_serving_lifecycle import ACK, BOT, DEV, HOME, OTHER, realm_with_channels, wait_until
+from endmark import plain
 
 pytestmark = pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 
@@ -107,7 +108,7 @@ def test_request_delegation_callback_and_final_response_survive_a_restart(tmp_pa
     h = E2E(realm, tmp_path).start()
     asked = realm.post(HOME, "front-1", "make me a 30 s trailer", sender_id=DEV, sender_name="Dev")
     wait_until(lambda: len(h.replies(HOME, "front-1")) == 1, what="the first reply")
-    first = h.replies(HOME, "front-1")[0]
+    first = plain(h.replies(HOME, "front-1")[0])
     assert first == "@**Dev**\n\nAsked autolab for the cut in #pj-x › workrun-trailer; I'll report when it answers."
     assert "I'll delegate" not in first, "the thought is not posted"
     note = [m for m in realm.messages.values() if m["subject"] == DELEGATE[1] and m["content"].startswith("[selfnote][rootchat]")]

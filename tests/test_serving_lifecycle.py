@@ -28,6 +28,7 @@ from agag.mirror import Mirror
 from agag.mirror.testing import FakeRealm
 from agag.selfnote import Conversation, parse_served
 from agag.zulip import ZulipError, ZulipRejected
+from endmark import plain
 
 BOT, DEV, OTHER = 42, 7, 9
 ACK = "Message received. Please wait for the reply."
@@ -195,7 +196,8 @@ class Harness:
         return [m["content"] for m in rows if (m["sender_id"] == BOT) == ours]
 
     def replies(self, channel, topic):
-        return [c for c in self.posts(channel, topic)
+        """What the listener said, in words (`endmark.plain`)."""
+        return [plain(c) for c in self.posts(channel, topic)
                 if c != ACK and not c.startswith("[selfnote]") and c != "on it"]
 
 
@@ -231,7 +233,7 @@ def test_a_crash_before_the_send_redelivers_the_prepared_reply_without_rerunning
                what="the prepared record")
     h.crash()
     record = h.listener.queue.latest_serving(("pj-x", "workplan-a", OWNER))
-    assert record.state == serving.PREPARED and record.reply_text == "@**Dev**\n\nthe answer"
+    assert record.state == serving.PREPARED and plain(record.reply_text) == "@**Dev**\n\nthe answer"
     h2 = Harness(realm, tmp_path).start()
     wait_until(lambda: h.replies("pj-x", "workplan-a") == ["@**Dev**\n\nthe answer"], what="the redelivery")
     time.sleep(0.3)
@@ -271,7 +273,7 @@ def test_a_send_whose_answer_was_lost_is_found_on_read_back_and_not_repeated(tmp
     wait_until(lambda: len(h.listener.queue) == 0 and h.listener.served == 1, what="the serving to end")
     assert h.replies("pj-x", "workplan-a") == ["@**Dev**\n\nthe answer"]
     record = h.listener.queue.latest_serving(("pj-x", "workplan-a", OWNER))
-    delivered = [m["id"] for m in realm.messages.values() if m["content"] == "@**Dev**\n\nthe answer"]
+    delivered = [m["id"] for m in realm.messages.values() if plain(m["content"]) == "@**Dev**\n\nthe answer"]
     assert record.state == serving.DELIVERED and record.delivered_id == delivered[0]
     assert any("found on read-back" in line for line in h.log)
     h.stop()
@@ -286,7 +288,7 @@ def test_a_refused_send_is_a_terminal_failure_kept_visible(tmp_path):
     entry = h.listener.queue.entries("failed")[0]
     assert "refused" in entry.failure and entry.attempts == 1
     record = h.listener.queue.latest_serving(("pj-x", "workplan-a", OWNER))
-    assert record.state == serving.FAILED and record.reply_text == "@**Dev**\n\nthe answer"
+    assert record.state == serving.FAILED and plain(record.reply_text) == "@**Dev**\n\nthe answer"
     assert NoStatus.errors and "refused" in NoStatus.errors[-1]
     h.stop()
 
@@ -300,7 +302,7 @@ def test_exhausted_retries_stay_in_the_queue_and_the_next_post_re_arms_them(tmp_
     assert len(h.contexts) == 1, "the run happened once; only the delivery was retried"
     assert any("retrying in" in line for line in h.log) and any("FAILED after 2" in line for line in h.log)
     # The prepared reply is still there, and nothing was posted twice.
-    assert h.listener.queue.latest_serving(("pj-x", "workplan-a", OWNER)).reply_text == "@**Dev**\n\nthe answer"
+    assert plain(h.listener.queue.latest_serving(("pj-x", "workplan-a", OWNER)).reply_text) == "@**Dev**\n\nthe answer"
     assert h.replies("pj-x", "workplan-a") == []
     # Zulip comes back and the human posts again: the entry is re-armed, the
     # prepared reply is delivered first, then the new input is served.
@@ -461,7 +463,7 @@ def test_serve_topic_returns_the_journal_and_records_every_stage():
                                 journal=journal, log=lambda t: None)
     assert record.state == serving.DELIVERED and record.ack_id == 501 and record.delivered_id == 502
     assert record.input_up_to == 501 and record.requester_name == "Developer" and record.requester_id == DEV
-    assert record.reply_text == "@**Developer**\n\nok" and record.reply_after == 501
+    assert plain(record.reply_text) == "@**Developer**\n\nok" and record.reply_after == 501
 
 
 def test_a_third_party_speaking_during_the_run_is_not_who_the_reply_is_handed_to():
@@ -478,19 +480,19 @@ def test_a_third_party_speaking_during_the_run_is_not_who_the_reply_is_handed_to
 
 
 def test_a_send_that_is_refused_escapes_with_the_reply_kept_prepared():
-    client = ScriptedClient([human("build it", 1)], trouble=lambda c: "reject" if c.endswith("ok") else None)
+    client = ScriptedClient([human("build it", 1)], trouble=lambda c: "reject" if plain(c).endswith("ok") else None)
     journal = serving.NullJournal()
     with pytest.raises(DeliveryError) as caught:
         topics.serve_topic(client, "c", "t", lambda ctx: topics.TopicResult(["ok"]), ack_text="ack",
                            journal=journal, log=lambda t: None)
     assert caught.value.terminal
-    assert journal.serving().state == serving.PREPARED and journal.serving().reply_text == "@**Developer**\n\nok"
+    assert journal.serving().state == serving.PREPARED and plain(journal.serving().reply_text) == "@**Developer**\n\nok"
 
 
 def test_a_dropped_send_is_retried_and_then_handed_back_with_the_reply_prepared():
     attempts = []
     client = ScriptedClient([human("build it", 1)],
-                            trouble=lambda c: (attempts.append(1) or "error") if c.endswith("ok") else None)
+                            trouble=lambda c: (attempts.append(1) or "error") if plain(c).endswith("ok") else None)
     journal = serving.NullJournal()
     with pytest.raises(DeliveryError) as caught:
         topics.serve_topic(client, "c", "t", lambda ctx: topics.TopicResult(["ok"]), ack_text="ack",
@@ -501,7 +503,7 @@ def test_a_dropped_send_is_retried_and_then_handed_back_with_the_reply_prepared(
     client.trouble = lambda c: None
     message_id = topics.resume_prepared(client, journal.serving(), journal, log=lambda t: None)
     assert journal.serving().state == serving.DELIVERED and journal.serving().delivered_id == message_id
-    assert client.sent == ["ack", "@**Developer**\n\nok"]
+    assert plain(client.sent) == ["ack", "@**Developer**\n\nok"]
 
 
 def test_an_owed_answer_in_the_processed_input_is_marked_served_after_the_reply(tmp_path):

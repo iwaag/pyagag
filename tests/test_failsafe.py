@@ -187,3 +187,14 @@ def test_a_watch_asked_for_in_the_conversation_itself_holds_it():
     task, result = task_node(messages, origin, now=5000)
     assert task.waiting_on == ["Comfy Notifier"] and task.holder == "delegate"
     assert "unheld" not in [c.kind for c in tracing.stall_candidates(result, now=5000)]
+
+
+def test_once_a_person_is_asked_about_the_stall_it_is_theirs():
+    messages, origin, *_ = task_world("@**Front** still running.\n\n`ag-post intent=progress end={ack}`")
+    at = 300 + tracing.THRESHOLDS["unheld"]
+    messages.append({"id": 5000, "channel": "front", "topic": "front-a", "sender_id": FRONT,
+                     "sender_full_name": "Front", "sender_realm_str": "", "timestamp": at - 10,
+                     "content": "@**Developer** the task stopped; resume it?\n\n"
+                                "`ag-post intent=response_request to=8 ask=question`"})
+    _, result = task_node(messages, origin, now=at)
+    assert "unheld" not in [c.kind for c in tracing.stall_candidates(result, now=at)]

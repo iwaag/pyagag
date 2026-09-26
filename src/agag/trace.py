@@ -1244,6 +1244,10 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
         return bool(since) and now - int(since) >= limits[kind]
 
     root = result.root
+    #: The newest explicit question to a person anywhere in the request: once
+    #: somebody asked a person about the work, the next move is theirs.
+    asked_person = max((max(n.evidence, default=0) for n in result.nodes() if n.state == "awaiting_human"),
+                       default=0)
     for node in result.nodes():
         is_root = node is root
         resolved = node.topic.startswith(RESOLVED_TOPIC_PREFIX)
@@ -1286,7 +1290,7 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
                 f"{node.owner or 'the owner'} answers, or says the work is still running",
                 node.last_activity, tuple(node.evidence), judgment=True, anchor=node.anchor,
             ))
-        if node.holder == "none" and overdue("unheld", node.ended_at):
+        if node.holder == "none" and overdue("unheld", node.ended_at) and asked_person < node.ended_by:
             found.append(Candidate(
                 "unheld", node.channel, node.topic, node.identity,
                 f"the last serving ended at #{node.ended_by} saying the work goes on, and nothing holds it: no "

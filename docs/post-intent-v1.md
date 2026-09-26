@@ -12,7 +12,7 @@ One line at the very end of the message's raw Markdown, outside any code
 fence, as an inline code span:
 
 ```
-`ag-post intent=<intent> [to=<user id>] [ask=<kind>] [re=<id>[,<id>…] | answer=none] [seen=<id>]`
+`ag-post intent=<intent> [to=<user id>] [ask=<kind>] [re=<id>[,<id>…] | answer=none] [seen=<id>] [end=<id>]`
 ```
 
 | key | values | meaning |
@@ -25,9 +25,18 @@ fence, as an inline code span:
 | `re` | message id(s), comma separated | the request(s) this post answers — or, from the asker, withdraws or supersedes; may stand alone, without `intent` |
 | `answer` | `none` | the post answers **no** request — not even the one the next-post rule would give it (`clearer_chat_ui` ex1); may stand alone; contradicts `re=` |
 | `seen` | message id | the newest post the poster had read when it wrote this (a listener's processed-input boundary); written on requests |
+| `end` | message id | this post **ends the serving** whose acknowledgement is `<id>` (failsafe p1); written by the listener on every reply into the conversation it acknowledged; may stand alone, and says nothing about the words' meaning |
 
 Rules:
 
+- **The line survives transport.** `compose` cuts a post longer than Zulip
+  keeps (10 000 characters) before its line and says so; a post Zulip cut
+  itself (`[message truncated]`) has lost its line and is read as output,
+  never as an answer (failsafe p1: m11741's progress read as its answer).
+- **An aside is nobody's handoff.** A reply is never handed to a post that
+  declares `answer=none` without asking anything (`topics.requester_of`):
+  Observer's recovery requests are such posts, so the reply still goes to
+  whoever asked for the work.
 - **No line, no meaning.** A post without the line is *unclassified*.
   Unclassified never means "somebody is waiting".
 - **Only the last non-blank line counts, and only outside a code fence**

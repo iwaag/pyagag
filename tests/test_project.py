@@ -104,6 +104,16 @@ def test_status_is_pending_until_the_established_line_and_ready_after(tmp_path):
     run(realm, ["open", "aquaculture", "--kind", "study", "--doc", "DOC"], tmp_path)
     client = realm.client(ARCHSAGE)
     assert project.inspect_project("aquaculture", client, check_gitea=False).state == "setup-pending"
+    # autolab's acknowledgement is not an answer, and the repository it made
+    # before planning is not a finished setup (live probe #11500).
+    realm.post(AUTOLAB, "pj-aquaculture", "workplan-setup-aquaculture", "Message received. Please wait for the reply.")
+    import agag.project as module
+    real = module.gitea_head
+    module.gitea_head = lambda slug, **_: {"exists": True, "empty": False, "repository": "r", "revision": "abc1234"}
+    try:
+        assert project.inspect_project("aquaculture", client).state == "setup-pending"
+    finally:
+        module.gitea_head = real
     realm.post(AUTOLAB, "pj-aquaculture", "workplan-setup-aquaculture", "@**archsage** a question first?")
     assert project.inspect_project("aquaculture", client, check_gitea=False).state == "answered"
     line = project.established_line("http://gitea.example/autodev/aquaculture.git", "1a2b3c4")

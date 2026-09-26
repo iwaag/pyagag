@@ -314,6 +314,12 @@ def _kind_from(description: str) -> str:
     return match.group("kind") if match else ""
 
 
+def _is_ack(content) -> bool:
+    from .agent import is_ack
+
+    return is_ack(str(content or ""))
+
+
 def _first_speech(history: list[dict]) -> dict | None:
     return next((m for m in history if not is_selfnote(m.get("content"))), None)
 
@@ -419,8 +425,8 @@ def inspect_project(slug: str, client, *, admin=None, kind: str | None = None, c
         for message in history:
             if int(message.get("id", 0)) <= state.setup_id or is_selfnote(message.get("content")):
                 continue
-            if message.get("sender_id") == requester:
-                continue
+            if message.get("sender_id") == requester or _is_ack(message.get("content")):
+                continue  # an acknowledgement says a serving started, not what it found
             text = str(message.get("content") or "")
             found = ESTABLISHED_RE.search(text)
             state.answers.append({"id": int(message["id"]), "sender": str(message.get("sender_full_name") or ""),
@@ -452,8 +458,10 @@ def _judge(state: ProjectState) -> None:
         state.state = "ready"
     elif state.answers:
         # An answer without the established line: an older setup, or a
-        # question back. The repository on Gitea is the other witness.
-        if state.gitea.get("exists") and not state.gitea.get("empty"):
+        # question back. For an older (prose) setup the repository on Gitea
+        # is the other witness; a structured one is ready only by the line —
+        # the repository is made before the planner has even read the request.
+        if not state.setup_structured and state.gitea.get("exists") and not state.gitea.get("empty"):
             state.state = "ready"
             state.repository = state.repository or str(state.gitea.get("repository") or "")
             state.revision = state.revision or str(state.gitea.get("revision") or "")

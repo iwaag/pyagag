@@ -568,6 +568,7 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
         else:
             state = "completed"
             reason = "every unit of work is finished by its record"
+        next_actor = ""
     latest = max((u["latest_work_at"] or 0 for u in units), default=0) or None
     if not source_live:
         reason = f"last known ({source_note or 'the source is not live'}): {reason}"

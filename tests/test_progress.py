@@ -214,7 +214,7 @@ def test_an_agreed_task_is_not_a_completed_request_until_the_plan_is_accepted():
 
 def test_the_accepted_request_is_completed():
     found = card(13116, 13189)
-    assert found["state"] == "completed"
+    assert found["state"] == "completed" and found["next"] == ""
     assert all(s["status"] == "done" for s in found["stages"])
 
 

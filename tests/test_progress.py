@@ -423,3 +423,27 @@ def test_a_run_waiting_on_an_unfinished_unit_below_is_not_itself_silent():
     kinds = {(c.kind, c.topic) for c in tracing.stall_candidates(result, now=later)}
     assert ("silent", "routinerun-20260926-2225") not in kinds
     assert ("silent", "workrun-task1-m11741") in kinds
+
+
+def test_a_post_waiting_for_a_busy_agent_says_what_it_waits_behind():
+    """Two requests at once are not two executions at once: autolab's listener
+    serves one conversation at a time (progress_panel p1 step 5, live)."""
+    rows, t = _with(13136, (13600, "pj-robustp1", "workplan-failsafe-p4-t2", 15, "Front",
+                            "@**autolab-agstudio1** one more thing for the plan"))
+    now = t + 5
+    mine = progress.card(tracing.trace(Realm(13600, rows), 13116, now=now), now=now, viewer_id=DEVELOPER)
+    other = progress.card(traced(11711, 11770, now), now=now, viewer_id=DEVELOPER)
+    mine["topic"], other["topic"] = "front-failsafe-p4-t2", "front-desk-20260926-221323"
+    progress.queue_behind([mine, other])
+    plan = unit(mine, "plan", "m13123")
+    assert plan["display"]["state"] == "queued"
+    ahead = {row["label"] for row in plan["queue"]}
+    assert "task 13123#1" in ahead and "task 11741#1" in ahead
+    assert "serves one conversation at a time" in plan["display"]["reason"]
+
+
+def test_a_card_is_about_the_deepest_unit_not_a_pass_through():
+    found = card(13116, 13145)  # the plan's answer served (#13143), task 1 running
+    assert found["state"] == "working"
+    assert unit(found, "plan", "m13123")["passthrough"] is True
+    assert found["focus"] == unit(found, "task", "13123#1")["anchor"]

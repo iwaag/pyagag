@@ -71,7 +71,7 @@ from .trace import Node, Trace
 from .zulip import RESOLVED_TOPIC_PREFIX
 
 __all__ = [
-    "SCHEMA", "STATES", "HEALTH_FRESH", "WORK_QUIET", "card", "card_state", "unit_kind",
+    "SCHEMA", "STATES", "HEALTH_FRESH", "WORK_QUIET", "card", "card_state", "queue_behind", "unit_kind",
 ]
 
 SCHEMA = "agag.progress.v1"
@@ -387,6 +387,10 @@ def _unit(node: Node, *, root: bool, now: int, health: dict[int, dict], recovery
     cancelled_at = next((r["id"] for r in reversed(_records(node, "state"))
                          if (r.get("value") or "").split()[:1] == ["cancelled"]), None)
     unit = {
+        # Waiting only because something opened from it is at work: the card
+        # is about that deeper unit, not this pass-through.
+        "passthrough": state == "waiting" and node.holder == "delegate" and bool(children)
+        and reason == "on work opened from it",
         "anchor": int(node.anchor), "kind": kind, "channel": node.channel, "topic": node.topic,
         "resolved": node.topic.startswith(RESOLVED_TOPIC_PREFIX), "label": node.identity or _bare(node.topic),
         "owner": node.owner, "serial": _serial(node),
@@ -499,14 +503,15 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
                  viewer_id=viewer_id, pending=list(pending or []))
     units = list(_walk(root))
     stages = _stages(root, now)
-    state = card_state(units)
+    deciding = [u for u in units if not u.get("passthrough")] or units
+    state = card_state(deciding)
     if state in ("answered", "completed") and any(s["status"] == "pending" for s in stages):
         # A delivered answer or an ended run completes nothing on its own.
         pending_stage = next(s for s in stages if s["status"] == "pending")
         state, focus = "waiting", None
         reason, next_actor = f"not complete: {pending_stage['detail']} ({pending_stage['label']})", ""
     else:
-        focus = _focus(units, state)
+        focus = _focus(root, deciding, state)
         reason = focus["display"]["reason"] if focus else ""
         next_actor = focus["display"]["next"] if focus else ""
     work = [u for u in units if u["kind"] in WORK_KINDS]
@@ -532,7 +537,49 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
     }
 
 
-def _focus(units: list[dict], state: str) -> dict | None:
+def queue_behind(cards: list[dict]) -> list[dict]:
+    """Say what a queued post waits behind, across requests.
+
+    An agent's listener serves one conversation at a time (`agag.listen`:
+    one executor), so a post its owner has not acknowledged while that owner
+    has a serving open elsewhere waits for that serving — the difference
+    between two requests being *concurrent* and their work *executing*
+    concurrently. Each queued unit whose owner has an open serving in any
+    card gets `queue` = the serving(s) it waits behind, and its reason says
+    so; the card's reason follows when that unit is its focus. Mutates and
+    returns `cards`."""
+    open_by_owner: dict[str, list[dict]] = {}
+    for found in cards:
+        if not found.get("root"):
+            continue
+        for unit in _walk(found["root"]):
+            if unit["execution"]["serving"] == "open" and unit["owner"] and unit["display"]["state"] in (
+                    "working", "waiting", "unknown", "planning"):
+                open_by_owner.setdefault(unit["owner"], []).append({
+                    "anchor": unit["anchor"], "label": unit["label"], "origin": found["origin"],
+                    "topic": found.get("topic") or "", "since": unit["execution"].get("ack_at"),
+                    "state": unit["display"]["state"], "evidence": unit["execution"]["evidence"]})
+    for found in cards:
+        if not found.get("root"):
+            continue
+        for unit in _walk(found["root"]):
+            if unit["display"]["state"] != "queued" or unit["work"]["state"] not in ("queued", "not_started") \
+                    or "queue" in unit:
+                continue
+            ahead = [row for row in open_by_owner.get(unit["owner"], []) if row["anchor"] != unit["anchor"]]
+            if not ahead:
+                continue
+            unit["queue"] = ahead
+            first = ahead[0]
+            where = "" if first["origin"] == found["origin"] else f" of another request ({_bare(first['topic'])})"
+            unit["display"]["reason"] = (f"{unit['display']['reason']}; {unit['owner']} serves one conversation at a "
+                                         f"time and is serving {first['label']}{where}")
+            if found.get("focus") == unit["anchor"]:
+                found["reason"] = unit["display"]["reason"]
+    return cards
+
+
+def _focus(root: dict, units: list[dict], state: str) -> dict | None:
     """The unit that makes the card's state: the deepest one in that state."""
     depth: dict[int, int] = {}
 
@@ -541,7 +588,6 @@ def _focus(units: list[dict], state: str) -> dict | None:
         for child in unit["children"]:
             measure(child, level + 1)
 
-    if units:
-        measure(units[0], 0)
+    measure(root, 0)
     matching = [u for u in units if u["display"]["state"] == state]
     return max(matching, key=lambda u: depth.get(id(u), 0)) if matching else None

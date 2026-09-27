@@ -417,3 +417,41 @@ def test_recheck_of_a_conversation_nobody_serves_says_so():
     stray = realm.post("pj-growbox", "work-m1/workrun-task1-m1", "Agreed — please close the task.", FRONT)
     checked = tracing.recheck(realm, stray, stray, now=realm.clock + 600)
     assert checked.verdict == "unowned" and "nobody to serve it" in checked.detail
+
+
+def test_an_unmentioned_first_request_is_queued_for_the_agent_whose_roster_serves_it():
+    """Trial G: Front's plan request named nobody, so the trace knew no owner
+    and the queue could not be read; autolab serves `workplan-` by its roster."""
+    from types import SimpleNamespace
+
+    from agag.intro import Roster, roster_block, roster_owner
+
+    autolab = Roster("autolab-agstudio1", "agautolab", "autolab-agstudio1", 11, "autolab-agstudio1",
+                     ("workplan-", "workrun-"))
+    front = Roster("front-agstudio1", "agfront", "Front", 15, "front-agstudio1", ("front-", "routinerun-"))
+    assert roster_owner([autolab, front], "pj-x", "workplan-g3") == "autolab-agstudio1"
+    assert roster_owner([autolab, front], "pj-x", "notes") == ""
+    realm = Realm()
+    study = Study(realm, "growbox", "g3")
+    study.ask()
+    realm.post("pj-growbox", "workplan-g3", f"[selfnote][rootchat] front/{study.desk_topic} #{study.origin}", FRONT)
+    post = realm.post("pj-growbox", "workplan-g3", "Mission request: one task.", FRONT)
+
+    class Board(Realm):
+        """The realm read through the mirror reader's roster lookup."""
+        def roster_owner(self, channel, topic):
+            return roster_owner([autolab, front], channel, topic)
+
+    board = Board(realm.rows)
+    plan = node(tracing.trace(board, study.origin, now=realm.at(post) + 301), "workplan-g3")
+    assert plan.state == "queued" and plan.owner == "autolab-agstudio1"
+    assert "unacknowledged" in {c.kind for c in tracing.stall_candidates(
+        tracing.trace(board, study.origin, now=realm.at(post) + 301), now=realm.at(post) + 301)}
+
+    # The mirror reader reads the rosters off the `#agents` board.
+    intro = "# autolab\n\n" + roster_block(autolab)
+    fake = SimpleNamespace(
+        topics=lambda channel: [SimpleNamespace(name="intro-autolab-agstudio1", live_name="intro-autolab-agstudio1",
+                                                resolved=False)] if channel == "agents" else [],
+        history=lambda channel, topic, num_before=1, across_resolve=False: [{"content": intro}])
+    assert tracing.MirrorReader(fake).roster_owner("pj-y", "workplan-z") == "autolab-agstudio1"

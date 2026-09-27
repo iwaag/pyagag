@@ -1151,6 +1151,12 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
         if depth == 0:
             anchor = min((int(m.get("id") or 0) for m in messages or ()), default=anchor)
         owner_id = owner_id or _owner_by_ack(messages or [])
+        if state == "queued" and not owner and hasattr(client, "roster_owner"):
+            # Nobody has acknowledged anything here and the post names nobody:
+            # whose listener serves this topic is what the agents publish
+            # (their `#agents` roster; failsafe p5 trial G, a first request
+            # without a mention).
+            owner = client.roster_owner(key[0], key[1]) or ""
         facts = _serving(messages, owner_id, {name for _, name, _ in requested})
         ending = facts.pop("ending")
         node = Node(
@@ -1331,6 +1337,29 @@ class MirrorReader:
             if message is not None:
                 found.append(message.as_zulip())
         return found
+
+    def roster_owner(self, channel: str, topic: str) -> str:
+        """The agent whose published roster serves this topic (its own
+        channel, or a prefix it sweeps), read off the mirror's `#agents`
+        board; "" when none or more than one does."""
+        from .intro import AGENTS_CHANNEL, INTRO_TOPIC_PREFIX, parse_roster, roster_owner
+
+        rosters = getattr(self, "_rosters", None)
+        if rosters is None:
+            rosters = []
+            try:
+                for index in self.mirror.topics(AGENTS_CHANNEL):
+                    if not index.name.startswith(INTRO_TOPIC_PREFIX) or index.resolved:
+                        continue
+                    history = self.mirror.history(AGENTS_CHANNEL, index.live_name, num_before=1,
+                                                  across_resolve=False)
+                    roster = parse_roster(str(history[-1].get("content") or "")) if history else None
+                    if roster is not None:
+                        rosters.append(roster)
+            except Exception:  # noqa: BLE001 - an unreadable board resolves nobody
+                rosters = []
+            self._rosters = rosters
+        return roster_owner(rosters, channel, topic)
 
 
 # --- stall candidates: the mechanical half of detection ---------------------------

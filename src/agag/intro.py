@@ -120,6 +120,7 @@ __all__ = [
     "render_agents_md",
     "revision",
     "roster_block",
+    "roster_owner",
     "write_agents_md",
 ]
 
@@ -288,6 +289,16 @@ def parse_exec_options(text: str) -> ExecOptions | None:
     known, never an agent that has none.
     """
     return parse_options(text)
+
+
+def roster_owner(rosters, channel: str, topic: str) -> str:
+    """The bot name of the one agent whose roster serves `channel`/`topic`:
+    its own channel, or a prefix it sweeps in any channel. "" when no roster
+    or more than one matches — an unknown owner stays unknown."""
+    bare = topic[len(RESOLVED_TOPIC_PREFIX):] if topic.startswith(RESOLVED_TOPIC_PREFIX) else topic
+    found = {r.bot for r in rosters if (r.channel and r.channel == channel)
+             or any(bare.startswith(prefix) for prefix in r.prefixes)}
+    return found.pop() if len(found) == 1 else ""
 
 
 def _agent_name(topic: str) -> str:

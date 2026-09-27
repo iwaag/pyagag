@@ -89,8 +89,6 @@ WORK_QUIET = 1800
 AGREED = ("completed", "accepted", "done")
 #: Units whose end is a record (a plain conversation's is not).
 WORK_KINDS = ("plan", "task", "run", "routine_run")
-TERMINAL_DONE = ("done",)
-TERMINAL_CANCELLED = ("cancelled",)
 #: Routines whose runs are studies: the guide archsage writes ends with the
 #: sage refreshed (README_DEV, "archsage establishes studies").
 STUDY_ROUTINE_PREFIX = "routine-study-"

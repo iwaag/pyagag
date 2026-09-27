@@ -57,6 +57,15 @@ to be made to stand for (failsafe p1):
 A post Zulip cut (`[message truncated]`) lost its `ag-post` line with its
 tail; it is read as output, never as an answer.
 
+For readers of progress (progress_panel p1, `agag.progress`): a
+conversation its owner opens and serves itself (Front's `routinerun-`) is
+read from its own acks and ends; a routine run's `ag-routinerun` block is
+its end record (`finished`/`ended`); each node carries its record notes
+(`records`) and, while an answer waits for delivery, whom it is owed to
+(`owed_to`) — the owner of a conversation an answer is owed to holds it.
+A requester's `[served]` mark anywhere in the request's tree is its
+receipt.
+
 The state is decided from what each message *is*, not from topic names:
 identity notes (`[mission]`, `[task]`, `[asset]`, `[assetrun]`, `[change]`)
 and acks say who owns a conversation; `[state]` words are the owners' own

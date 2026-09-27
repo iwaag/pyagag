@@ -29,10 +29,14 @@ fence, as an inline code span:
 
 Rules:
 
-- **The line survives transport.** `compose` cuts a post longer than Zulip
-  keeps (10 000 characters) before its line and says so; a post Zulip cut
-  itself (`[message truncated]`) has lost its line and is read as output,
-  never as an answer (failsafe p1: m11741's progress read as its answer).
+- **The line survives transport.** Nothing is cut (failsafe p4): the
+  client refuses a post longer than the server's advertised
+  `max_message_length` before sending it (`MessageTooLong`), the line
+  counting toward it, and a run's over-long reply is a failed reply that is
+  repaired or stays owed. A post Zulip cut itself (`[message truncated]`,
+  written around this library or before p4) has lost its line and is read
+  as output, never as an answer (failsafe p1: m11741's progress read as its
+  answer).
 - **An aside is nobody's handoff.** A reply is never handed to a post that
   declares `answer=none` without asking anything (`topics.requester_of`):
   Observer's recovery requests are such posts, so the reply still goes to

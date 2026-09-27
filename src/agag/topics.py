@@ -59,11 +59,14 @@ from .zulip import (
 
 HISTORY_MESSAGES = 1000
 
-#: How much rendered conversation one prompt carries, in characters. Zulip
-#: caps a single post at about 10 000, so this is a handful of full-length
-#: posts and very many ordinary ones — the common `front-*` serving fits
-#: whole. Beyond it the newest end is carried and the rest is named as
-#: omitted; the file in the workspace is always complete.
+#: How much rendered conversation one prompt carries, in characters: a
+#: deliberate context-window bound, not a post size (a post may hold up to
+#: the server's `max_message_length`, 100 000 here since failsafe p4). The
+#: common `front-*` serving fits whole. Beyond it the newest end is carried
+#: and the rest is named as omitted, and a single post over it is cut where
+#: the run can see it, its meaning label kept at its head and the number of
+#: characters left in the complete file said; the file in the workspace is
+#: always complete.
 CONVERSATION_BUDGET = 20000
 
 #: The markers the conversation is carried between. Deliberately not
@@ -1040,7 +1043,8 @@ def serve_topic(
             if carry_error:
                 log(f"continuation block unreadable in {channel!r}/{topic!r}: {carry_error}")
                 result.notices.append(f"(your {'ag-continue'} block was not readable: {carry_error})")
-            text, split, repaired = resolve_reply(output, result.repair, log=log)
+            text, split, repaired = resolve_reply(output, result.repair, log=log,
+                                                  limit=_reply_room(client, result, log))
             journal.reply_outcome(marked=split.marked, blocks=split.blocks, failure=split.error or "")
             if repaired:
                 log(f"reply for {reply_channel!r}/{reply_topic!r} came from the repair run"
@@ -1056,7 +1060,10 @@ def serve_topic(
                 owes_retry = attempt < REPLY_ATTEMPTS
                 _remember(journal, reply_owed={"reason": split.error or "no reply", "attempt": attempt,
                                                "final": not owes_retry,
-                                               "output": (output or "")[-OWED_OUTPUT_CHARS:]})
+                                               "output": (output or "")[-OWED_OUTPUT_CHARS:]},
+                          # An over-long reply is kept whole: its words are
+                          # the answer, only their size failed (failsafe p4).
+                          **({"reply_unposted": split.reply} if split.marked and split.reply else {}))
                 text = failure_line(split.error or "no reply", final=not owes_retry)
                 log(f"no usable reply for {reply_channel!r}/{reply_topic!r}: {split.error}; posting the failure "
                     f"(attempt {attempt}/{REPLY_ATTEMPTS}{', the reply stays owed' if owes_retry else ''})")
@@ -1179,6 +1186,27 @@ def _destination(client, channel: str, topic: str, anchor: int, journal, log) ->
         log(f"destination {channel!r}/{topic!r} is {state}: replying under {found.topic!r}")
         return found
     return found
+
+
+#: What one reply's post keeps for everything that is not the run's own
+#: words: the handoff mention, the separators and the `ag-post` line.
+REPLY_OVERHEAD = 300
+
+
+def _reply_room(client, result, log) -> int | None:
+    """How many characters the run's reply may hold in its post: the
+    server's advertised limit less the listener's own lines under it and the
+    post's mention and metadata (failsafe p4). None for a stand-in client
+    that cannot say."""
+    if not hasattr(client, "max_message_length"):
+        return None
+    try:
+        limit = int(client.max_message_length())
+    except Exception as error:  # noqa: BLE001 - a size that cannot be read cuts nothing
+        log(f"could not read the post size limit ({error!r}); the reply is not checked against it")
+        return None
+    own = sum(len(part) + 2 for part in (*result.sections, *result.notices) if part)
+    return max(0, limit - own - REPLY_OVERHEAD)
 
 
 def _with_meta(text: str, meta: PostMeta | None, requester: dict | None, journal, log, *, seen: int = 0,

@@ -8,7 +8,7 @@ Zulip had cut read as the task's answer. These are the reads that make
 """
 
 from agag import trace as tracing
-from agag.post import CUT_NOTE, MAX_CONTENT, PROGRESS, PostMeta, compose, is_truncated, parse_post
+from agag.post import PROGRESS, PostMeta, compose, is_truncated, parse_post
 from agag.selfnote import owed_start
 
 from test_trace import Realm
@@ -62,10 +62,11 @@ def test_end_is_part_of_the_line_and_read_back():
     assert parse_post(compose("ok", PostMeta(end=7))).meta == PostMeta(end=7), "a serving's end alone is a line"
 
 
-def test_a_long_post_is_cut_before_its_line_never_through_it():
+def test_a_long_post_is_never_cut_and_keeps_its_line():
+    """failsafe p4: whether a post fits is the sender's question
+    (`ZulipClient.max_message_length`); composing it cuts nothing."""
     text = compose("x" * 20000, PostMeta(intent=PROGRESS))
-    assert len(text) <= MAX_CONTENT
-    assert CUT_NOTE in text and parse_post(text).meta == PostMeta(intent=PROGRESS)
+    assert text.startswith("x" * 20000) and parse_post(text).meta == PostMeta(intent=PROGRESS)
 
 
 def test_a_post_zulip_cut_is_output_not_the_answer_to_a_start():

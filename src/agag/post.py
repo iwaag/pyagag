@@ -296,14 +296,11 @@ def strip(content) -> str:
     return parse_post(content).text
 
 
-#: Zulip keeps the first 10 000 characters of a message and replaces the
-#: rest with `[message truncated]` — the line at the end went with it
-#: (m11741: two progress posts read as the task's answer). A composed post
-#: is cut *before* its line instead, and says so.
-MAX_CONTENT = 10000
-CUT_NOTE = "[… cut by the poster to fit]"
 #: What Zulip leaves at the end of a message it cut: whatever line was
-#: there is gone, so the post is unclassified, never an answer.
+#: there is gone, so the post is unclassified, never an answer. Nothing
+#: this library posts is cut any more (failsafe p4: the client refuses an
+#: over-long post before sending, `agag.zulip.MessageTooLong`); the marker
+#: is still read in older posts and in anything posted around the library.
 TRUNCATED = "[message truncated]"
 
 
@@ -311,12 +308,13 @@ def is_truncated(content) -> bool:
     return str(content or "").rstrip().endswith(TRUNCATED)
 
 
-def compose(text: str, meta: PostMeta | None, *, limit: int = MAX_CONTENT) -> str:
+def compose(text: str, meta: PostMeta | None) -> str:
     """`text` with `meta`'s line appended — one message, one write. An
     existing line is replaced rather than stacked; an empty meta leaves the
     text unclassified. An invalid meta is refused (`ValueError`): what is
-    written is always readable back. A post longer than Zulip keeps is cut
-    before the line, never through it."""
+    written is always readable back. Nothing is cut: whether the post fits
+    is the sender's question (`ZulipClient.max_message_length`), and the
+    line counts toward it."""
     body = strip(text)
     if meta is None or meta.empty:
         return body
@@ -324,9 +322,6 @@ def compose(text: str, meta: PostMeta | None, *, limit: int = MAX_CONTENT) -> st
     if problem is not None:
         raise ValueError(problem)
     line = meta.line()
-    room = limit - len(line) - 2
-    if len(body) > room:
-        body = body[:max(0, room - len(CUT_NOTE) - 2)].rstrip() + "\n\n" + CUT_NOTE
     return f"{body}\n\n{line}" if body else line
 
 

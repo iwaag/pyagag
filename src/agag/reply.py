@@ -55,7 +55,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .post import PostMeta, merge, parse_attributes
@@ -223,7 +223,7 @@ What you say, exactly as it should appear.
 
 Everything outside such blocks — notes to yourself, reasoning, a draft you discard — is yours: it stays in the run record and is not posted, and nothing forbids it. Several `{OPEN_TAG}` blocks are posted as one message, in order, so you may write the reply in pieces as you work. Inside the block write ordinary Markdown: code blocks, test output and quoted files keep their own ``` fences, and the text after them is posted too. Any machine block a guide asks for (`ag-argue`, `ag-routinerun`, …) is a fenced block outside the reply, read wherever it is in your output and never posted.
 
-One post holds about 9 000 characters. A longer reply is cut at that point, with a visible note, and what came after — a second code block, your summary — is lost. Quote the part of long output that matters (the tail of a test run with its `Ran … OK` line, the lines that failed, the diff of the files you changed), not all of it; say where the rest is kept.
+One post holds tens of thousands of characters, and nothing in it is cut. A reply longer than one post is not posted at all: you are asked once more for a shorter one, told the size it must fit. Quote the part of long output that matters (the tail of a test run with its `Ran … OK` line, the lines that failed, the diff of the files you changed) rather than all of it, and when the whole is worth keeping, write it to a file in your workspace and say where it is.
 
 An output with no `{OPEN_TAG}` block, an empty one, or one never closed with `{CLOSE_TAG}` is a failed reply: you are asked once more for the reply alone, and if that fails too the conversation is told that this run produced no reply.
 
@@ -327,15 +327,32 @@ def retry_notice(owed: dict) -> str:
     )
 
 
-def resolve_reply(output: str, repair: Callable[[str], str] | None = None, *, log=None) -> tuple[str, ReplySplit, bool]:
+def too_long(reply: str, limit: int) -> str:
+    """Why a reply of this size cannot be posted, said so the run can fix it."""
+    return (f"the reply is {len(reply)} characters and one post here holds at most {limit} of them (after the "
+            "listener's own lines); nothing is cut, so it was not posted. Write a shorter reply: quote what matters "
+            "and keep the whole text in a file in your workspace, naming its path")
+
+
+def _fitting(split: ReplySplit, limit: int | None) -> ReplySplit:
+    """A reply over one post is a failed reply, never a cut one (failsafe p4)."""
+    if limit is None or not split.ok or len(split.reply) <= limit:
+        return split
+    return replace(split, error=too_long(split.reply, limit))
+
+
+def resolve_reply(output: str, repair: Callable[[str], str] | None = None, *, log=None,
+                  limit: int | None = None) -> tuple[str, ReplySplit, bool]:
     """`(text to post, the split it came from, repaired)`.
 
     The split of `output`; when it is unusable and a `repair` is given, one
     repair run and its split; when that is unusable too (or there is no
     repair), the visible failure line as the text, with the split saying
     why. The caller records the split's outcome beside the run identity.
+    `limit` is the most the reply may hold in its post: a longer one is
+    unusable for that reason, and the repair is asked for one that fits.
     """
-    split = split_reply(output)
+    split = _fitting(split_reply(output), limit)
     repaired = False
     if not split.ok and repair is not None:
         if log is not None:
@@ -346,7 +363,7 @@ def resolve_reply(output: str, repair: Callable[[str], str] | None = None, *, lo
             again = ""
             if log is not None:
                 log(f"the repair run failed: {error!r}")
-        split = split_reply(again)
+        split = _fitting(split_reply(again), limit)
         repaired = True
     if split.ok:
         return split.reply, split, repaired

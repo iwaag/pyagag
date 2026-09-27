@@ -107,3 +107,27 @@ def test_a_restart_before_the_reserving_keeps_the_debt_and_serves_it_once(tmp_pa
     time.sleep(0.6)
     assert len(h2.contexts) == 1 and "prose" in reply.prompts[0]
     h2.stop()
+
+
+def test_a_reply_over_one_post_is_owed_whole_never_cut_or_counted_delivered(tmp_path):
+    """failsafe p4 step 3: the server keeps `max_message_length` characters
+    and nothing is cut; a reply that does not fit under the listener's own
+    lines is a failed reply — kept whole in the journal, the input still
+    owed, and the re-serving is told the size it must fit."""
+    realm = realm_with_channels()
+    long_reply = "<ag-reply intent=report>\n" + "detail " * 200 + "\nSUMMARY AT THE END\n</ag-reply>"
+    reply = outputs(long_reply, "<ag-reply intent=report>\nShort: the whole is in out.md.\n</ag-reply>")
+    h = Harness(realm, tmp_path, reply=reply)
+    h.client.max_message_length = lambda: 1000
+    h.start()
+    realm.post("pj-x", "workplan-a", "report please", sender_id=DEV, sender_name="Dev")
+    wait_until(lambda: any("Short: the whole is in out.md." in r for r in h.replies("pj-x", "workplan-a")),
+               what="the fitting reply")
+    said = h.posts("pj-x", "workplan-a")
+    assert not any("SUMMARY AT THE END" in p for p in said), "never posted cut"
+    failure = next(p for p in said if "(this run produced no reply" in p)
+    assert "holds at most" in failure and "the reply is still owed" in failure and "end=" not in failure
+    assert "holds at most" in reply.prompts[1]
+    kept = [r.extra.get("reply_unposted") for r in h.listener.queue.servings() if r.extra.get("reply_unposted")]
+    assert kept and kept[0].endswith("SUMMARY AT THE END")
+    h.stop()

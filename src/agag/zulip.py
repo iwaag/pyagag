@@ -122,6 +122,19 @@ class QueueExpired(ZulipRejected):
     """The event queue is gone (BAD_EVENT_QUEUE_ID). Re-register and continue."""
 
 
+class MessageTooLong(ZulipRejected):
+    """A post longer than the server keeps, refused **before** it is sent
+    (failsafe p4). Zulip accepts an over-long message and cuts it silently
+    (`[message truncated]`): the send succeeds and the words are lost, so the
+    one honest answer at this boundary is a refusal the caller can repair —
+    shorten it, or keep the whole text somewhere and post where it is."""
+
+    def __init__(self, length: int, limit: int):
+        super().__init__(f"the message is {length} characters; this server keeps at most {limit} in one post")
+        self.length = length
+        self.limit = limit
+
+
 class ZulipTimeout(ZulipError):
     """The call hit the client-side timeout. On a long poll this is normal."""
 
@@ -374,6 +387,36 @@ class Budget:
             return self._results.get(key, (None, None))
 
 
+#: Zulip's own `MAX_MESSAGE_LENGTH` default, assumed when a server's
+#: advertised limit cannot be read and none was ever learnt.
+DEFAULT_MAX_MESSAGE_LENGTH = 10000
+#: How long a learnt limit is trusted before the server is asked again.
+LIMITS_TTL_SECONDS = 6 * 3600
+
+
+def _read_limits(path: Path | None, base_url: str) -> dict | None:
+    if path is None:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("url") != base_url or not isinstance(data.get("max_message_length"), int):
+        return None
+    return data
+
+
+def _write_limits(path: Path | None, data: dict) -> None:
+    if path is None:
+        return
+    try:
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass  # the value is kept in this client; the file is a courtesy to the next process
+
+
 class ZulipClient:
     """HTTP Basic bot client. One instance is safe for one polling thread."""
 
@@ -406,6 +449,11 @@ class ZulipClient:
         #: Shared with every client on this credential in the process (and,
         #: through the sidecar, on the host): the pause a 429 asked for.
         self.budget = Budget.for_credential(email)
+        #: Where the server's advertised limits are kept between processes
+        #: (`max_message_length`), beside the credentials file; None for a
+        #: client built without one, which keeps them in memory only.
+        self.limits_file: Path | None = None
+        self._limits: dict | None = None
         if ca_bundle:
             self._ssl = ssl.create_default_context(cafile=ca_bundle)
         else:
@@ -432,7 +480,48 @@ class ZulipClient:
         # The pause file lives beside the credentials, which is the one path
         # every process on this credential already knows.
         client.budget = Budget.for_credential(env["ZULIP_EMAIL"], Path(path).with_name(Path(path).name + ".ratelimit"))
+        client.limits_file = Path(path).with_name(Path(path).name + ".limits")
         return client
+
+    # --- what one post may hold (failsafe p4) ----------------------------------
+
+    def max_message_length(self) -> int:
+        """The most characters this server keeps in one post, as it
+        advertises it (`/register` → `max_message_length`).
+
+        Asked once, then kept: in this client, and in `<credentials>.limits`
+        so a short-lived `agentchat` on the same credential asks nothing.
+        Trusted for `LIMITS_TTL_SECONDS`, then asked again — the setting only
+        changes when an administrator restarts the server with a new one. A
+        server that cannot be asked keeps the last value learnt (however
+        old), and with none at all Zulip's own default: the smallest limit a
+        server ships with, so a post sized to it is never cut."""
+        now = time.time()
+        known = self._limits or _read_limits(self.limits_file, self.base_url)
+        if known and now - float(known.get("at") or 0) < LIMITS_TTL_SECONDS:
+            self._limits = known
+            return int(known["max_message_length"])
+        try:
+            answer = self.call("POST", "register", {"event_types": [], "fetch_event_types": ["realm"]})
+            length = int(answer["max_message_length"])
+        except (ZulipError, KeyError, TypeError, ValueError) as error:
+            log(f"could not read the server's max_message_length ({error!r}); "
+                f"using {'the last one learnt' if known else f'the default {DEFAULT_MAX_MESSAGE_LENGTH}'}")
+            return int(known["max_message_length"]) if known else DEFAULT_MAX_MESSAGE_LENGTH
+        try:
+            queue = answer.get("queue_id")
+            if queue:
+                self.call("DELETE", "events", {"queue_id": queue})
+        except ZulipError:
+            pass  # an idle queue expires by itself
+        self._limits = {"max_message_length": length, "at": now, "url": self.base_url}
+        _write_limits(self.limits_file, self._limits)
+        return length
+
+    def _fits(self, content: str) -> None:
+        limit = self.max_message_length()
+        if len(content) > limit:
+            raise MessageTooLong(len(content), limit)
 
     def call(
         self, method: str, path: str, params: dict | None = None, timeout: float = 30
@@ -687,6 +776,7 @@ class ZulipClient:
         return result.get("messages", [])
 
     def send_dm(self, user_ids: list[int], content: str) -> int:
+        self._fits(content)
         result = self.call(
             "POST", "messages",
             {"type": "direct", "to": user_ids, "content": content},
@@ -893,6 +983,7 @@ class ZulipClient:
         return self.call("DELETE", f"streams/{stream_id}")
 
     def send_to_channel(self, channel: str, topic: str, content: str) -> int:
+        self._fits(content)
         result = self.call(
             "POST", "messages",
             {"type": "stream", "to": channel, "topic": topic, "content": content},

@@ -585,22 +585,32 @@ def _served_marks(home_messages: list[dict] | None, remote: tuple[str, str],
 def _unserved_answer(messages, owner, homes, home_messages, here, here_ids=frozenset(), complete=False,
                      known_names=None):
     """`(answer, requester name, home)` for the owner's newest answer that
-    names a requester whose home has not marked it served, or None."""
+    names a requester and has no receipt, or None.
+
+    Every answer above the requester's served mark is looked at, newest
+    first: a served mark covers everything up to its id, a reconciled
+    receipt only the answer it names (failsafe p6), so an older answer
+    nobody was given stays owed under a newer one that was reconciled."""
     if owner is None or not homes:
         return None
     answers = [m for m in messages if m.get("sender_id") == owner and is_speech(m)
                and not is_ack(str(m.get("content") or "")) and not _is_progress(m.get("content"))]
     if not answers:
         return None
-    answer = answers[-1]
-    named = {match.group("name").strip() for match in MENTION.finditer(str(answer.get("content") or ""))}
     for requester_id, home in homes.items():
         names = {_sender(m) for m in messages if m.get("sender_id") == requester_id}
         names |= {name for name in [(known_names or {}).get(requester_id)] if name}
-        if not names or not (names & named):
+        if not names:
             continue
-        if not _taken_up((home_messages or {}).get(requester_id), requester_id, int(answer.get("id") or 0), here,
-                         here_ids, complete):
+        received = (home_messages or {}).get(requester_id)
+        mark = _served_marks(received, here, here_ids, complete)
+        for answer in reversed(answers):
+            answer_id = int(answer.get("id") or 0)
+            if answer_id <= mark:
+                break
+            named = {match.group("name").strip() for match in MENTION.finditer(str(answer.get("content") or ""))}
+            if not (names & named) or _reconciled(received, requester_id, answer_id, here_ids) is not None:
+                continue
             return answer, ", ".join(sorted(names)), home
     return None
 
@@ -918,29 +928,32 @@ def classify(
         names_here |= {name for name in [(requester_names or {}).get(requester_id)] if name}
         if not names_here or not (names_here & named):
             continue
-        served = _served_marks((home_messages or {}).get(requester_id), here, here_ids, complete)
-        if _taken_up((home_messages or {}).get(requester_id), requester_id, mid(last_answer), here, here_ids, complete):
+        owed = _unserved_answer(messages, owner, {requester_id: home}, home_messages, here, here_ids, complete,
+                                requester_names)
+        if owed is None:
+            served = _served_marks((home_messages or {}).get(requester_id), here, here_ids, complete)
             return (
                 "awaiting_requester",
                 f"{owner_name} answered #{mid(last_answer)}; {', '.join(sorted(names_here))} has taken it up "
                 + (f"(served up to {served})" if served >= mid(last_answer) else "(receipt reconciled)"),
                 identity, owner_name, [mid(last_answer)], last_activity,
             )
-        settled = _settlement(mid(last_answer), [*decisions(messages, owner)[0], *inherited])
+        answer = owed[0]
+        settled = _settlement(mid(answer), [*decisions(messages, owner)[0], *inherited])
         if facts is not None:
-            facts["receipt"] = _receipt_facts(last_answer, ", ".join(sorted(names_here)), home, settled)
+            facts["receipt"] = _receipt_facts(answer, ", ".join(sorted(names_here)), home, settled)
         if settled is not None:
             return (
                 "awaiting_requester",
-                f"{owner_name} answered #{mid(last_answer)}; no receipt by {', '.join(sorted(names_here))} in "
+                f"{owner_name} answered #{mid(answer)}; no receipt by {', '.join(sorted(names_here))} in "
                 f"{home[0]}/{home[1]} — settled by {settled['what']}",
-                identity, owner_name, [mid(last_answer)], last_activity,
+                identity, owner_name, [mid(answer)], last_activity,
             )
         return (
             "awaiting_delivery",
-            f"{owner_name} answered #{mid(last_answer)} naming {', '.join(sorted(names_here))}; "
-            f"not marked served in {home[0]}/{home[1]} after {_age(now, int(last_answer.get('timestamp') or 0))}",
-            identity, owner_name, [mid(last_answer)], last_activity,
+            f"{owner_name} answered #{mid(answer)} naming {', '.join(sorted(names_here))}; "
+            f"not marked served in {home[0]}/{home[1]} after {_age(now, int(answer.get('timestamp') or 0))}",
+            identity, owner_name, [mid(answer)], last_activity,
         )
     return (
         "awaiting_requester",

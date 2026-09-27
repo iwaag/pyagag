@@ -314,6 +314,9 @@ def chat_environment(
     # `agrefs` (agag.refs): the instance's `.local/` holds `refs.toml` and the
     # snapshot cache, so a run reads human references by name at a revision.
     environment[refs.HOME_VARIABLE] = str(spec.local)
+    # The listener journal (`agag.listen`): what `agentchat receipt` reads for
+    # evidence that a serving of this agent was given an answer (failsafe p6).
+    environment["AGENTCHAT_JOURNAL"] = str(spec.local / "mirror" / "listener.sqlite")
     if home is not None:
         environment[selfnote.HOME_VARIABLE] = str(selfnote.Conversation(*home[:2]))
         # The post this serving was started for (`explicit_reply` p1 step

@@ -417,6 +417,72 @@ def test_a_restart_between_the_home_reply_and_the_served_mark_writes_the_mark_wi
     h2.stop()
 
 
+def _crash_before_the_mark(tmp_path):
+    realm = realm_with_channels()
+    realm.post(HOME, "home", "my own conversation", sender_id=DEV, sender_name="Dev", quiet=True)
+    realm.post(HOME, "home", "on it", sender_id=BOT, sender_name="Mirror Bot", quiet=True)
+    h = Harness(realm, tmp_path).start()
+    h.client.trouble = lambda content: "crash" if content.startswith("[selfnote][served]") else None
+    mention = realm.post("pj-x", "workrun-1", "@**Mirror Bot** it is done", sender_id=OTHER, sender_name="autolab")
+    wait_until(lambda: h.replies(HOME, "home") == ["@**Dev**\n\nthe answer"], what="the home reply")
+    h.crash()
+    return realm, h, mention
+
+
+def _marks(h, topic="home"):
+    return [parse_served(c) for c in h.posts(HOME, topic) if c.startswith("[selfnote][served]")]
+
+
+def test_the_mark_after_a_restart_reaches_home_when_the_source_channel_was_archived_meanwhile(tmp_path):
+    """failsafe p6: m8519's work channel was archived after its close-out.
+    The receipt belongs to home, so the archive stops nothing."""
+    realm, h, mention = _crash_before_the_mark(tmp_path)
+    realm.resolve("pj-x", "workrun-1")
+    realm.archive(6)
+    h2 = Harness(realm, tmp_path).start()
+    wait_until(lambda: _marks(h2), what="the mark")
+    time.sleep(0.3)
+    assert [m[1] for m in _marks(h2)] == [mention]
+    assert h2.contexts == [] and h.replies(HOME, "home") == ["@**Dev**\n\nthe answer"], "no rerun, no second report"
+    h2.stop()
+
+
+def test_the_mark_after_a_restart_follows_a_home_resolved_meanwhile(tmp_path):
+    realm, h, mention = _crash_before_the_mark(tmp_path)
+    realm.resolve(HOME, "home")
+    h2 = Harness(realm, tmp_path).start()
+    wait_until(lambda: _marks(h2, "✔ home"), what="the mark under the ✔ name")
+    time.sleep(0.3)
+    placed = [m for m in realm.messages.values() if str(m["content"]).startswith("[selfnote][served]")]
+    assert [(m["subject"], parse_served(m["content"])[1]) for m in placed] == [("✔ home", mention)], \
+        "one mark, in the resolved home, not in a twin under the old name"
+    assert h2.contexts == []
+    h2.stop()
+
+
+def test_an_answer_its_agent_reconciled_is_not_served_again(tmp_path):
+    """`agentchat receipt --repair` wrote a reconciled receipt for exactly
+    this answer (no serving journal showed it): a restart must not buy a run
+    for it, and a newer post naming the agent is still served."""
+    realm = realm_with_channels()
+    realm.post(HOME, "home", "my own conversation", sender_id=DEV, sender_name="Dev", quiet=True)
+    realm.post(HOME, "home", "on it", sender_id=BOT, sender_name="Mirror Bot", quiet=True)
+    realm.post("pj-x", "workrun-1", "[selfnote][rootchat] mirror-bot-x/home", sender_id=BOT, sender_name="Mirror Bot",
+               quiet=True)
+    answer = realm.post("pj-x", "workrun-1", "@**Mirror Bot** it is done", sender_id=OTHER, sender_name="autolab",
+                        quiet=True)
+    realm.post(HOME, "home", f"[selfnote][receipt] #{answer} by #{answer} (accepted) in pj-x/workrun-1",
+               sender_id=BOT, sender_name="Mirror Bot", quiet=True)
+    h = Harness(realm, tmp_path).start()
+    time.sleep(0.5)
+    assert h.contexts == [], "the reconciled answer bought no run"
+    newer = realm.post("pj-x", "workrun-1", "@**Mirror Bot** one more thing", sender_id=OTHER, sender_name="autolab")
+    wait_until(lambda: h.contexts, what="the newer answer served")
+    wait_until(lambda: _marks(h), what="its mark")
+    assert _marks(h)[-1][1] == newer
+    h.stop()
+
+
 # --- the skeleton alone -------------------------------------------------------------
 
 

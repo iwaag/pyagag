@@ -246,3 +246,123 @@ def test_a_deliberate_move_adopts_even_a_conversation_somebody_else_began():
     realm.post("pj-x", "workplan-side", "@**autolab-agstudio1** plan this.", DEV)
     realm.post("pj-x", "workplan-side", f"[selfnote][rootchat-moved] front/front-a #{origin}", FRONT)
     assert "workplan-side" in {n.topic for n in tracing.trace(realm, origin, now=realm.clock + 60).nodes()}
+
+
+# --- step 3: inspecting and repairing a receipt ---------------------------------------------
+
+import json
+import sqlite3
+
+from agag import receipt as receipts
+from agag.selfnote import parse_receipt, parse_served
+
+
+def journal(tmp_path, *servings) -> str:
+    """A listener journal holding delivered servings, as `agag.listen` writes them."""
+    path = tmp_path / f"listener-{len(list(tmp_path.glob('listener-*')))}.sqlite"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE servings (id INTEGER PRIMARY KEY, route TEXT, channel TEXT, topic TEXT, trigger_id "
+               "INTEGER, state TEXT, delivered_id INTEGER, extra TEXT)")
+    for number, (route, channel, topic, trigger, delivered, inputs) in enumerate(servings, start=1):
+        db.execute("INSERT INTO servings VALUES (?, ?, ?, ?, ?, 'delivered', ?, ?)",
+                   (number, route, channel, topic, trigger, delivered, json.dumps({"inputs": inputs})))
+    db.commit()
+    db.close()
+    return str(path)
+
+
+def test_an_accepted_answer_without_a_receipt_is_reconciled_on_its_decision_and_repair_converges(tmp_path):
+    realm, m = closed()
+    m.mission_accepted()
+    found = receipts.inspect(realm, m.closeout, journal=journal(tmp_path))
+    assert (found.state, found.action, found.named) == ("missing", "reconciled", True)
+    assert found.home == f"front/{m.desk}" and found.decision["kind"] == "accepted"
+    repaired = receipts.repair(realm, found)
+    written = realm.written[-1]
+    assert (written["channel"], written["topic"]) == ("front", m.desk)
+    remote, answer, evidence, why = parse_receipt(written["content"])
+    assert (answer, evidence, why) == (m.closeout, found.decision["id"], "accepted")
+    assert repaired.state == "reconciled"
+    task = node(tracing.trace(realm, m.origin, now=realm.clock + 60), m.task_topic)
+    assert task.state == "done" and not task.receipt, "the bookkeeping is done"
+    again = receipts.repair(realm, receipts.inspect(realm, m.closeout, journal=journal(tmp_path)))
+    assert again.state == "reconciled" and realm.written[-1] == written, "a repeat writes nothing"
+
+
+def test_journal_evidence_writes_the_mark_the_listener_would_have_written(tmp_path):
+    """Crash after the reply was delivered, before its receipt: the journal
+    shows the serving was handed the thread holding the close-out."""
+    realm, m = closed()
+    path = journal(tmp_path, ("mention", m.channel, m.task_topic, m.closeout, m.closeout + 10,
+                              [{"channel": m.channel, "topic": m.task_topic, "first": m.task,
+                                "last": m.closeout, "complete": True}]))
+    found = receipts.inspect(realm, m.closeout, journal=path)
+    assert found.action == "served" and found.journal[0]["serving"] == 1
+    receipts.repair(realm, found)
+    remote, marked = parse_served(realm.written[-1]["content"])
+    assert marked == m.closeout and remote.topic == m.task_topic
+    task = node(tracing.trace(realm, m.origin, now=realm.clock + 60), m.task_topic)
+    assert task.state == "done" and not task.receipt
+
+
+def test_a_mark_is_never_written_over_an_earlier_answer_nobody_was_given(tmp_path):
+    realm, m = closed()  # the shown result was served; nothing else below
+    extra = realm.post(m.channel, m.task_topic, "@**Front** by the way, a note.", AUTOLAB)
+    last = realm.post(m.channel, m.task_topic, "@**Front** and the final word.", AUTOLAB)
+    path = journal(tmp_path, ("mention", m.channel, m.task_topic, last, last + 10,
+                              [{"channel": m.channel, "topic": m.task_topic, "first": last, "last": last,
+                                "complete": False}]))
+    found = receipts.inspect(realm, last, journal=path)
+    assert found.journal and extra in found.unmarked_before
+    assert found.action == "reconciled", "only this answer's own receipt; #extra and the close-out stay owed"
+    receipts.repair(realm, found)
+    task = node(tracing.trace(realm, m.origin, now=realm.clock + 60), m.task_topic)
+    assert task.state == "awaiting_delivery", "the earlier, ungiven answers are still owed"
+
+
+def test_no_evidence_writes_nothing_and_because_names_the_agent_s_own_relay(tmp_path):
+    realm, m = closed()
+    found = receipts.repair(realm, receipts.inspect(realm, m.closeout, journal=journal(tmp_path)))
+    assert found.action == "refuse" and found.state == "missing" and not realm.written
+    relay = realm.post("front", m.desk, "@**Omni Agent** task 1 is committed as abc1234.", FRONT)
+    stranger = realm.post("front", m.desk, "I read it too.", OMNI)
+    assert receipts.inspect(realm, m.closeout, journal=journal(tmp_path), because=stranger).action == "refuse"
+    found = receipts.repair(realm, receipts.inspect(realm, m.closeout, journal=journal(tmp_path), because=relay))
+    assert parse_receipt(realm.written[-1]["content"])[2:] == (relay, "relayed")
+    assert node(tracing.trace(realm, m.origin, now=realm.clock + 60), m.task_topic).state == "done"
+
+
+def test_an_answer_arriving_after_the_repaired_one_stays_owed(tmp_path):
+    realm, m = closed()
+    m.mission_accepted()
+    found = receipts.inspect(realm, m.closeout, journal=journal(tmp_path))
+    newer = realm.post(m.channel, m.task_topic, "@**Front** one more result: abc9999.", AUTOLAB)
+    receipts.repair(realm, found)
+    task = node(tracing.trace(realm, m.origin, now=realm.clock + 60), m.task_topic)
+    assert task.state == "awaiting_delivery" and task.receipt["answer"] == newer
+    assert receipts.inspect(realm, newer, journal=journal(tmp_path)).action == "refuse"
+
+
+def test_a_renamed_or_resolved_home_and_an_answer_not_naming_you(tmp_path):
+    realm, m = closed()
+    m.mission_accepted()
+    realm.resolve("front", m.desk, FRONT)
+    found = receipts.repair(realm, receipts.inspect(realm, m.closeout, journal=journal(tmp_path)))
+    assert found.home_live == f"✔ {m.desk}" and realm.written[-1]["topic"] == m.desk
+    assert node(tracing.trace(realm, m.origin, now=realm.clock + 60), m.task_topic).state == "done"
+    other = realm.post(m.channel, m.task_topic, "a note to nobody", AUTOLAB)
+    assert receipts.inspect(realm, other, journal=journal(tmp_path)).state == "not_owed"
+
+
+def test_agentchat_receipt_prints_and_repairs(monkeypatch, tmp_path, capsys):
+    from agag import chat
+
+    realm, m = closed()
+    m.mission_accepted()
+    monkeypatch.setattr(chat, "client_from_environment", lambda: realm)
+    monkeypatch.setenv("AGENTCHAT_JOURNAL", journal(tmp_path))
+    assert chat.main(["receipt", str(m.closeout)]) == 0
+    printed = capsys.readouterr().out
+    assert "MISSING" in printed and "decision:" in printed and "--repair writes a reconciled receipt" in printed
+    assert chat.main(["receipt", str(m.closeout), "--repair"]) == 0
+    assert "RECONCILED" in capsys.readouterr().out

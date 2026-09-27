@@ -649,6 +649,21 @@ class Listener:
                 marks[key] = message_id
         return marks
 
+    def reconciled(self) -> set[int]:
+        """Answers this bot reconciled one by one (`[selfnote][receipt]`,
+        `agentchat receipt --repair`, failsafe p6): each is dealt with, and
+        no mark covers the posts around it."""
+        from .selfnote import RECEIPT_TAG, parse_receipt
+
+        if self.self_id is None:
+            return set()
+        found = set()
+        for note in self.mirror.notes(tag=RECEIPT_TAG, sender_id=self.self_id):
+            parsed = parse_receipt(selfnote_line(RECEIPT_TAG, note.value))
+            if parsed is not None:
+                found.add(int(parsed[1]))
+        return found
+
     def _wrote_mark(self, remote: Conversation, message_id: int) -> None:
         written = self.__dict__.setdefault("_written_marks", {})
         key = served_key(self.mirror, remote, message_id)
@@ -671,7 +686,8 @@ class Listener:
             if trigger is not None and trigger.channel == entry.channel and trigger.sender_id != self.self_id \
                     and mentions_bot(trigger.content, self.bot_name):
                 marks = self.served_marks() if marks is None else marks
-                if trigger.id > marks.get((trigger.channel, bare_topic(trigger.topic)), 0):
+                if trigger.id > marks.get((trigger.channel, bare_topic(trigger.topic)), 0) \
+                        and trigger.id not in self.reconciled():
                     return trigger.topic
         index = self._live(entry.channel, entry.topic)
         if index is None and entry.route == MENTION:
@@ -737,10 +753,11 @@ class Listener:
         mention keeps it, and the mark, once written, keeps a finished
         exchange from being replayed.
         """
+        reconciled = self.reconciled()
         for message in reversed(self.mirror.messages(channel, live_name, across_resolve=False)):
             if message.id <= mark:
                 return None
-            if message.sender_id == self.self_id or not is_speech(message.as_zulip()):
+            if message.sender_id == self.self_id or not is_speech(message.as_zulip()) or message.id in reconciled:
                 continue
             if mentions_bot(message.content, self.bot_name):
                 return message

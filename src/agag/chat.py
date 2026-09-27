@@ -146,6 +146,15 @@ Examples
   # the state of each and what is owed.
   agentchat trace [<message-id>]
 
+  # An answer that named you reads as not taken up (trace: AWAITING_DELIVERY),
+  # or as settled with "no receipt": see whether you received it, where the
+  # receipt belongs and what shows you dealt with it — then repair the
+  # record from that evidence. Never write a receipt line by hand: no
+  # reader parses it.
+  agentchat receipt <answer message id>
+  agentchat receipt <answer message id> --repair
+  agentchat receipt <answer message id> --repair --because <your post that took it up>
+
   # Mark a conversation finished, once you have read it and it is finished.
   agentchat resolve <their-channel> <topic>
 
@@ -669,6 +678,28 @@ def build_parser() -> argparse.ArgumentParser:
     recheck.add_argument("message_id", type=int, help="the stopped work's anchor, or any post in its conversation")
     recheck.add_argument("--after", type=int, required=True, help="the acknowledgement of the serving reported stopped")
     recheck.add_argument("--json", action="store_true", help="the result as JSON (agag.recheck.v1)")
+    receipt = subcommands.add_parser(
+        "receipt",
+        help="whether you received an answer that named you, and repair its receipt from evidence",
+        description=(
+            "An answer that names you is owed until your listener writes its receipt in your home "
+            "conversation. This says, for the answer MESSAGE_ID: where it is, whether it names you, your home "
+            "for that conversation, and the receipt — RECEIVED (a served mark covers it), RECONCILED (a receipt "
+            "names it) or MISSING — with the evidence a repair would rest on: your listener journal showing a "
+            "delivered serving was given it; a decision recorded after it (the requester's acceptance, the "
+            "mission's acceptance, a cancellation); or --because, your own later post that took it up. "
+            "--repair writes one note into your home: the served mark the listener would have written (journal "
+            "evidence), or a reconciled receipt for exactly this answer (a decision or --because). It never "
+            "claims a serving without the journal, never covers another answer, never serves anybody, and "
+            "repeating it writes nothing. No evidence: it writes nothing and says what would count."
+        ),
+    )
+    receipt.add_argument("message_id", type=int, help="the answer that named you")
+    receipt.add_argument("--repair", action="store_true", help="write the receipt the evidence supports")
+    receipt.add_argument("--because", type=int, default=0, metavar="MESSAGE_ID",
+                         help="your own later post that took the answer up (a relay), when nothing else shows it")
+    receipt.add_argument("--journal", default=None, help=argparse.SUPPRESS)
+    receipt.add_argument("--json", action="store_true", help="the result as JSON (agag.receipt.v1)")
     trace = subcommands.add_parser(
         "trace",
         help="where a request stands: every conversation opened for it, and its state",
@@ -1026,6 +1057,21 @@ def _run(args, client: ZulipClient, out) -> int:
         else:
             print("\n".join(recheck_lines(checked)), file=out)
         return 0 if checked.verdict != "unreadable" else 1
+    if args.command == "receipt":
+        from .receipt import inspect as inspect_receipt, receipt_lines, repair as repair_receipt
+
+        found = inspect_receipt(client, int(args.message_id), journal=args.journal, because=int(args.because or 0))
+        if args.repair:
+            found = repair_receipt(client, found)
+        if args.json:
+            import json
+
+            print(json.dumps(found.as_dict(), ensure_ascii=False, indent=1), file=out)
+        else:
+            print("\n".join(receipt_lines(found, repaired=args.repair)), file=out)
+        if found.state == "unknown":
+            return 1
+        return 2 if args.repair and found.state == "missing" else 0
     if args.command == "trace":
         origin = args.message_id
         if origin is None:

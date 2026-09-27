@@ -269,3 +269,145 @@ def test_a_check_that_says_ended_beside_an_unended_serving_is_unknown_and_not_in
     assert got["display"]["state"] == "unknown" and "no post here ended" in got["display"]["reason"]
     meter = unit(found, "plan")["meter"]
     assert (meter["working"], meter["unknown"]) == (0, 1)
+
+
+# --- step 4: transitions, identity and agreement with the existing readers ----------------
+
+
+def _with(upto, *extra, base=None):
+    """The fixture cut at `upto` (or `base`, rows already extended), plus
+    made-up posts `(id, channel, topic, sender id, sender, content)`."""
+    rows = [m for m in (base or FIXTURE["messages"]) if m["id"] <= upto]
+    t = max(m["timestamp"] for m in rows)
+    for ident, channel, topic, sender_id, sender, content in extra:
+        t += 10
+        rows.append({"id": ident, "channel": channel, "topic": topic, "sender_id": sender_id,
+                     "sender_full_name": sender, "sender_realm_str": "", "timestamp": t, "content": content})
+    return rows, t
+
+
+AUTOLAB = ("autolab-agstudio1", 11)
+
+
+def test_a_revised_plan_moves_the_denominator_and_says_so():
+    # m13123 re-planned after task 1 closed: a second plan document and task 2.
+    rows, t = _with(13178,
+                    (13300, "pj-robustp1", "workplan-failsafe-p4-t2", 11, "autolab-agstudio1", "# revised plan"),
+                    (13301, "pj-robustp1", "workplan-failsafe-p4-t2", 11, "autolab-agstudio1", "[selfnote][doc] 13300"),
+                    (13302, "work-m13123", "workrun-task2-m13123", 11, "autolab-agstudio1", "[selfnote][task] 13123#2"),
+                    (13303, "work-m13123", "workrun-task2-m13123", 11, "autolab-agstudio1",
+                     "[selfnote][rootchat] pj-robustp1/workplan-failsafe-p4-t2 #13123"),
+                    (13304, "work-m13123", "workrun-task2-m13123", 11, "autolab-agstudio1", "# task 2"))
+    found = progress.card(tracing.trace(Realm(13304, rows), 13116, now=t + 5), now=t + 5, viewer_id=DEVELOPER)
+    meter = unit(found, "plan")["meter"]
+    assert (meter["completed"], meter["total"]) == (1, 2)
+    assert [r["total"] for r in meter["revisions"]] == [1, 2] and meter["note"] == "plan revised 1×: 1 → 2 tasks"
+    task2 = unit(found, "task", "13123#2")
+    assert task2["display"]["state"] == "queued"
+    # …and a task cancelled by a later revision leaves the denominator.
+    rows, t = _with(13304, (13305, "work-m13123", "workrun-task2-m13123", 11, "autolab-agstudio1",
+                            "[selfnote][state] cancelled"), base=rows)
+    found = progress.card(tracing.trace(Realm(13305, rows), 13116, now=t + 5), now=t + 5, viewer_id=DEVELOPER)
+    meter = unit(found, "plan")["meter"]
+    assert (meter["completed"], meter["total"], meter["cancelled"]) == (1, 1, 1)
+    assert unit(found, "task", "13123#2")["display"]["state"] == "cancelled"
+
+
+def test_a_result_not_yet_taken_up_is_a_delivery_wait_and_owed():
+    # #13161 names Front; Front's served mark is #13164.
+    result = traced(13116, 13162)
+    found = progress.card(result, now=at(13162) + 5, viewer_id=DEVELOPER)
+    task = unit(found, "task", "13123#1")
+    assert task["work"]["state"] == "awaiting_delivery"
+    assert task["display"]["state"] == "waiting" and "not yet taken up by Front" in task["display"]["reason"]
+    assert any("workrun-task1-m13123" in line for line in tracing.next_actions(result))
+    # Once served, the same result waits for its agreement instead.
+    task = unit(card(13116, 13164), "task", "13123#1")
+    assert task["awaiting_agreement"] and "agreement" in task["display"]["reason"]
+
+
+def test_a_completed_card_owes_nothing_by_the_existing_readers():
+    for origin, upto in ((13116, 13189),):
+        result = traced(origin, upto)
+        found = progress.card(result, now=at(upto) + 5, viewer_id=DEVELOPER)
+        assert found["state"] == "completed"
+        assert tracing.next_actions(result) == []
+        assert tracing.stall_candidates(result, now=at(upto) + 7200) == []
+
+
+def test_a_cancelled_mission_is_cancelled_and_leaves_no_pending_stage():
+    rows, t = _with(13136,
+                    (13400, "work-m13123", "workrun-task1-m13123", 11, "autolab-agstudio1", "[selfnote][state] cancelled"),
+                    (13401, "pj-robustp1", "workplan-failsafe-p4-t2", 11, "autolab-agstudio1", "[selfnote][state] cancelled"),
+                    (13402, "front", "front-failsafe-p4-t2", 15, "Front",
+                     "@**Omni Agent** cancelled as asked.\n\n`ag-post intent=report`"))
+    found = progress.card(tracing.trace(Realm(13402, rows), 13116, now=t + 5), now=t + 5, viewer_id=DEVELOPER)
+    assert unit(found, "plan")["display"]["state"] == "cancelled"
+    assert found["stages"] == []
+    assert found["state"] == "cancelled" and "cancelled by its record" in found["reason"]
+
+
+def test_identity_survives_a_rename_and_a_resolve_of_the_request():
+    rows = [dict(m) for m in FIXTURE["messages"] if m["id"] <= 13189]
+    for m in rows:
+        if m["topic"] == "front-failsafe-p4-t2":
+            m["topic"] = "front-failsafe-p4-t2-renamed"
+    rows.append({"id": 13190, "channel": "front", "topic": "front-failsafe-p4-t2-renamed", "sender_id": 6,
+                 "sender_full_name": "Notification Bot", "sender_realm_str": "zulipinternal",
+                 "timestamp": at(13189) + 5, "content": "@_**Developer|8** has marked this topic as resolved."})
+    result = tracing.trace(Realm(13190, rows), 13116, now=at(13189) + 10)
+    found = progress.card(result, now=at(13189) + 10, viewer_id=DEVELOPER)
+    assert found["origin"] == 13116 and found["anchor"] == 13116
+    assert found["root"]["topic"] == f"{RESOLVED_TOPIC_PREFIX}front-failsafe-p4-t2-renamed"
+    assert found["state"] == "completed"
+
+
+def test_a_late_answer_after_completion_reopens_nothing_but_is_shown_owed():
+    rows, t = _with(13189, (13500, "work-m13123", "workrun-task1-m13123", 11, "autolab-agstudio1",
+                            "@**Front** one more note on the finished task.\n\n`ag-post intent=report`"))
+    result = tracing.trace(Realm(13500, rows), 13116, now=t + 5)
+    found = progress.card(result, now=t + 5, viewer_id=DEVELOPER)
+    task = unit(found, "task", "13123#1")
+    assert task["work"]["record"] == "accepted" and task["work"]["state"] == "awaiting_delivery"
+    assert task["display"]["state"] == "waiting" and found["state"] == "waiting"
+    assert unit(found, "plan")["meter"]["completed"] == 1  # the record still says agreed
+
+
+def test_a_stop_then_a_new_serving_reads_the_new_serving_not_the_old_check():
+    # #13149 Observer's stop request; #13155 the resumed serving's ack.
+    stopped = traced(13116, 13149)
+    task = node(stopped, "workrun-task1-m13123")
+    now = at(13149) + 5
+    report = {"verdict": "stopped", "why": "the process exited (-9)", "observed_at": now - 2,
+              "subject": {"ack": task.ack}}
+    recovery = {task.anchor: {"kind": "stopped", "state": "recovering", "open": True, "fact": "stopped"}}
+    got = unit(progress.card(stopped, now=now, health={task.anchor: report}, recovery=recovery,
+                             viewer_id=DEVELOPER), "task")
+    assert got["display"]["state"] == "stopped"
+    resumed = traced(13116, 13156)
+    task2 = node(resumed, "workrun-task1-m13123")
+    assert task2.ack == 13155 and task2.ack != task.ack
+    now = at(13156) + 5
+    rescued = {task2.anchor: {"kind": "stopped", "state": "rescued", "open": False}}
+    got = unit(progress.card(resumed, now=now, health={task2.anchor: report}, recovery=rescued,
+                             viewer_id=DEVELOPER), "task")
+    # The old check is of #13135's serving: not applied; the resumed serving works.
+    assert got["execution"]["health"] is None and got["display"]["state"] == "working"
+    assert got["recovery"]["state"] == "rescued"
+
+
+def test_two_requests_sharing_an_agent_keep_their_own_counts():
+    a, b = card(11522, 11770), card(11711, 11770)
+    assert a["origin"] != b["origin"]
+    plans_a = {u["label"] for u in _all(a) if u["kind"] == "plan"}
+    plans_b = {u["label"] for u in _all(b) if u["kind"] == "plan"}
+    assert plans_a == {"mission m11579 (aisvgs)"} and plans_b == {"mission m11741 (aisvgs)"}
+    assert unit(a, "plan")["meter"]["completed"] == 1 and unit(b, "plan")["meter"]["completed"] == 0
+
+
+def _all(found):
+    stack = [found["root"]]
+    while stack:
+        u = stack.pop()
+        yield u
+        stack.extend(u["children"])

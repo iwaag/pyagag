@@ -445,9 +445,11 @@ def _stages(root: dict, now: int) -> list[dict]:
     delivered_runs = {r["value"] for r in root["records"] if r["tag"] == "delivered"}
     syncs = [r for u in units for r in u["records"] if r["tag"] == "sagesync"]
     for unit in units:
-        if unit["kind"] == "plan" and unit.get("meter"):
+        if unit["kind"] == "plan" and unit.get("meter") and unit["work"]["state"] != "cancelled":
+            # A cancelled plan owes no agreement and no acceptance: its
+            # record ends it.
             meter = unit["meter"]
-            if meter["known"]:
+            if meter["known"] and meter["total"]:
                 stages.append({"stage": "tasks_agreed", "unit": unit["anchor"], "label": unit["label"],
                                "status": "done" if meter["completed"] >= meter["total"] else "pending",
                                "detail": f"{meter['completed']}/{meter['total']} task(s) agreed"})
@@ -512,8 +514,11 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
             and not any(s["status"] == "pending" for s in stages):
         # Every unit of work is finished by record, every stage is recorded,
         # and the conversations around them are answered.
-        state = "completed"
-        reason = "every unit of work is finished by its record"
+        if all(u["display"]["state"] == "cancelled" for u in work):
+            state, reason = "cancelled", "every unit of work was cancelled by its record"
+        else:
+            state = "completed"
+            reason = "every unit of work is finished by its record"
     latest = max((u["latest_work_at"] or 0 for u in units), default=0) or None
     if not source_live:
         reason = f"last known ({source_note or 'the source is not live'}): {reason}"

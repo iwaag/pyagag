@@ -555,3 +555,15 @@ def test_an_earlier_refresh_of_the_same_sage_is_not_this_runs():
     found = progress.card(result, now=t_at[13345], viewer_id=DEVELOPER, syncs=earlier)
     stage = next(s for s in found["stages"] if s["stage"] == "knowledge_refreshed")
     assert stage["status"] == "pending" and stage["detail"] == "the research is not accepted yet"
+
+
+def test_a_mission_done_by_record_is_accepted_while_its_last_word_waits_for_delivery():
+    # m13312 at #13403: `[state] done` (#13310's workplan) and autolab's last
+    # post naming Front not yet served.
+    t_at = {m["id"]: m["timestamp"] for m in TRIAL["messages"]}
+    upto = max(i for i in t_at if i <= 13512)
+    result = tracing.trace(Realm(upto, TRIAL["messages"]), 13271, now=t_at[upto] + 5)
+    found = progress.card(result, now=t_at[upto] + 5, viewer_id=DEVELOPER)
+    plan = unit(found, "plan", "m13312")
+    assert plan["work"]["record"] == "done"
+    assert {s["stage"]: s["status"] for s in found["stages"]}["plan_accepted"] == "done"

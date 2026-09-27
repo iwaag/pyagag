@@ -491,11 +491,15 @@ def _stages(root: dict, now: int, syncs_elsewhere: list[dict] | None = None) -> 
                                "status": "done" if meter["completed"] >= meter["total"] else "pending",
                                "detail": f"{meter['completed']}/{meter['total']} task(s) agreed"})
             accepted = next((r for r in unit["records"] if r["tag"] == "acceptance"), None)
+            # The record decides, not the conversation's state: a done mission
+            # whose owner's last word still waits for delivery reads
+            # `awaiting_delivery` (step 5's repeat, m13665).
+            recorded = unit["work"]["state"] == "done" or (unit["work"]["record"] or "") in ("done", "accepted")
             stages.append({"stage": "plan_accepted", "unit": unit["anchor"], "label": unit["label"],
-                           "status": "done" if unit["work"]["state"] == "done" else "pending",
+                           "status": "done" if recorded else "pending",
                            "evidence": accepted["id"] if accepted else None,
                            "detail": (f"accepted: {accepted['value']}" if accepted else
-                                      "done" if unit["work"]["state"] == "done" else "not accepted yet")})
+                                      "done" if recorded else "not accepted yet")})
         if unit["kind"] == "routine_run":
             finished = unit["work"]["state"] == "done"
             stages.append({"stage": "run_ended", "unit": unit["anchor"], "label": _bare(unit["topic"]),

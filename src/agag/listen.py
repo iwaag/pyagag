@@ -78,6 +78,7 @@ mirror is public conversations only.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 import time
@@ -119,6 +120,10 @@ RETRY_CAP_SECONDS = 300.0
 #: again (failsafe p3): long enough for the failure line to be read as
 #: what it is, short against the monitor's `failed` threshold.
 REPLY_RETRY_SECONDS = 20.0
+#: Trial faults (`Listener._fault_exit`), one file each under the instance's
+#: `.local/faults/`; nothing creates them but a person.
+FAULTS_DIR = "faults"
+EXIT_BEFORE_RECEIPT = "exit-before-receipt"
 
 __all__ = [
     "IDLE_SECONDS",
@@ -575,6 +580,8 @@ class Listener:
         self.is_ack = is_ack or (lambda content: False)
         self.log = log
         self.status = status if status is not None else StatusWriter(default_status_path(), log=log)
+        #: How a trial fault ends the process (`_fault_exit`); a test replaces it.
+        self.exit = os._exit
         self.idle_seconds = float(idle_seconds)
         self.max_attempts = int(max_attempts)
         self.retry_seconds = float(retry_seconds)
@@ -993,12 +1000,29 @@ class Listener:
                      f"serving the input again in {self.reply_retry_seconds:g}s")
             return
         if record is not None and record.state == DELIVERED:
+            self._fault_exit(EXIT_BEFORE_RECEIPT, entry)
             self._after_delivery(entry, record)
         elif record is not None and record.state == RECEIVED:
             # The handler did not go through `serve_topic` (a participant
             # that posts on its own): the record says only that it ran.
             journal.queue.update_serving(journal.id, state=EXECUTED)
         self._finish(entry)
+
+    def _fault_exit(self, name: str, entry: Entry) -> None:
+        """A trial fault (failsafe p6), created only by a person and used
+        once: `<instance .local>/faults/exit-before-receipt` ends the process
+        right after a confirmed delivery, before its receipts — the crash a
+        restart must finish without a rerun or a second report."""
+        path = self.queue.path.parent.parent / FAULTS_DIR / name
+        if not path.exists():
+            return
+        try:
+            path.unlink()
+        except OSError:
+            return
+        self.log(f"fault {name}: exiting after the delivery of {entry.route} {entry.channel!r}/{entry.topic!r}, "
+                 "before its receipt")
+        self.exit(70)
 
     def _finish(self, entry: Entry) -> None:
         if self.queue.finish(entry):

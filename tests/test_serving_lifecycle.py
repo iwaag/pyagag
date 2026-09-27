@@ -483,6 +483,39 @@ def test_an_answer_its_agent_reconciled_is_not_served_again(tmp_path):
     h.stop()
 
 
+def test_the_exit_before_receipt_fault_is_one_shot_and_the_restart_finishes_the_receipt(tmp_path):
+    """failsafe p6's live trial fault, on the real listener: the process ends
+    after the reply is delivered and before its receipt; the next start
+    writes the receipt with no rerun and no second report."""
+    realm = realm_with_channels()
+    realm.post(HOME, "home", "my own conversation", sender_id=DEV, sender_name="Dev", quiet=True)
+    realm.post(HOME, "home", "on it", sender_id=BOT, sender_name="Mirror Bot", quiet=True)
+    h = Harness(realm, tmp_path)
+    faults = tmp_path / "faults"
+    faults.mkdir()
+    (faults / "exit-before-receipt").write_text("")
+
+    def exit_now(code):
+        h.listener.stop()
+        raise Crash()
+
+    h.listener.exit = exit_now
+    h.start()
+    mention = realm.post("pj-x", "workrun-1", "@**Mirror Bot** it is done", sender_id=OTHER, sender_name="autolab")
+    wait_until(lambda: h.replies(HOME, "home") == ["@**Dev**\n\nthe answer"], what="the home reply")
+    wait_until(lambda: not (faults / "exit-before-receipt").exists(), what="the fault consumed")
+    time.sleep(0.3)
+    assert not _marks(h), "the process ended before the receipt"
+    assert any("fault exit-before-receipt" in line for line in h.log)
+    h.crash()
+    h2 = Harness(realm, tmp_path).start()
+    wait_until(lambda: _marks(h2), what="the mark")
+    time.sleep(0.3)
+    assert [m[1] for m in _marks(h2)] == [mention]
+    assert h2.contexts == [] and h.replies(HOME, "home") == ["@**Dev**\n\nthe answer"]
+    h2.stop()
+
+
 # --- the skeleton alone -------------------------------------------------------------
 
 

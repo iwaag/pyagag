@@ -449,3 +449,34 @@ def test_a_card_is_about_the_deepest_unit_not_a_pass_through():
     assert found["state"] == "working"
     assert unit(found, "plan", "m13123")["passthrough"] is True
     assert found["focus"] == unit(found, "task", "13123#1")["anchor"]
+
+
+TRIAL = json.loads((Path(__file__).parent / "fixtures" / "progress_p1_trial.json").read_text("utf-8"))
+
+
+def test_an_answer_owed_to_a_runs_owner_is_held_by_that_owner_not_nobody():
+    """Step 5's trial, #13375–#13382: worldtrend's routine run ended its
+    serving saying the work goes on, while task 13312#1's close-out (#13373,
+    naming Front) waited in Front's listener behind the growbox serving.
+    Observer read "nobody holds it" and asked Front (#13384). Front's listener
+    owed that serving: the run is held by its owner."""
+    t_at = {m["id"]: m["timestamp"] for m in TRIAL["messages"]}
+    result = tracing.trace(Realm(13381, TRIAL["messages"]), 13271, now=t_at[13381])
+    task = node(result, "workrun-task1-m13312")
+    assert task.state == "awaiting_delivery" and task.owed_to == ["Front"]
+    run = node(result, "routinerun-20260927T092542Z")
+    assert run.execution == "ended" and run.holder == "owner"
+    later = t_at[13375] + tracing.THRESHOLDS["unheld"] + 60
+    assert not [c for c in tracing.stall_candidates(result, now=later) if c.kind == "unheld"]
+    # The delivery itself stays owed, and is found if it never happens.
+    overdue = t_at[13373] + tracing.THRESHOLDS["undelivered"] + 5
+    assert any(c.kind == "undelivered" for c in tracing.stall_candidates(result, now=overdue))
+
+
+def test_a_finished_task_resolved_before_its_close_out_was_served_is_not_resolved_live():
+    t_at = {m["id"]: m["timestamp"] for m in TRIAL["messages"]}
+    result = tracing.trace(Realm(13381, TRIAL["messages"]), 13271, now=t_at[13381])
+    task = node(result, "workrun-task1-m13312")
+    assert task.topic.startswith(RESOLVED_TOPIC_PREFIX) and task.note_state == "completed"
+    kinds = {c.kind for c in tracing.stall_candidates(result, now=t_at[13374] + 120) if c.anchor == task.anchor}
+    assert "resolved_live" not in kinds

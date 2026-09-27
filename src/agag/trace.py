@@ -206,6 +206,9 @@ class Node:
     ending_intent: str = ""
     ending_to: int = 0
     ack_at: int = 0
+    #: Whom this conversation's newest answer is owed to while it is
+    #: `awaiting_delivery`: their listener owes a serving (progress_panel p1).
+    owed_to: list[str] = field(default_factory=list)
     #: The record notes in this conversation, oldest first (`RECORD_TAGS`,
     #: plus `finish` for a routine run's end): `{tag, value, id, at, by}`.
     records: list[dict] = field(default_factory=list)
@@ -469,6 +472,12 @@ def _holder(node: "Node", ending: dict | None) -> str:
         return "owner"
     if node.waiting_on or any(_holds(child) for child in node.children):
         return "delegate"
+    if node.owner and _owed_below(node, node.owner):
+        # An answer below is addressed to this conversation's owner and its
+        # listener has not served it yet: the owner holds the next move
+        # (progress_panel p1 step 5: a routine run whose task result was
+        # queued behind Front's other serving read "nobody holds it").
+        return "owner"
     if node.state in ("awaiting_delivery", "failed") or node.note_state == HELD_WORD:
         return "requester"
     if node.state == "awaiting_human":
@@ -483,6 +492,16 @@ def _holder(node: "Node", ending: dict | None) -> str:
     if node.state in ("awaiting_requester", "answered"):
         return "requester"
     return "unknown"
+
+
+def _owed_below(node: "Node", name: str) -> bool:
+    stack = list(node.children)
+    while stack:
+        child = stack.pop()
+        if child.state == "awaiting_delivery" and name in child.owed_to:
+            return True
+        stack.extend(child.children)
+    return False
 
 
 def _is_failure(content: str) -> bool:
@@ -921,6 +940,14 @@ def _records(messages: list[dict] | None, owner: int | None) -> list[dict]:
     return found
 
 
+def _owed_names(messages, owner, homes, home_messages, here, receipts_from, names) -> list[str]:
+    if not messages:
+        return []
+    owed = _unserved_answer(messages, owner, homes, home_messages, here, frozenset(int(m.get("id") or 0) for m in messages),
+                            len(messages) < HISTORY, receipts_from, names)
+    return owed[1].split(", ") if owed else []
+
+
 def _identity_id(messages: list[dict]) -> int:
     for message in messages:
         for tag in IDENTITY_TAGS:
@@ -1111,6 +1138,8 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
                 if (value := parse_note(m.get("content"), OPFAIL_TAG)) is not None
             ],
             records=_records(messages, owner_id),
+            owed_to=_owed_names(messages, owner_id, homes, home_messages, key, receipts_from,
+                                {requester: name for requester, name, _ in requested}) if state == "awaiting_delivery" else [],
             taken_up=state == "awaiting_requester" and _answer_taken_up(
                 messages, owner_id, homes, home_messages, key, receipts_from,
                 {requester: name for requester, name, _ in requested}),
@@ -1382,7 +1411,12 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
                 node.last_activity, tuple(node.evidence), anchor=node.anchor,
             ))
         if resolved and node.state in ("queued", "executing", "awaiting_delivery", "awaiting_requester") \
-                and overdue("resolved_live", node.last_activity):
+                and node.note_state not in DONE_WORDS and overdue("resolved_live", node.last_activity):
+            # A ✔ on work its record calls finished is no question: a close-out
+            # answer still owed to its requester is `undelivered`'s, above
+            # (progress_panel p1 step 5: every autolab task resolves itself
+            # right after its close-out post, and a busy requester's listener
+            # turned each one into a judged incident).
             found.append(Candidate(
                 "resolved_live", node.channel, node.topic, node.identity,
                 f"✔ while {node.state.replace('_', ' ')}: {node.detail}",

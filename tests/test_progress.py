@@ -529,3 +529,19 @@ def test_a_sage_refresh_recorded_in_another_request_counts_for_its_study():
     other = [{**elsewhere[0], "value": "aisvgs 13e0d6e project=aisvgs findings=12"}]
     found = progress.card(result, now=now, viewer_id=DEVELOPER, syncs=other)
     assert next(s for s in found["stages"] if s["stage"] == "knowledge_refreshed")["status"] == "pending"
+
+
+def test_a_run_closed_by_hand_without_its_end_record_is_not_ended():
+    t_at = {m["id"]: m["timestamp"] for m in TRIAL["messages"]}
+    rows = [dict(m) for m in TRIAL["messages"] if m["id"] <= 13560]
+    for m in rows:
+        if m["topic"] == "routinerun-20260927T092403Z":
+            pass
+    rows.append({"id": 13585, "channel": "routine-study-growbox", "topic": "routinerun-20260927T092403Z",
+                 "sender_id": 6, "sender_full_name": "Notification Bot", "sender_realm_str": "zulipinternal",
+                 "timestamp": max(t_at.values()) + 5, "content": "@_**Front|15** has marked this topic as resolved."})
+    now = max(t_at.values()) + 10
+    found = progress.card(tracing.trace(Realm(13585, rows), 13270, now=now), now=now, viewer_id=DEVELOPER)
+    run = unit(found, "routine_run")
+    assert run["resolved"] and run["display"]["state"] == "unknown" and "without its end record" in run["display"]["reason"]
+    assert {s["stage"]: s["status"] for s in found["stages"]}["run_ended"] == "pending"

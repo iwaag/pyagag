@@ -234,6 +234,12 @@ def _display(node: Node, kind: str, execution: dict, recovery: dict | None, *, n
         return "awaiting_you", f"held by a person: {recovery.get('held_why') or 'taken over'}", "you"
     if state == "unobservable":
         return "unknown", node.detail or "the conversation could not be read", ""
+    if kind == "routine_run" and node.topic.startswith(RESOLVED_TOPIC_PREFIX) and node.execution != "open":
+        # A ✔ closes the conversation; only the finish block ends the run and
+        # hands its report home (step 5: Front resolved the growbox run by
+        # hand, `agentchat resolve --anyway`, after writing "Run complete.").
+        return "unknown", ("closed with ✔ but without its end record, so whether its report reached the "
+                           "request is not on record (`agrunfinish` records the end)"), owner
     if state == "failed":
         return "stopped", node.detail or "the newest word is a failure notice", requester
     if verdict == "stopped":

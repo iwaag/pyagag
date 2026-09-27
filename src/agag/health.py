@@ -183,15 +183,28 @@ def serving_stage(queue: Path, ack: int, channel: str, topic: str,
     }
 
 
+#: Beside a live record, a trial fault a person injected into that run
+#: (`{"fault": …, "at": …}`), written by the owner's fault hook (failsafe p3).
+INJECTED_SUFFIX = ".injected"
+
+
+def _injected(path: Path) -> dict | None:
+    try:
+        doc = json.loads(path.with_suffix(INJECTED_SUFFIX).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
 def _matching(directory: Path, ack: int, channel: str, topic: str) -> tuple[dict | None, list[dict]]:
     """The record of the serving acked by `ack`, and the records of the same
     conversation that belong to other servings (never applied)."""
     mine, others = None, []
-    for _, doc in execution_records(directory):
+    for path, doc in execution_records(directory):
         serving = doc.get("serving") or {}
         if ack and int(serving.get("ack") or 0) == int(ack):
             if mine is None:
-                mine = doc
+                mine = {**doc, "injected": _injected(path)}
             continue
         if channel and serving.get("channel") == channel and _bare(str(serving.get("topic") or "")) == _bare(topic):
             others.append(doc)
@@ -237,7 +250,8 @@ def probe(directory: Path, *, ack: int = 0, channel: str = "", topic: str = "", 
     report["run"] = {"harness": record.get("harness"), "pid": record.get("pid"), "started_at": record.get("started_at"),
                      "deadline_at": record.get("deadline_at"), "ended_at": record.get("ended_at"),
                      "exit_code": record.get("exit_code"), "outcome": record.get("outcome"),
-                     "record_written_at": record.get("written_at"), "role": (record.get("serving") or {}).get("role")}
+                     "record_written_at": record.get("written_at"), "role": (record.get("serving") or {}).get("role"),
+                     "injected": record.get("injected")}
     last_event = record.get("last_event_at")
     # Work, not any event (failsafe p3). A record from before the split has
     # no `last_work_at`: its events are all it has.

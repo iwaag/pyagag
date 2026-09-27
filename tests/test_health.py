@@ -301,3 +301,13 @@ def test_the_process_table_reads_cpu_time():
     assert health._cpu_seconds("2-00:00:01") == 172801.0
     table_now = health.process_table()
     assert table_now and all("cpu" in row for row in table_now.values())
+
+
+def test_a_trial_fault_beside_the_record_is_reported(tmp_path):
+    record(tmp_path / "exec", "a.json", last_event_at=1100.0)
+    (tmp_path / "exec" / "a.injected").write_text(json.dumps({"fault": "silent-exit", "at": 1101.0}))
+    report = probe(tmp_path, 1200.0, table((1, 0, 9999, "launchd")))
+    assert report["verdict"] == "stopped" and report["run"]["injected"] == {"fault": "silent-exit", "at": 1101.0}
+    record(tmp_path / "exec", "a.json", last_event_at=1100.0)
+    (tmp_path / "exec" / "a.injected").unlink()
+    assert probe(tmp_path, 1200.0, table((1, 0, 9999, "launchd")))["run"]["injected"] is None

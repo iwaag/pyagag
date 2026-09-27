@@ -545,3 +545,13 @@ def test_a_run_closed_by_hand_without_its_end_record_is_not_ended():
     run = unit(found, "routine_run")
     assert run["resolved"] and run["display"]["state"] == "unknown" and "without its end record" in run["display"]["reason"]
     assert {s["stage"]: s["status"] for s in found["stages"]}["run_ended"] == "pending"
+
+
+def test_an_earlier_refresh_of_the_same_sage_is_not_this_runs():
+    t_at = {m["id"]: m["timestamp"] for m in TRIAL["messages"]}
+    result = tracing.trace(Realm(13345, TRIAL["messages"]), 13270, now=t_at[13345])
+    earlier = [{"tag": "sagesync", "value": "growbox dd59ce11eed9 project=growbox findings=0", "id": 11659,
+                "at": t_at[13345] - 3600, "by": 24}]
+    found = progress.card(result, now=t_at[13345], viewer_id=DEVELOPER, syncs=earlier)
+    stage = next(s for s in found["stages"] if s["stage"] == "knowledge_refreshed")
+    assert stage["status"] == "pending" and stage["detail"] == "the research is not accepted yet"

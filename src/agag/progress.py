@@ -514,14 +514,18 @@ def _stages(root: dict, now: int, syncs_elsewhere: list[dict] | None = None) -> 
                 projects = {u["channel"][len("pj-"):] for u in plans if u["channel"].startswith("pj-")}
                 projects.add(unit["channel"][len(STUDY_ROUTINE_PREFIX):])
                 in_tree = {r["id"] for u in units for r in u["records"] if r["tag"] == "sagesync"}
-                after = [s for s in syncs if (not research_done or s["at"] >= research_done)
+                # Only a refresh after this run's research was accepted: an
+                # earlier refresh of the same sage is not this run's (step 5's
+                # repeat read the first trial's refresh as done at once).
+                after = [s for s in syncs if research_done and s["at"] >= research_done
                          and (s["id"] in in_tree or _project_of(s.get("value", "")) in projects)]
                 stages.append({"stage": "knowledge_refreshed", "unit": unit["anchor"],
                                "label": unit["channel"][len("routine-"):],
                                "status": "done" if after else "pending",
                                "evidence": after[-1]["id"] if after else None,
                                "detail": (f"sage synced: {after[-1]['value']}" if after else
-                                          "no sage refresh is recorded after the research was accepted")})
+                                          "no sage refresh is recorded after the research was accepted"
+                                          if research_done else "the research is not accepted yet")})
     order = ("tasks_agreed", "plan_accepted", "run_ended", "report_delivered", "knowledge_refreshed")
     return sorted(stages, key=lambda s: order.index(s["stage"]))
 

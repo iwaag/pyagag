@@ -480,3 +480,19 @@ def test_a_finished_task_resolved_before_its_close_out_was_served_is_not_resolve
     assert task.topic.startswith(RESOLVED_TOPIC_PREFIX) and task.note_state == "completed"
     kinds = {c.kind for c in tracing.stall_candidates(result, now=t_at[13374] + 120) if c.anchor == task.anchor}
     assert "resolved_live" not in kinds
+
+
+def test_a_question_to_a_person_in_the_request_is_the_cards_reason():
+    t_at = {m["id"]: m["timestamp"] for m in TRIAL["messages"] if True}
+    rows = TRIAL["messages"]
+    upto = max(i for i in t_at if i <= 13486)
+    result = tracing.trace(Realm(upto, rows), 13270, now=t_at[upto] + 5)
+    from agag.outstanding import read_requests
+    from agag.agent import is_ack
+
+    history = [Realm(upto, rows)._shape(m) for m in rows if m["id"] <= upto and m["topic"] == "front-desk-20260927-pp1-growbox"]
+    pending = [{"id": r.id, "to": r.to, "to_name": r.to_name, "ask": r.ask}
+               for r in read_requests(history, is_ack=is_ack).pending]
+    assert pending and pending[-1]["to"] == 9
+    found = progress.card(result, now=t_at[upto] + 5, viewer_id=DEVELOPER, pending=pending)
+    assert found["state"] == "waiting" and found["reason"].startswith(f"#{pending[0]['id']} asks")

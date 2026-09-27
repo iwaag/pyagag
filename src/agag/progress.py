@@ -515,6 +515,12 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
         reason, next_actor = f"not complete: {pending_stage['detail']} ({pending_stage['label']})", ""
     else:
         focus = _focus(root, deciding, state)
+        if state == "waiting" and pending and root["display"]["state"] == "waiting" \
+                and not root["topic"].startswith(RESOLVED_TOPIC_PREFIX):
+            # A question to a person in the request's own conversation is what
+            # the request waits for, before anything deeper (step 5: "the answer
+            # is not yet taken up by Front" hid "#13477 asks Omni Agent").
+            focus = root
         reason = focus["display"]["reason"] if focus else ""
         next_actor = focus["display"]["next"] if focus else ""
     work = [u for u in units if u["kind"] in WORK_KINDS]

@@ -184,3 +184,19 @@ def test_naming_the_accepting_post_instead_of_the_mission_is_refused_with_how_to
     with pytest.raises(AcceptanceRefused) as refused:
         accept_mission(Client(realm, FRONT), accepted, evidence=accepted)
     assert "Name the mission first" in str(refused.value) and f"--evidence {accepted}" in str(refused.value)
+
+
+def test_baseline_front_s_own_agreement_is_refused_to_front_but_accepted_from_autolab(world):
+    """failsafe p5 step 1 (progress_panel p1 trial B, #13798/#13804): the
+    runner (Front) was entrusted with the acceptance and agreed in the plan's
+    conversation. `agentchat accept` as Front refuses that post as "your own
+    post"; autolab's close-out records the very same post as the acceptance.
+    The route decided the outcome, not who held the decision."""
+    realm, mission, _ = world
+    agreed = post(realm, "pj-x", "workplan-average", "Both tasks are in; that completes the mission.", FRONT)
+    before = len(realm.messages)
+    with pytest.raises(AcceptanceRefused, match="your own post"):
+        accept_mission(Client(realm, FRONT), mission, evidence=agreed)
+    assert len(realm.messages) == before
+    done = accept_mission(Client(realm, AUTOLAB), mission, evidence=agreed, resolve=False)
+    assert (done.evidence, done.by_id) == (agreed, FRONT)

@@ -567,3 +567,25 @@ def test_a_mission_done_by_record_is_accepted_while_its_last_word_waits_for_deli
     plan = unit(found, "plan", "m13312")
     assert plan["work"]["record"] == "done"
     assert {s["stage"]: s["status"] for s in found["stages"]}["plan_accepted"] == "done"
+
+
+TRIAL_B = json.loads((Path(__file__).parent / "fixtures" / "progress_p1_trialB.json").read_text("utf-8"))
+
+
+def test_a_plan_opened_beside_the_run_still_dates_the_studys_refresh():
+    """Step 5's repeat, worldtrend: Front's desk serving opened the workplan
+    itself (#13661) and then the run, so the run holds no plan; the sage was
+    refreshed (#13824) after the mission's acceptance (#13816)."""
+    rows = TRIAL_B["messages"]
+    t_at = {m["id"]: m["timestamp"] for m in rows}
+    upto = max(i for i in t_at if i <= 13830)
+    now = t_at[upto] + 5
+    result = tracing.trace(Realm(upto, rows), 13645, now=now)
+    syncs = [{"tag": "sagesync", "value": "worldtrend 055e58037598 project=worldtrend findings=4", "id": 13824,
+              "at": t_at.get(13824, now - 10), "by": 24}]
+    found = progress.card(result, now=now, viewer_id=DEVELOPER, syncs=syncs)
+    run = unit(found, "routine_run")
+    assert not [u for u in run["children"] if u["kind"] == "plan"]
+    stages = {s["stage"]: s["status"] for s in found["stages"]}
+    assert stages["plan_accepted"] == "done" and stages["knowledge_refreshed"] == "done"
+    assert stages["run_ended"] == "pending"

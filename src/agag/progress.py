@@ -512,7 +512,11 @@ def _stages(root: dict, now: int, syncs_elsewhere: list[dict] | None = None) -> 
                            "detail": "the run's report is in the request's conversation" if home
                            else "the run's report has not been delivered home"})
             if unit["channel"].startswith(STUDY_ROUTINE_PREFIX):
-                plans = [u for u in _walk(unit) if u["kind"] == "plan"]
+                # The run's own plans; a plan opened for the request beside the
+                # run instead of from it (step 5's repeat: Front's desk serving
+                # opened the workplan itself) is still this study's research.
+                plans = [u for u in _walk(unit) if u["kind"] == "plan"] \
+                    or [u for u in units if u["kind"] == "plan"]
                 research_done = max((r["at"] for u in plans for r in u["records"] if r["tag"] == "acceptance"),
                                     default=0)
                 projects = {u["channel"][len("pj-"):] for u in plans if u["channel"].startswith("pj-")}

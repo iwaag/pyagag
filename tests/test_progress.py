@@ -508,3 +508,24 @@ def test_a_receipt_written_in_another_conversation_of_the_request_is_a_receipt()
     after = tracing.trace(Realm(13448, TRIAL["messages"]), 13270, now=t_at[13448])
     task = node(after, "workrun-task1-m13292")
     assert task.state == "done" and task.note_state in ("completed", "accepted")
+
+
+def test_a_sage_refresh_recorded_in_another_request_counts_for_its_study():
+    """Step 5's growbox run: the guide's fixed `study-growbox` topic belongs to
+    the request that established the study, so archsage's `sagesync` (#13513)
+    landed outside this request's tree. It is the same sage's refresh after
+    this research's acceptance, matched by its project."""
+    t_at = {m["id"]: m["timestamp"] for m in TRIAL["messages"]}
+    result = tracing.trace(Realm(13560, TRIAL["messages"]), 13270, now=t_at[13560 - 1] if 13559 in t_at else None)
+    now = max(t for i, t in t_at.items() if i <= 13560) + 5
+    found = progress.card(result, now=now, viewer_id=DEVELOPER)
+    stage = next(s for s in found["stages"] if s["stage"] == "knowledge_refreshed")
+    assert stage["status"] == "pending"
+    elsewhere = [{"tag": "sagesync", "value": "growbox 1fe1829b9d1a project=growbox findings=1", "id": 13513,
+                  "at": now - 1, "by": 24}]
+    found = progress.card(result, now=now, viewer_id=DEVELOPER, syncs=elsewhere)
+    stage = next(s for s in found["stages"] if s["stage"] == "knowledge_refreshed")
+    assert stage["status"] == "done" and stage["evidence"] == 13513
+    other = [{**elsewhere[0], "value": "aisvgs 13e0d6e project=aisvgs findings=12"}]
+    found = progress.card(result, now=now, viewer_id=DEVELOPER, syncs=other)
+    assert next(s for s in found["stages"] if s["stage"] == "knowledge_refreshed")["status"] == "pending"

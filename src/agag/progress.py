@@ -456,7 +456,12 @@ def card_state(units: Iterable[dict]) -> str:
     return "unknown"
 
 
-def _stages(root: dict, now: int) -> list[dict]:
+def _project_of(value: str) -> str:
+    match = re.search(r"(?:^|\s)project=(\S+)", value or "")
+    return match.group(1) if match else ""
+
+
+def _stages(root: dict, now: int, syncs_elsewhere: list[dict] | None = None) -> list[dict]:
     """What must still be recorded before the request is complete, one
     line each, in the order it happens: every plan's agreements and its
     acceptance, every routine run's end and its report delivered home, and
@@ -465,6 +470,11 @@ def _stages(root: dict, now: int) -> list[dict]:
     units = list(_walk(root))
     delivered_runs = {r["value"] for r in root["records"] if r["tag"] == "delivered"}
     syncs = [r for u in units for r in u["records"] if r["tag"] == "sagesync"]
+    # A refresh is a fact about the study's sage, wherever it was recorded:
+    # a routine guide that sends every run to the same fixed topic has its
+    # answer land in the first request that used it (step 5, growbox).
+    seen = {r["id"] for r in syncs}
+    syncs += [r for r in syncs_elsewhere or () if r.get("id") not in seen]
     for unit in units:
         if unit["kind"] == "plan" and unit.get("meter") and unit["work"]["state"] != "cancelled":
             # A cancelled plan owes no agreement and no acceptance: its
@@ -492,9 +502,14 @@ def _stages(root: dict, now: int) -> list[dict]:
                            "detail": "the run's report is in the request's conversation" if home
                            else "the run's report has not been delivered home"})
             if unit["channel"].startswith(STUDY_ROUTINE_PREFIX):
-                research_done = max((r["at"] for u in _walk(unit) if u["kind"] == "plan"
-                                     for r in u["records"] if r["tag"] == "acceptance"), default=0)
-                after = [s for s in syncs if not research_done or s["at"] >= research_done]
+                plans = [u for u in _walk(unit) if u["kind"] == "plan"]
+                research_done = max((r["at"] for u in plans for r in u["records"] if r["tag"] == "acceptance"),
+                                    default=0)
+                projects = {u["channel"][len("pj-"):] for u in plans if u["channel"].startswith("pj-")}
+                projects.add(unit["channel"][len(STUDY_ROUTINE_PREFIX):])
+                in_tree = {r["id"] for u in units for r in u["records"] if r["tag"] == "sagesync"}
+                after = [s for s in syncs if (not research_done or s["at"] >= research_done)
+                         and (s["id"] in in_tree or _project_of(s.get("value", "")) in projects)]
                 stages.append({"stage": "knowledge_refreshed", "unit": unit["anchor"],
                                "label": unit["channel"][len("routine-"):],
                                "status": "done" if after else "pending",
@@ -507,7 +522,7 @@ def _stages(root: dict, now: int) -> list[dict]:
 
 def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | None = None,
          recovery: dict[int, dict] | None = None, viewer_id: int | None = None, pending: list[dict] | None = None,
-         source_live: bool = True, source_note: str = "") -> dict[str, Any]:
+         source_live: bool = True, source_note: str = "", syncs: list[dict] | None = None) -> dict[str, Any]:
     """One request's card (module doc). `health` and `recovery` are keyed by
     unit anchor; `pending` are the response requests still waiting in the
     origin (`agag.outstanding`, as dicts with `id`, `to`, `to_name`, `ask`)."""
@@ -519,7 +534,7 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
     root = _unit(result.root, root=True, now=now, health=health or {}, recovery=recovery or {},
                  viewer_id=viewer_id, pending=list(pending or []))
     units = list(_walk(root))
-    stages = _stages(root, now)
+    stages = _stages(root, now, syncs)
     deciding = [u for u in units if not u.get("passthrough")] or units
     state = card_state(deciding)
     if state in ("answered", "completed") and any(s["status"] == "pending" for s in stages):

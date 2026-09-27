@@ -700,7 +700,7 @@ class TopicResult:
     #: What the post is for (`agag.post`), as the handler's own state knows
     #: it (`agag.post.combine`). A `response_request` is a **requirement** —
     #: the handler waits for somebody's answer, so the post asks whatever
-    #: the run's fence declared, with the handler's `to` and `ask`. Any other
+    #: the run's opening tag declared, with the handler's `to` and `ask`. Any other
     #: intent is a default for words that declared none (literal sections, a
     #: reply without an intent). A handler that failed states nothing.
     meta: PostMeta | None = None

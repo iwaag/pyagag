@@ -24,11 +24,11 @@ def msg(id, sender, name, content, realm=""):
 
 
 def test_the_block_is_read_off_the_output_and_never_posted():
-    output = ("I'll wait for both.\n\n```ag-reply\nAsked autolab and forge; I'll report when both answer.\n```\n\n"
+    output = ("I'll wait for both.\n\n<ag-reply>\nAsked autolab and forge; I'll report when both answer.\n</ag-reply>\n\n"
               "```ag-continue\ngoal: ship the trailer (per #7301)\nconditions: 30 s max, no music until forge confirms\n"
               "next: when autolab answers in #pj-x › workrun-1, tell the developer;\n  when forge answers, start the music\n```")
     rest, carried, error = c.split_continuation(output)
-    assert error is None and "ag-continue" not in rest and rest.endswith("both answer.\n```")
+    assert error is None and "ag-continue" not in rest and rest.endswith("both answer.\n</ag-reply>")
     assert carried.fields == {
         "goal": "ship the trailer (per #7301)",
         "conditions": "30 s max, no music until forge confirms",
@@ -197,7 +197,7 @@ class Client:
 
 def test_serve_topic_keeps_the_block_out_of_the_post_and_writes_the_note_after_the_reply():
     client = Client([msg(1, DEV, "Dev", "make it")])
-    output = "```ag-reply\nOn it.\n```\n```ag-continue\ngoal: make it\nnext: report when done\n```"
+    output = "<ag-reply>\nOn it.\n</ag-reply>\n```ag-continue\ngoal: make it\nnext: report when done\n```"
     record = topics.serve_topic(client, "front", "front-1", lambda ctx: topics.TopicResult(output=output),
                                 ack_text="ack", journal=serving.NullJournal(), log=lambda t: None)
     posted = [content for _, content in client.sent]
@@ -212,7 +212,7 @@ def test_serve_topic_keeps_the_block_out_of_the_post_and_writes_the_note_after_t
 
 def test_an_unreadable_block_becomes_a_notice_and_no_note():
     client = Client([msg(1, DEV, "Dev", "make it")])
-    output = "```ag-reply\nOn it.\n```\n```ag-continue\nnot a field line\n```"
+    output = "<ag-reply>\nOn it.\n</ag-reply>\n```ag-continue\nnot a field line\n```"
     topics.serve_topic(client, "front", "front-1", lambda ctx: topics.TopicResult(output=output),
                        ack_text="ack", journal=serving.NullJournal(), log=lambda t: None)
     posted = [content for _, content in client.sent]

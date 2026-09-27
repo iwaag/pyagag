@@ -43,22 +43,22 @@ def agent(ctx):
     """What the agent says, decided from the conversation it was handed."""
     last = next(m for m in reversed(ctx.history) if m.get("sender_id") != BOT and not m["content"].startswith("[selfnote]"))
     if last.get("sender_id") == OTHER:
-        return topics.TopicResult(output="```ag-reply intent=report\nNoted, autolab; nothing changes for the Developer.\n```")
+        return topics.TopicResult(output="<ag-reply intent=report>\nNoted, autolab; nothing changes for the Developer.\n</ag-reply>")
     if said(ctx, "done"):
-        return topics.TopicResult(output="```ag-reply intent=report\ndone — the logo is blue and big.\n```")
+        return topics.TopicResult(output="<ag-reply intent=report>\ndone — the logo is blue and big.\n</ag-reply>")
     if said(ctx, "and make it big"):
         # The serving that read the input which arrived mid-run: that input
         # answered the size question, so the asker withdraws it.
         asked = mine(ctx, "Which size?")
-        return topics.TopicResult(output=f"```ag-reply intent=report re={asked}\nSize: big, as you said.\n```")
+        return topics.TopicResult(output=f"<ag-reply intent=report re={asked}>\nSize: big, as you said.\n</ag-reply>")
     if said(ctx, "blue"):
         # Input arriving while this run works: posted before the reply.
         ctx.client.realm.post("pj-x", TOPIC, "and make it big", sender_id=DEV, sender_name="Dev")
-        return topics.TopicResult(output="```ag-reply intent=response_request ask=question\nWhich size?\n```")
+        return topics.TopicResult(output="<ag-reply intent=response_request ask=question>\nWhich size?\n</ag-reply>")
     if said(ctx, "build a logo"):
         ctx.client.send_to_channel("pj-x", TOPIC, compose("Reading the brief.", PostMeta(intent=PROGRESS)))
-        return topics.TopicResult(output="```ag-reply intent=response_request ask=question\nWhich colour?\n```")
-    return topics.TopicResult(output="```ag-reply intent=report\ndone\n```")
+        return topics.TopicResult(output="<ag-reply intent=response_request ask=question>\nWhich colour?\n</ag-reply>")
+    return topics.TopicResult(output="<ag-reply intent=report>\ndone\n</ag-reply>")
 
 
 def test_request_progress_question_answer_report_with_every_fault(tmp_path):

@@ -40,7 +40,7 @@ Rules:
 - **No line, no meaning.** A post without the line is *unclassified*.
   Unclassified never means "somebody is waiting".
 - **Only the last non-blank line counts, and only outside a code fence**
-  (fence-aware like the `ag-reply` splitter: a four-backtick block holding a
+  (fence-aware in the CommonMark sense: a four-backtick block holding a
   three-backtick one closes only at four). Quoting the format inside a code
   block is text.
 - **A malformed line is still a machine line.** It is removed from what a
@@ -110,21 +110,22 @@ reference without knowing this contract: `agag.post.quoted_ids` reads the
 
 ## Producing it
 
-- **A run's reply** declares it on the opening fence of its `ag-reply`
-  block (`agag.reply`):
+- **A run's reply** declares it on the opening tag of its `<ag-reply>`
+  block (`agag.reply`; a tag since `failsafe` p3 — the fenced mark it
+  replaced ended at the first bare fence of a code block inside it):
 
-  ````
-  ```ag-reply intent=response_request ask=question
-  Which branch should I use?
   ```
-  ````
+  <ag-reply intent=response_request ask=question>
+  Which branch should I use?
+  </ag-reply>
+  ```
 
   `to=` may be left out: the listener addresses the request to the requester
   it recorded from the processed input (`agag.topics.requester_of`). Several
   blocks are one post whose intent is the strongest any block declares
   (`response_request` > `report` > `progress`). A misspelt attribute never
-  costs the answer: the reply is posted unclassified and the reason is
-  logged. A handler failure and the "produced no reply" line are `report`s.
+  costs the answer: what cannot be read is dropped (a `to=` that is not a
+  user id included), the rest stands, and the reason is logged. A handler failure and the "produced no reply" line are `report`s.
   A handler posting literal sections says what they are with
   `TopicResult(meta=PostMeta(...))`.
 - **Handler and run together** (`agag.post.combine`, `clearer_chat_ui`

@@ -265,7 +265,7 @@ def test_a_callback_serving_is_anchored_in_home_not_in_the_topic_that_called(tmp
         seen["anchor"] = context.anchor
         seen["env"] = agent.chat_environment(agent.AgentSpec("agtest", tmp_path, plan_prefix="p-", run_prefix="r-"),
                                              home=(HOME, "front-1"), bin_dir=tmp_path)
-        return TopicResult(output="```ag-reply\nnoted\n```")
+        return TopicResult(output="<ag-reply>\nnoted\n</ag-reply>")
 
     journal = serving.NullJournal(trigger_id=remote)
     with serving.bound(journal):

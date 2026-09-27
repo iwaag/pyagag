@@ -130,33 +130,33 @@ def test_nested_fences_are_followed_to_their_real_close():
 
 
 def test_a_run_declares_the_intent_on_its_reply_fence():
-    split = split_reply("thinking\n\n```ag-reply intent=response_request ask=question\nWhich one?\n```")
+    split = split_reply("thinking\n\n<ag-reply intent=response_request ask=question>\nWhich one?\n</ag-reply>")
     assert split.ok and split.reply == "Which one?"
     assert split.meta == PostMeta(intent=RESPONSE_REQUEST, to=None, ask="question")
 
 
 def test_a_reply_without_an_intent_is_unclassified():
-    split = split_reply("```ag-reply\nDone.\n```")
+    split = split_reply("<ag-reply>\nDone.\n</ag-reply>")
     assert split.ok and split.meta is None and split.meta_error is None
 
 
 def test_a_misspelt_reply_intent_keeps_the_reply_and_says_why():
-    split = split_reply("```ag-reply intent=answer\nDone.\n```")
+    split = split_reply("<ag-reply intent=answer>\nDone.\n</ag-reply>")
     assert split.ok and split.reply == "Done."
     assert split.meta is None and "unknown intent" in split.meta_error
 
 
 def test_several_blocks_are_the_strongest_thing_any_of_them_is():
-    output = ("```ag-reply intent=report\nThe build passed.\n```\n\n"
-              "```ag-reply intent=response_request ask=confirmation\nDeploy it?\n```\n\n"
-              "```ag-reply intent=progress\n(still watching the logs)\n```")
+    output = ("<ag-reply intent=report>\nThe build passed.\n</ag-reply>\n\n"
+              "<ag-reply intent=response_request ask=confirmation>\nDeploy it?\n</ag-reply>\n\n"
+              "<ag-reply intent=progress>\n(still watching the logs)\n</ag-reply>")
     split = split_reply(output)
     assert split.meta == PostMeta(intent=RESPONSE_REQUEST, ask="confirmation")
 
 
 def test_attributes_on_a_four_backtick_reply_with_a_nested_fence():
     said = "Run this:\n\n```bash\nmake test\n```\n\nand tell me the result."
-    split = split_reply(f"````ag-reply intent=response_request\n{said}\n````")
+    split = split_reply(f"<ag-reply intent=response_request>\n{said}\n</ag-reply>")
     assert split.ok and split.reply == said and split.meta.intent == RESPONSE_REQUEST
 
 
@@ -169,7 +169,7 @@ def run_output(output):
 
 def test_a_request_is_addressed_to_the_requester_the_serving_recorded():
     client = ScriptedClient([human("build it", 1)])
-    record = topics.serve_topic(client, "c", "t", run_output("```ag-reply intent=response_request\nWhich branch?\n```"),
+    record = topics.serve_topic(client, "c", "t", run_output("<ag-reply intent=response_request>\nWhich branch?\n</ag-reply>"),
                                 ack_text="ack", journal=serving.NullJournal(1), log=lambda t: None)
     assert record.reply_text == "@**Developer**\n\nWhich branch?\n\n`ag-post intent=response_request to=7 seen=501 end=501`"
     assert record.extra["intent"] == {"intent": RESPONSE_REQUEST, "to": DEV, "seen": 501, "end": 501}, \
@@ -178,7 +178,7 @@ def test_a_request_is_addressed_to_the_requester_the_serving_recorded():
 
 def test_a_report_carries_its_line_and_the_mention_stays_first():
     client = ScriptedClient([human("build it", 1)])
-    record = topics.serve_topic(client, "c", "t", run_output("```ag-reply intent=report\nBuilt.\n```"),
+    record = topics.serve_topic(client, "c", "t", run_output("<ag-reply intent=report>\nBuilt.\n</ag-reply>"),
                                 ack_text="ack", journal=serving.NullJournal(1), log=lambda t: None)
     assert record.reply_text == "@**Developer**\n\nBuilt.\n\n`ag-post intent=report end=501`"
     assert client.sent == ["ack", record.reply_text], "one delivery holds the words and the meaning"
@@ -187,7 +187,7 @@ def test_a_report_carries_its_line_and_the_mention_stays_first():
 def test_an_unmarked_intent_is_posted_unclassified_and_logged():
     client = ScriptedClient([human("build it", 1)])
     log = []
-    record = topics.serve_topic(client, "c", "t", run_output("```ag-reply intent=asking\nBuilt?\n```"),
+    record = topics.serve_topic(client, "c", "t", run_output("<ag-reply intent=asking>\nBuilt?\n</ag-reply>"),
                                 ack_text="ack", journal=serving.NullJournal(1), log=log.append)
     assert record.reply_text == "@**Developer**\n\nBuilt?\n\n`ag-post end=501`", "unclassified, and still the serving's end"
     assert any("reply intent unusable" in line for line in log)
@@ -223,7 +223,7 @@ def test_the_repair_run_is_asked_to_keep_the_intent():
 
     def repair(reason):
         prompts.append(reason)
-        return "```ag-reply intent=response_request ask=question\nWhich branch?\n```"
+        return "<ag-reply intent=response_request ask=question>\nWhich branch?\n</ag-reply>"
 
     record = topics.serve_topic(client, "c", "t",
                                 lambda ctx: topics.TopicResult(output="no mark here", repair=repair),
@@ -235,7 +235,7 @@ def test_the_repair_run_is_asked_to_keep_the_intent():
 
 # --- delivery: retries, crashes, restarts ------------------------------------------------
 
-ASKING = "```ag-reply intent=response_request ask=question\nWhich branch?\n```"
+ASKING = "<ag-reply intent=response_request ask=question>\nWhich branch?\n</ag-reply>"
 EXPECTED_WORDS = "@**Dev**\n\nWhich branch?"
 
 
@@ -281,7 +281,7 @@ def test_a_crash_before_the_send_redelivers_the_request_after_a_restart_without_
     h.crash()
     prepared = h.listener.queue.latest_serving(("pj-x", "workplan-a", OWNER)).reply_text
     assert is_expected(prepared)
-    h2 = Harness(realm, tmp_path, reply=lambda ctx: topics.TopicResult(output="```ag-reply\nWRONG\n```")).start()
+    h2 = Harness(realm, tmp_path, reply=lambda ctx: topics.TopicResult(output="<ag-reply>\nWRONG\n</ag-reply>")).start()
     wait_until(lambda: h.replies("pj-x", "workplan-a") == [plain(prepared)], what="the redelivery")
     time.sleep(0.3)
     assert h2.contexts == [], "the model did not run again"

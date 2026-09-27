@@ -209,7 +209,7 @@ class ParsedPost:
 def parse_attributes(text: str, *, require_to: bool = True) -> tuple[PostMeta, str | None]:
     """`intent=… to=… ask=… re=…` words as a meta, and what is wrong with
     them (None when nothing is). Used for the wire line and for the
-    attributes a run writes on its `ag-reply` fence — where `to` may be
+    attributes a run writes on its `<ag-reply>` tag — where `to` may be
     left out of a request (`require_to=False`): the listener addresses it
     to the requester it recorded. Unknown keys and
     malformed values are errors: in a breaking-change phase a misspelled
@@ -252,7 +252,7 @@ def parse_attributes(text: str, *, require_to: bool = True) -> tuple[PostMeta, s
 def _trailer_index(lines: list[str]) -> int | None:
     """The index of the last non-blank line when it is a candidate `ag-post`
     line **outside** every code fence, else None. Fence-aware in the same
-    CommonMark sense as `agag.reply.split_reply`: a line that only looks
+    CommonMark sense as inside an `agag.reply` mark: a line that only looks
     like the trailer inside a quoted code block is text."""
     last = max((i for i, line in enumerate(lines) if line.strip()), default=None)
     if last is None or not _LINE.match(lines[last]):
@@ -351,7 +351,7 @@ def merge(metas) -> PostMeta | None:
 
 def combine(declared: PostMeta | None, handler: PostMeta | None) -> PostMeta | None:
     """One meta for a post whose words a run wrote (`declared`, from its
-    `ag-reply` fence) and whose handler knows a state of its own
+    `<ag-reply>` tag) and whose handler knows a state of its own
     (`TopicResult.meta`). Strength alone cannot decide this: it says nothing
     about whose recipient or which kind of request wins.
 

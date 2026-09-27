@@ -22,8 +22,8 @@ FIXTURES = Path(__file__).parent / "fixtures" / "reply"
 BOT, DEV = 11, 8
 
 
-def marked(*parts: str, fence: str = "```") -> str:
-    return "\n\n".join(f"{fence}ag-reply\n{part}\n{fence}" for part in parts)
+def marked(*parts: str) -> str:
+    return "\n\n".join(f"<ag-reply>\n{part}\n</ag-reply>" for part in parts)
 
 
 # --- the observed shape ------------------------------------------------------------
@@ -35,7 +35,7 @@ def test_7222_as_observed_has_no_mark_and_is_a_failed_reply():
     a missing mark, and the run is asked again."""
     output = (FIXTURES / "7222.md").read_text(encoding="utf-8")
     split = split_reply(output)
-    assert not split.marked and not split.ok and "no ag-reply block" in split.error
+    assert not split.marked and not split.ok and "no <ag-reply> block" in split.error
     assert split.rest == output.strip()
 
 
@@ -43,7 +43,7 @@ def test_7222_with_the_reply_marked_posts_only_the_reply():
     output = (FIXTURES / "7222.md").read_text(encoding="utf-8")
     thought, _, said = output.partition("Let me post a reply asking for that.\n\n")
     thought += "Let me post a reply asking for that."
-    split = split_reply(f"{thought}\n\n```ag-reply\n{said.strip()}\n```\n")
+    split = split_reply(f"{thought}\n\n<ag-reply>\n{said.strip()}\n</ag-reply>\n")
     assert split.ok and split.blocks == 1
     assert split.reply == said.strip()
     assert split.reply.startswith("Is the following a fair statement")
@@ -54,7 +54,7 @@ def test_7222_with_the_reply_marked_posts_only_the_reply():
 def test_7230_archsage_shape_marks_the_analysis_and_leaves_the_preface():
     output = (FIXTURES / "7230.md").read_text(encoding="utf-8")
     preface, _, analysis = output.partition("---\n\n")
-    split = split_reply(f"{preface.strip()}\n\n```ag-reply\n{analysis.strip()}\n```")
+    split = split_reply(f"{preface.strip()}\n\n<ag-reply>\n{analysis.strip()}\n</ag-reply>")
     assert split.ok and split.reply == analysis.strip() and split.rest == preface.strip()
     assert split.reply.startswith("開発者の問い")
 
@@ -78,47 +78,104 @@ def test_several_blocks_are_one_reply_in_order():
 
 def test_a_reply_keeps_a_code_fence_it_contains():
     said = "Run this:\n\n```bash\nagentchat read pj-x workplan-a\n```\n\nthen tell me."
-    split = split_reply(f"thinking\n\n````ag-reply\n{said}\n````\n")
-    assert split.ok and split.reply == said
+    split = split_reply(f"thinking\n\n<ag-reply>\n{said}\n</ag-reply>\n")
+    assert split.ok and split.reply == said and split.rest == "thinking"
 
 
-def test_a_three_backtick_reply_still_keeps_an_inner_fence_with_an_info_string():
-    said = "```python\nprint('hi')\n```\ndone"
-    split = split_reply(f"```ag-reply\n{said}\n```")
-    assert split.ok and split.reply == said
+def _as_tags(output: str) -> str:
+    """A captured p2 output with only its mark's opener and closer rewritten
+    in the tag form — everything the run wrote between them verbatim."""
+    lines = output.splitlines()
+    opener = next(i for i, line in enumerate(lines) if line.startswith("```ag-reply"))
+    fence = lines[opener][:len(lines[opener]) - len(lines[opener].lstrip("`"))]
+    attributes = lines[opener][len(fence) + len("ag-reply"):].strip()
+    lines[opener] = f"<ag-reply {attributes}>" if attributes else "<ag-reply>"
+    # The run's own close is the last fence of the mark's kind before the
+    # next machine block (or the end).
+    after = next((i for i in range(opener + 1, len(lines)) if lines[i].startswith("```ag-")), len(lines))
+    close = max(i for i in range(opener + 1, after) if lines[i].strip() and set(lines[i].strip()) == {"`"})
+    lines[close] = "</ag-reply>"
+    return "\n".join(lines) + "\n"
+
+
+def test_p2_12328_a_bare_code_fence_inside_the_reply_keeps_the_code_and_what_follows():
+    """failsafe p3 R1: the run opened its mark with three backticks and its
+    test output with a bare fence; the old splitter posted everything
+    before "Test output" and nothing after. In the tag form the whole reply
+    is said — and the output as captured is repaired, never cut."""
+    raw = (FIXTURES / "12328.md").read_text(encoding="utf-8")
+    split = split_reply(_as_tags(raw))
+    assert split.ok and split.blocks == 1
+    assert split.reply.endswith("Test output (`python3 -m unittest test_wordcount`):\n```\nRan 207 tests in 0.207s\n\nOK\n```")
+    assert split.reply.startswith("`--ends-ly` is added")
+    as_captured = split_reply(raw)
+    assert not as_captured.ok and not as_captured.reply and "fenced ```ag-reply block" in as_captured.error
+
+
+def test_p2_12338_text_after_two_code_blocks_is_posted():
+    raw = (FIXTURES / "12338.md").read_text(encoding="utf-8")
+    split = split_reply(_as_tags(raw))
+    assert split.ok and split.reply.count("```") == 4
+    assert split.reply.endswith("If you agree the task is done, I'll write it.")
+    assert split.meta.intent == "report" and split.meta.re == (12332,)
+
+
+def test_p2_12509_a_name_for_to_costs_the_attribute_not_the_reply():
+    """failsafe p3 R2: `to=Omni Agent` made the whole opener unreadable, the
+    reply was "missing", and the repair wrote the same opener again."""
+    raw = (FIXTURES / "12509.md").read_text(encoding="utf-8")
+    split = split_reply(_as_tags(raw))
+    assert split.ok and split.reply.startswith("**[Front] Task 12474#1 has its result")
+    assert split.meta.intent == "response_request" and split.meta.ask == "confirmation" and split.meta.to is None
+    assert "to=Omni" in split.meta_error and "Agent" in split.meta_error
+    assert "ag-continue" in split.rest, "the machine block is outside the mark and stays the handler's"
+
+
+def test_a_close_tag_inside_a_code_block_is_quoted_text():
+    said = "The format is:\n\n```\n<ag-reply>\nhi\n</ag-reply>\n```\n\nThat's all."
+    split = split_reply(f"<ag-reply>\n{said}\n</ag-reply>\nmy own note")
+    assert split.ok and split.reply == said and split.rest == "my own note"
+
+
+def test_a_code_block_never_closed_does_not_swallow_the_reply():
+    split = split_reply("<ag-reply intent=report>\nOutput:\n```\nRan 3 tests\nOK\n</ag-reply>\nnotes")
+    assert split.ok and split.reply == "Output:\n```\nRan 3 tests\nOK" and split.rest == "notes"
 
 
 def test_tilde_and_backtick_fences_do_not_close_each_other():
-    said = "~~~\nraw\n~~~\nafter"
-    split = split_reply(f"```ag-reply\n{said}\n```")
+    said = "~~~\nraw\n```\n</ag-reply>\n~~~\nafter"
+    split = split_reply(f"<ag-reply>\n{said}\n</ag-reply>")
     assert split.ok and split.reply == said
 
 
-def test_the_info_string_is_matched_whatever_its_case_and_spacing():
-    assert split_reply("```  AG-Reply  \nhi\n```").reply == "hi"
-    assert split_reply("``` ag-reply extra\nhi\n```").blocks == 0, "an info string with more is not the mark"
+def test_the_tag_is_matched_whatever_its_case_and_spacing():
+    assert split_reply("  <AG-Reply>\nhi\n</ag-reply >").reply == "hi"
+    assert split_reply("<ag-reply>hi</ag-reply>").blocks == 0, "each tag is a line of its own"
+    assert split_reply("<ag-replyx>\nhi\n</ag-reply>").blocks == 0
 
 
 def test_missing_empty_and_unclosed_blocks_are_failures():
-    assert "no ag-reply block" in split_reply("just prose").error
-    assert "empty" in split_reply("```ag-reply\n\n   \n```").error
-    unclosed = split_reply("preamble\n```ag-reply\nhalf a reply")
+    assert "no <ag-reply> block" in split_reply("just prose").error
+    assert "empty" in split_reply("<ag-reply>\n\n   \n</ag-reply>").error
+    unclosed = split_reply("preamble\n<ag-reply>\nhalf a reply")
     assert "not closed" in unclosed.error and unclosed.reply == "half a reply" and unclosed.blocks == 1
+    assert "before the previous one is closed" in split_reply("<ag-reply>\na\n<ag-reply>\nb\n</ag-reply>").error
     assert split_reply("").error and split_reply(None).error
+
+
+def test_the_retired_fenced_mark_is_a_failure_with_its_own_reason():
+    split = split_reply("```ag-reply intent=report\nDone.\n```")
+    assert not split.ok and "no longer read" in split.error and "<ag-reply>" in split.error
 
 
 def test_a_machine_block_is_the_handlers_business_and_the_splitter_leaves_it_alone():
     from agag.argue import split_block
 
-    output = "thought\n\n```ag-reply\nrecorded.\n```\n\n```ag-argue\ndesire: 92\n```"
+    output = "thought\n\n<ag-reply>\nrecorded.\n</ag-reply>\n\n```ag-argue\ndesire: 92\n```"
     text, fields, error = split_block(output)
     assert fields == {"desire": "92"} and error is None
     split = split_reply(text)
     assert split.reply == "recorded." and "ag-argue" not in split.reply
-    # And inside the mark, it would be posted — which is why the handler
-    # strips it from the whole output first.
-    inside = split_reply("```ag-reply\nrecorded.\n```ag-argue\ndesire: 92\n```\n```")
-    assert inside.ok
 
 
 # --- the repair ------------------------------------------------------------------
@@ -133,10 +190,10 @@ def test_resolve_reply_repairs_once_and_then_fails_visibly():
 
     text, split, repaired = resolve_reply("prose only", repair)
     assert text == "the reply, at last" and repaired and split.ok
-    assert asked == ["the output contains no ag-reply block"]
+    assert asked == ["the output contains no <ag-reply> block"]
 
     text, split, repaired = resolve_reply("prose only", lambda reason: "still prose")
-    assert text == failure_line("the output contains no ag-reply block") and repaired and not split.ok
+    assert text == failure_line("the output contains no <ag-reply> block") and repaired and not split.ok
 
     text, split, repaired = resolve_reply("prose only", None)
     assert text.startswith("(this run produced no reply:") and not repaired
@@ -210,14 +267,14 @@ def test_an_unmarked_output_is_repaired_once_and_a_second_failure_is_posted_as_s
     calls = []
     client, record = serve(lambda ctx: topics.TopicResult(
         output="I will answer now. Yes, that is fair.", repair=lambda why: calls.append(why) or marked("Yes, that is fair.")))
-    assert plain(client.sent[-1]) == "Yes, that is fair." and calls == ["the output contains no ag-reply block"]
+    assert plain(client.sent[-1]) == "Yes, that is fair." and calls == ["the output contains no <ag-reply> block"]
     assert record.reply_marked is True
 
     client, record = serve(lambda ctx: topics.TopicResult(output="prose", repair=lambda why: "more prose",
                                                           notices=["— note kept"]))
-    assert plain(client.sent[-1]) == (failure_line("the output contains no ag-reply block") + "\n\n— note kept"
+    assert plain(client.sent[-1]) == (failure_line("the output contains no <ag-reply> block") + "\n\n— note kept"
                                "\n\n`ag-post intent=report`"), "a failure is information, never a question"
-    assert record.reply_marked is False and "no ag-reply block" in record.reply_failure
+    assert record.reply_marked is False and "no <ag-reply> block" in record.reply_failure
     assert record.state == serving.DELIVERED, "the failure is a delivered answer: the conversation is not left hanging"
 
 
@@ -249,32 +306,14 @@ def test_the_reply_guide_is_appended_once_and_only_on_request():
 
 
 
-# --- two closing slips seen live (robust_workflow p1, trial N1) ---
-
-
-def test_an_html_style_close_ends_the_block():
-    split = reply.split_reply("thinking\n```ag-reply\nPosted #8819.\n</ag-reply>\n\nmore notes")
-    assert split.ok and split.reply == "Posted #8819."
-
-
-def test_a_four_backtick_block_closed_with_three_is_closed_when_it_holds_no_other_fence():
-    split = reply.split_reply("````ag-reply\nAutolab is planning.\n- one\n```")
-    assert split.ok and split.reply == "Autolab is planning.\n- one"
-
-
-def test_a_real_code_block_inside_an_unclosed_reply_is_still_unclosed():
-    split = reply.split_reply("````ag-reply\nRun this:\n```\nls\n```")
-    assert not split.ok and "not closed" in split.error
-
-
 # --- a quiet progress reply (sage p2 step 2) ---
 
 
 def test_a_quiet_progress_reply_names_nobody_and_a_report_still_hands_off():
-    progress = "```ag-reply intent=progress\nSetup asked of autolab; I continue when it answers.\n```"
+    progress = "<ag-reply intent=progress>\nSetup asked of autolab; I continue when it answers.\n</ag-reply>"
     client, _ = serve(lambda ctx: topics.TopicResult(output=progress, quiet_progress=True), handoff=True)
     assert not client.sent[-1].startswith("@**") and "intent=progress" in client.sent[-1]
-    report = "```ag-reply intent=report\nThe study is ready.\n```"
+    report = "<ag-reply intent=report>\nThe study is ready.\n</ag-reply>"
     client, _ = serve(lambda ctx: topics.TopicResult(output=report, quiet_progress=True), handoff=True)
     assert client.sent[-1].startswith("@**Developer**")
     client, _ = serve(lambda ctx: topics.TopicResult(output=progress), handoff=True)

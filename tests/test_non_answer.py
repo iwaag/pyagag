@@ -165,7 +165,7 @@ def test_a_reply_declaring_a_non_answer_keeps_it_through_a_dropped_send_and_rede
     journal = serving.NullJournal()
     with pytest.raises(Exception):
         topics.serve_topic(client, "c", "t",
-                           lambda ctx: topics.TopicResult(output="```ag-reply intent=report answer=none\nNoted.\n```"),
+                           lambda ctx: topics.TopicResult(output="<ag-reply intent=report answer=none>\nNoted.\n</ag-reply>"),
                            ack_text="ack", journal=journal, log=lambda t: None, delivery={"sleep": lambda s: None})
     prepared = journal.serving().reply_text
     assert plain(parse_post(prepared).meta) == PostMeta(intent=REPORT, answer=NONE)

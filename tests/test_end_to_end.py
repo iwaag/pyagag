@@ -77,7 +77,7 @@ def test_request_delegation_callback_and_final_response_survive_a_restart(tmp_pa
                        sender_name="Mirror Bot")
             return topics.TopicResult(output=(
                 "I'll delegate the cut and report back.\n\n"
-                "```ag-reply\nAsked autolab for the cut in #pj-x › workrun-trailer; I'll report when it answers.\n```\n"
+                "<ag-reply>\nAsked autolab for the cut in #pj-x › workrun-trailer; I'll report when it answers.\n</ag-reply>\n"
                 "```ag-continue\ngoal: a 30 s trailer for the developer\nnext: when autolab answers, tell the developer\n```"))
         gate.wait(10.0)
         if box["h"].listener._stop.is_set():
@@ -85,7 +85,7 @@ def test_request_delegation_callback_and_final_response_survive_a_restart(tmp_pa
         assert "answered, not yet dealt with" in view, view
         assert "goal: a 30 s trailer for the developer" in view
         result = answered[0].messages[-1]["content"]
-        return topics.TopicResult(output=f"```ag-reply\nautolab is done: {result.split(chr(10))[-1]}\n```")
+        return topics.TopicResult(output=f"<ag-reply>\nautolab is done: {result.split(chr(10))[-1]}\n</ag-reply>")
 
     def handler(channel, topic):
         h = box["h"]

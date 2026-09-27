@@ -320,7 +320,7 @@ A mention says whose turn it is, not whether an answer is wanted. A post
 says that itself with one `ag-post` line at its end (`agag.post`,
 `docs/post-intent-v1.md`): `intent=progress`, `intent=report`, or
 `intent=response_request to=<user id>` — and `re=<id>` for the request a
-post answers. A run declares it on its `ag-reply` fence and the listener
+post answers. A run declares it on its `<ag-reply …>` tag and the listener
 writes the line into the prepared reply, so it is journaled and redelivered
 with the words; `agentchat send --intent … --to … --re …` writes the same
 line. A post without it is unclassified, and unclassified is never "waiting".

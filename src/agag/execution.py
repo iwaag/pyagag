@@ -22,6 +22,17 @@ by `run_harness` while the run lasts (`agag.execution.v1`):
   process that ran it — so a record with no end and a dead pid is a run that
   died without its runner noticing.
 
+**Work and housekeeping are different evidence** (`failsafe` p3). A tool
+call starting or returning, the model's text or its partial output, and a
+subagent's own events are work; a `system` event (Claude Code emits them
+while a long Bash call runs, p2 trial B), a stream `ping` or an event of a
+kind nobody named is housekeeping. Each keeps its own time and last kind
+(`last_work_at`/`last_work`, `housekeeping`), so a harness that keeps
+talking without doing anything is not read as progress. A tool call also
+records its own **bound** where the tool declares one (Claude Code's Bash:
+its `timeout`, 120 s by default, 600 s at most; a background call returns
+at once): a wait inside it is explained, a wait past it is not.
+
 Nothing here decides anything. `agag.health` reads the record, the process
 table and the serving journal, and says what can and cannot be concluded.
 
@@ -49,6 +60,12 @@ WRITE_EVERY = 5.0
 TOOL_RESULTS = ("claude_code", "agcode")
 DETAIL_KEYS = ("command", "description", "file_path", "path", "pattern", "url", "subagent_type")
 DETAIL_CHARS = 200
+#: Claude Code's Bash tool: the default and the largest `timeout` (ms).
+BASH_DEFAULT_TIMEOUT_MS = 120_000
+BASH_MAX_TIMEOUT_MS = 600_000
+#: Event kinds that are the run doing something. Anything else — `system`,
+#: `rate_limit_event`, a stream `ping` — is housekeeping.
+WORK_KINDS = ("assistant", "user", "result", "tool_use", "stream_event")
 
 __all__ = ["SCHEMA", "LiveExecution", "read", "records"]
 
@@ -61,6 +78,21 @@ def _detail(arguments: Any) -> str:
         if value:
             return " ".join(str(value).split())[:DETAIL_CHARS]
     return ""
+
+
+def tool_bound(name: str, arguments: Any) -> float | None:
+    """The seconds a tool call declares it may take, or None when it
+    declares none (a subagent, a web fetch: their own events or the run's
+    deadline bound them)."""
+    if name != "Bash" or not isinstance(arguments, dict):
+        return None
+    if arguments.get("run_in_background"):
+        return 5.0
+    try:
+        millis = float(arguments.get("timeout") or BASH_DEFAULT_TIMEOUT_MS)
+    except (TypeError, ValueError):
+        millis = BASH_DEFAULT_TIMEOUT_MS
+    return min(max(millis, 0.0), BASH_MAX_TIMEOUT_MS) / 1000.0
 
 
 class LiveExecution:
@@ -85,6 +117,9 @@ class LiveExecution:
             "deadline_at": None,
             "last_event_at": None,
             "last_event": "",
+            "last_work_at": None,
+            "last_work": "",
+            "housekeeping": {"count": 0, "last_at": None, "last": ""},
             "events": 0,
             "tool_results": False,
             "open_tools": {},
@@ -101,7 +136,8 @@ class LiveExecution:
         now = self.clock()
         with self._lock:
             self.doc.update(harness=harness, pid=pid, started_at=now, deadline_at=now + float(timeout),
-                            tool_results=harness in TOOL_RESULTS, last_event_at=now, last_event="started")
+                            tool_results=harness in TOOL_RESULTS, last_event_at=now, last_event="started",
+                            last_work_at=now, last_work="started")
             self._write(force=True)
 
     def event(self, event: dict) -> None:
@@ -109,10 +145,16 @@ class LiveExecution:
         and the adapters for agy and codex also speak)."""
         now = self.clock()
         kind = str(event.get("type") or "")
+        inner = event.get("event") if isinstance(event.get("event"), dict) else {}
+        work = kind in WORK_KINDS and not (kind == "stream_event" and inner.get("type") == "ping")
         force = False
         with self._lock:
             self.doc["events"] += 1
             self.doc["last_event_at"] = now
+            if not work:
+                kept = self.doc.setdefault("housekeeping", {"count": 0, "last_at": None, "last": ""})
+                kept.update(count=int(kept.get("count") or 0) + 1, last_at=now,
+                            last=f"{kind} {event.get('subtype') or inner.get('type') or ''}".strip())
             open_tools: dict[str, Any] = self.doc["open_tools"]
             if kind == "tool_use":  # the agy/codex adapters' flat form
                 self.doc["last_event"] = f"tool {event.get('name', '?')}"
@@ -128,6 +170,7 @@ class LiveExecution:
                     if self.doc["tool_results"] and block.get("id"):
                         open_tools[str(block["id"])] = {
                             "name": name, "detail": _detail(block.get("input")), "since": now,
+                            "bound": tool_bound(name, block.get("input")),
                             # A subagent's own tool calls are progress of the call that started it.
                             "parent": event.get("parent_tool_use_id") or None,
                         }
@@ -140,9 +183,15 @@ class LiveExecution:
                 elif block.get("type") == "text" and kind == "assistant":
                     self.doc["last_event"] = "text"
             if kind == "stream_event":
-                self.doc["last_event"] = "generating"
+                self.doc["last_event"] = "generating" if work else "stream ping"
             elif kind == "system" and not content:
                 self.doc["last_event"] = f"system {event.get('subtype', '')}".strip()
+            elif not work:
+                self.doc["last_event"] = kind or "unknown event"
+            if work:
+                self.doc["last_work_at"] = now
+                self.doc["last_work"] = self.doc["last_event"] if not event.get("parent_tool_use_id") \
+                    else f"subagent: {self.doc['last_event']}"
             self._write(force=force)
 
     def end(self, *, exit_code: int | None, outcome: str) -> None:

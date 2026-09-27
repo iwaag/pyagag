@@ -15,9 +15,16 @@ could not be established (`agag.health.v1`):
 
 The verdict:
 
-- `running`: the process is alive and an event arrived within `window`;
-- `waiting`: alive, quiet, and a named tool call or child process explains
-  the wait, inside the run's own deadline;
+- `running`: the process is alive and **work** arrived within `window` — a
+  tool call starting or returning, the model's text or partial output, a
+  subagent's events (failsafe p3). Housekeeping (`system` events, pings)
+  is reported with its age and never makes a run `running`;
+- `waiting`: alive, no recent work, and a named tool call or child process
+  explains the wait — a tool call only **inside its own declared bound**
+  (Claude Code's Bash `timeout`, `TOOL_GRACE` added) when it declares one,
+  and inside the run's own deadline. The wait reports the CPU time of the
+  processes under the run (`cpu_seconds`), so a monitor comparing two
+  looks can tell a wait that advances from one that is only named;
 - `stopped`: the work is not being done and nothing is queued to do it —
   the harness process is gone with no end recorded, or it ended and its
   serving delivered nothing; confirmed, not guessed;
@@ -67,6 +74,10 @@ QUEUE_TIMEOUT = 2.0
 #: another process that reused the number.
 PID_REUSE_SLACK = 10.0
 MAX_CHILDREN = 8
+#: Past a tool call's own declared bound, this long before the wait is no
+#: longer explained: the harness kills the call at its bound, so a call
+#: still open after it is not the call doing its work.
+TOOL_GRACE = 60.0
 
 RUNNING, WAITING, STOPPED, ENDED, UNKNOWN = "running", "waiting", "stopped", "ended", "unknown"
 VERDICTS = (RUNNING, WAITING, STOPPED, ENDED, UNKNOWN)
@@ -90,23 +101,36 @@ def _etime_seconds(text: str) -> float | None:
         return None
 
 
-def process_table(timeout: float = PS_TIMEOUT) -> dict[int, dict[str, Any]] | None:
-    """`pid → {ppid, age, command}` for every process, or None."""
+def _cpu_seconds(text: str) -> float | None:
+    """`ps -o time` ([[dd-]hh:]mm:ss[.cc]) as seconds."""
     try:
-        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,etime=,command="], capture_output=True, text=True,
-                             timeout=timeout, check=False).stdout
+        days, _, rest = text.strip().rpartition("-")
+        parts = [float(p) for p in rest.split(":")]
+        while len(parts) < 3:
+            parts.insert(0, 0.0)
+        return int(days or 0) * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+    except ValueError:
+        return None
+
+
+def process_table(timeout: float = PS_TIMEOUT) -> dict[int, dict[str, Any]] | None:
+    """`pid → {ppid, age, cpu, command}` for every process, or None."""
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,etime=,time=,command="], capture_output=True,
+                             text=True, timeout=timeout, check=False).stdout
     except (OSError, subprocess.SubprocessError):
         return None
     table: dict[int, dict[str, Any]] = {}
     for line in out.splitlines():
-        fields = line.split(None, 3)
-        if len(fields) < 3:
+        fields = line.split(None, 4)
+        if len(fields) < 4:
             continue
         try:
             pid, ppid = int(fields[0]), int(fields[1])
         except ValueError:
             continue
-        table[pid] = {"ppid": ppid, "age": _etime_seconds(fields[2]), "command": fields[3] if len(fields) > 3 else ""}
+        table[pid] = {"ppid": ppid, "age": _etime_seconds(fields[2]), "cpu": _cpu_seconds(fields[3]),
+                      "command": fields[4] if len(fields) > 4 else ""}
     return table or None
 
 
@@ -119,7 +143,7 @@ def descendants(table: dict[int, dict[str, Any]], pid: int) -> list[dict[str, An
         following = []
         for parent in frontier:
             for child in sorted(children.get(parent, [])):
-                found.append({"pid": child, "age_seconds": table[child]["age"],
+                found.append({"pid": child, "age_seconds": table[child]["age"], "cpu_seconds": table[child].get("cpu"),
                               "command": " ".join(str(table[child]["command"]).split())[:160]})
                 following.append(child)
         frontier = following
@@ -215,8 +239,16 @@ def probe(directory: Path, *, ack: int = 0, channel: str = "", topic: str = "", 
                      "exit_code": record.get("exit_code"), "outcome": record.get("outcome"),
                      "record_written_at": record.get("written_at"), "role": (record.get("serving") or {}).get("role")}
     last_event = record.get("last_event_at")
-    report["progress"] = {"last_event_at": last_event, "age_seconds": round(now - last_event, 1) if last_event else None,
+    # Work, not any event (failsafe p3). A record from before the split has
+    # no `last_work_at`: its events are all it has.
+    last_work = record.get("last_work_at", last_event)
+    kept = record.get("housekeeping") or {}
+    report["progress"] = {"last_work_at": last_work, "work_age_seconds": round(now - last_work, 1) if last_work else None,
+                          "last_work": record.get("last_work", record.get("last_event")),
+                          "last_event_at": last_event, "age_seconds": round(now - last_event, 1) if last_event else None,
                           "last_event": record.get("last_event"), "events": record.get("events"),
+                          "housekeeping": {"count": kept.get("count"), "last": kept.get("last"),
+                                           "age_seconds": round(now - kept["last_at"], 1) if kept.get("last_at") else None},
                           "tools_done": record.get("tools_done")}
 
     # --- the process -------------------------------------------------------------------
@@ -280,37 +312,54 @@ def probe(directory: Path, *, ack: int = 0, channel: str = "", topic: str = "", 
     open_tools = [{"id": key, **value, "age_seconds": round(now - float(value.get("since") or now), 1)}
                   for key, value in (record.get("open_tools") or {}).items()]
     top = [t for t in open_tools if not t.get("parent")] or open_tools
+    cpu = round(sum(float(c.get("cpu_seconds") or 0) for c in children), 2) if children else 0.0
     if top:
         tool = max(top, key=lambda t: t["age_seconds"])
-        report["wait"] = {"kind": "tool", "name": tool.get("name"), "detail": tool.get("detail"),
-                          "since": tool.get("since"), "open": len(open_tools),
-                          "children": children[:MAX_CHILDREN]}
+        bound = tool.get("bound")
+        report["wait"] = {"kind": "tool", "id": tool.get("id"), "name": tool.get("name"), "detail": tool.get("detail"),
+                          "since": tool.get("since"), "bound_seconds": bound, "open": len(open_tools),
+                          "children": children[:MAX_CHILDREN], "cpu_seconds": cpu,
+                          "over_bound": bool(bound is not None and tool["age_seconds"] > float(bound) + TOOL_GRACE)}
     elif children:
-        report["wait"] = {"kind": "children", "children": children[:MAX_CHILDREN], "count": len(children)}
+        report["wait"] = {"kind": "children", "children": children[:MAX_CHILDREN], "count": len(children),
+                          "cpu_seconds": cpu}
     elif record.get("tool_results"):
         report["wait"] = {"kind": "none"}
     else:
         unknowns.append(f"{record.get('harness')}'s events do not say when a tool call returns")
-    age = now - float(last_event) if last_event else None
+    age = now - float(last_work) if last_work else None
+    quiet = f"no work for {int(age or 0)} s" + (
+        f" (only housekeeping since: {kept.get('last')}, {int(now - kept['last_at'])} s ago)"
+        if kept.get("last_at") and last_work and kept["last_at"] > last_work else "")
     if deadline and now > float(deadline):
         report["verdict"], report["why"] = UNKNOWN, (
             f"the process is alive {int(now - float(deadline))} s past the run's own deadline")
         unknowns.append("why the run outlived its deadline")
     elif age is not None and age <= window:
-        report["verdict"], report["why"] = RUNNING, f"alive; its last event ({record.get('last_event')}) was {int(age)} s ago"
+        report["verdict"], report["why"] = RUNNING, (
+            f"alive; its last work ({record.get('last_work', record.get('last_event'))}) was {int(age)} s ago")
+    elif report["wait"]["kind"] == "tool" and report["wait"]["over_bound"]:
+        w = report["wait"]
+        report["verdict"], report["why"] = UNKNOWN, (
+            f"alive; {quiet}; its {w['name']} call" + (f" ({w['detail']})" if w.get("detail") else "")
+            + f" has been open {int(now - float(w['since'] or now))} s, past its own bound of "
+              f"{int(w['bound_seconds'])} s")
+        unknowns.append("why a tool call is still open past its own bound")
     elif report["wait"]["kind"] == "tool":
         w = report["wait"]
         alive_under = " with a process under it" if children else ", with no process under it"
+        within = f", within its bound of {int(w['bound_seconds'])} s" if w.get("bound_seconds") is not None else ""
         report["verdict"], report["why"] = WAITING, (
             f"alive; waiting {int(now - float(w['since'] or now))} s on {w['name']}"
-            + (f" ({w['detail']})" if w.get("detail") else "") + alive_under)
+            + (f" ({w['detail']})" if w.get("detail") else "") + within + alive_under
+            + (f" ({w['cpu_seconds']:g} s CPU)" if children else ""))
     elif report["wait"]["kind"] == "children":
         report["verdict"], report["why"] = WAITING, (
-            f"alive; no event for {int(age or 0)} s, and {len(children)} process(es) run under it "
-            f"({children[0]['command'][:80]})")
+            f"alive; {quiet}, and {len(children)} process(es) run under it "
+            f"({children[0]['command'][:80]}; {report['wait']['cpu_seconds']:g} s CPU)")
     else:
         report["verdict"], report["why"] = UNKNOWN, (
-            f"alive, but no event for {int(age or 0)} s and no tool call or child process explains the wait")
+            f"alive, but {quiet} and no tool call or child process explains the wait")
         unknowns.append("what the process is doing")
     return report
 

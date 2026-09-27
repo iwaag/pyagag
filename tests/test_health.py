@@ -228,3 +228,76 @@ def test_without_a_record_a_delivered_serving_is_ended(tmp_path):
     q = queue(tmp_path / "listener.sqlite", state="delivered", delivered=77)
     report = health.probe(tmp_path / "exec", ack=41, queue=q, now=1200.0)
     assert report["verdict"] == "ended" and "#77" in report["why"]
+
+
+# --- work and housekeeping, and a wait's own bound (failsafe p3) ------------------------
+
+
+def test_the_record_keeps_work_and_housekeeping_apart():
+    clock = [1000.0]
+    live = LiveExecution(Path("/nonexistent/never-written.json"), clock=lambda: clock[0])
+    live.begin(harness="claude_code", pid=1, timeout=1200)
+    clock[0] = 1010.0
+    live.event({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "sleep 300", "timeout": 400000}}]}})
+    for at in (1060.0, 1120.0, 1180.0):
+        clock[0] = at
+        live.event({"type": "system", "subtype": "task_started"})
+    clock[0] = 1190.0
+    live.event({"type": "stream_event", "event": {"type": "ping"}})
+    doc = live.doc
+    assert doc["last_work_at"] == 1010.0 and doc["last_work"] == "tool Bash"
+    assert doc["last_event_at"] == 1190.0 and doc["housekeeping"]["count"] == 4
+    assert doc["housekeeping"]["last"] == "stream_event ping"
+    assert doc["open_tools"]["t1"]["bound"] == 400.0
+    clock[0] = 1200.0
+    live.event({"type": "assistant", "parent_tool_use_id": "t9", "message": {"content": [{"type": "text", "text": "x"}]}})
+    assert doc["last_work_at"] == 1200.0 and doc["last_work"].startswith("subagent:")
+
+
+def test_a_tool_s_own_bound():
+    bound = execution.tool_bound
+    assert bound("Bash", {"command": "make"}) == 120.0
+    assert bound("Bash", {"command": "make", "timeout": 600000}) == 600.0
+    assert bound("Bash", {"command": "make", "timeout": 9_000_000}) == 600.0, "Claude Code's ceiling"
+    assert bound("Bash", {"command": "serve", "run_in_background": True}) == 5.0
+    assert bound("Task", {"description": "x"}) is None and bound("WebFetch", {"url": "u"}) is None
+
+
+def test_housekeeping_alone_is_not_progress(tmp_path):
+    """p2 trial B read `running` at every check because Claude Code emits
+    `system` events while a long Bash call runs: the same events would
+    certify a hung run for as long as the harness talks."""
+    record(tmp_path / "exec", "a.json", last_event_at=1395.0, last_event="system task_started",
+           last_work_at=1000.0, last_work="text", housekeeping={"count": 40, "last_at": 1395.0,
+                                                               "last": "system task_started"})
+    report = probe(tmp_path, 1400.0, table((5000, 1, 400, "claude -p")))
+    assert report["verdict"] == "unknown", report["why"]
+    assert "no work for 400 s (only housekeeping since: system task_started, 5 s ago)" in report["why"]
+    assert report["progress"]["work_age_seconds"] == 400.0 and report["progress"]["age_seconds"] == 5.0
+
+
+def test_a_bash_call_inside_its_bound_is_an_explained_wait_and_past_it_is_not(tmp_path):
+    tool = {"t1": {"name": "Bash", "detail": "sleep 300", "since": 1010.0, "bound": 400.0, "parent": None}}
+    record(tmp_path / "exec", "a.json", last_event_at=1390.0, last_work_at=1010.0, last_work="tool Bash",
+           open_tools=tool)
+    rows = {5000: {"ppid": 1, "age": 400, "cpu": 3.0, "command": "claude -p"},
+            5001: {"ppid": 5000, "age": 380, "cpu": 0.02, "command": "/bin/zsh -c sleep 300"},
+            5002: {"ppid": 5001, "age": 380, "cpu": 0.0, "command": "sleep 300"}}
+    inside = probe(tmp_path, 1400.0, rows)
+    assert inside["verdict"] == "waiting" and "within its bound of 400 s" in inside["why"]
+    assert inside["wait"]["bound_seconds"] == 400.0 and inside["wait"]["cpu_seconds"] == 0.02
+    later = 1010.0 + 400 + health.TOOL_GRACE + 1
+    for row in rows.values():
+        row["age"] += later - 1400.0
+    past = probe(tmp_path, later, rows)
+    assert past["verdict"] == "unknown" and "past its own bound of 400 s" in past["why"]
+    assert past["wait"]["over_bound"] is True
+
+
+def test_the_process_table_reads_cpu_time():
+    assert health._cpu_seconds("0:00.03") == 0.03
+    assert health._cpu_seconds("1:02:03.50") == 3723.5
+    assert health._cpu_seconds("2-00:00:01") == 172801.0
+    table_now = health.process_table()
+    assert table_now and all("cpu" in row for row in table_now.values())

@@ -11,7 +11,9 @@ from agag import progress
 from agag import trace as tracing
 from agag.selfnote import effective_rootchat
 
-from study_realm import ARCHSAGE, AUTOLAB, FRONT, Realm, Study, line
+import pytest
+
+from study_realm import ARCHSAGE, AUTOLAB, FRONT, OMNI, Realm, Study, line
 
 
 def node(result, topic_part):
@@ -170,3 +172,102 @@ def test_recheck_of_a_queued_post_says_it_is_asked_not_stopped():
     checked = tracing.recheck(realm, worldtrend.request, worldtrend.start_request,
                               now=realm.at(worldtrend.start_request) + 301)
     assert checked.verdict == "asked" and checked.pending == [worldtrend.start_request]
+
+
+# --- step 3: acceptance by whoever holds the decision ---------------------------------------
+
+
+def closed_study(*, reserve=False):
+    """A study run to its task's close: desk (Omni) → run (Front) →
+    workplan → task shown, agreed by Front, closed (`+shown=`)."""
+    realm = Realm()
+    study = Study(realm, "growbox", "b1")
+    study.ask("Run the study once; I will approve the result myself." if reserve else "Run the study once, small.")
+    if reserve:
+        from agag.acceptance import reservation_note
+
+        realm.post("front", study.desk_topic, reservation_note(OMNI, "Omni Agent", study.origin), FRONT)
+    study.open_run()
+    study.run_delegates()
+    study.autolab_plans()
+    study.front_starts()
+    study.autolab_starts()
+    study.task_shows()
+    study.task_closes()
+    return realm, study
+
+
+def test_the_runner_records_its_own_agreement_and_autolab_would_record_the_same():
+    from agag.acceptance import accept_mission
+
+    realm, study = closed_study()
+    agreed = realm.post(study.plan_channel, study.plan_topic, "The task is in; that completes the mission.", FRONT)
+    done = accept_mission(realm.speaking_as(FRONT), study.mission, evidence=agreed, resolve=False)
+    assert (done.evidence, done.by_id, done.after) == (agreed, FRONT, study.shown)
+    again = accept_mission(realm.speaking_as(AUTOLAB), study.mission, evidence=agreed, resolve=False)
+    assert again.already and not again.written
+    # The task agreement itself is evidence too: it follows the shown result.
+    realm2, study2 = closed_study()
+    done2 = accept_mission(realm2.speaking_as(AUTOLAB), study2.mission, evidence=study2.agreed, resolve=False)
+    assert done2.by_id == FRONT
+
+
+def test_the_origin_person_holds_the_decision_too_and_a_bystander_does_not():
+    from agag.acceptance import AcceptanceRefused, accept_mission
+
+    realm, study = closed_study()
+    ok = realm.post("front", study.desk_topic, "Accepted.", OMNI)
+    assert accept_mission(realm.speaking_as(FRONT), study.mission, evidence=ok, resolve=False).by_id == OMNI
+    realm, study = closed_study()
+    other = realm.post("front", study.desk_topic, "Looks done to me.", 8)
+    with pytest.raises(AcceptanceRefused, match="does not hold"):
+        accept_mission(realm.speaking_as(FRONT), study.mission, evidence=other)
+
+
+def test_the_initial_request_or_an_early_agreement_accepts_nothing():
+    from agag.acceptance import AcceptanceRefused, accept_mission
+
+    realm, study = closed_study()
+    with pytest.raises(AcceptanceRefused, match="older than"):
+        accept_mission(realm.speaking_as(FRONT), study.mission, evidence=study.origin)
+    with pytest.raises(AcceptanceRefused, match="before the result"):
+        accept_mission(realm.speaking_as(FRONT), study.mission, evidence=study.start_request)
+    with pytest.raises(AcceptanceRefused, match="own agent"):
+        accept_mission(realm.speaking_as(FRONT), study.mission, evidence=study.closed)
+
+
+def test_evidence_from_another_conversation_is_refused():
+    from agag.acceptance import AcceptanceRefused, accept_mission
+
+    realm, study = closed_study()
+    elsewhere = realm.post("front", "front-desk-unrelated", "That completes the mission.", FRONT)
+    with pytest.raises(AcceptanceRefused, match="not m"):
+        accept_mission(realm.speaking_as(FRONT), study.mission, evidence=elsewhere)
+
+
+def test_a_reserved_approval_waits_for_that_person():
+    from agag.acceptance import AcceptanceRefused, accept_mission
+
+    realm, study = closed_study(reserve=True)
+    agreed = realm.post(study.plan_channel, study.plan_topic, "That completes the mission.", FRONT)
+    with pytest.raises(AcceptanceRefused, match="reserved"):
+        accept_mission(realm.speaking_as(AUTOLAB), study.mission, evidence=agreed)
+    theirs = realm.post("front", study.desk_topic, "Yes, I accept it.", OMNI)
+    done = accept_mission(realm.speaking_as(FRONT), study.mission, evidence=theirs, resolve=False)
+    assert done.by_id == OMNI
+
+
+def test_agentchat_reserve_records_the_person_s_own_words_where_they_said_them(monkeypatch, capsys):
+    from agag import chat
+    from agag.acceptance import parse_reservation
+
+    realm = Realm()
+    study = Study(realm, "growbox", "b1")
+    study.ask("Run it; I approve the result myself.")
+    monkeypatch.setattr(chat, "client_from_environment", lambda: realm)
+    monkeypatch.setenv("AGENTCHAT_HOME", f"front/{study.desk_topic}")
+    monkeypatch.setenv("AGENTCHAT_HOME_ANCHOR", str(study.origin))
+    assert chat.main(["reserve", "--evidence", str(study.origin)]) == 0
+    (note,) = [r["content"] for r in realm.rows if parse_reservation(r["content"])]
+    assert parse_reservation(note) == (OMNI, "Omni Agent", study.origin)
+    assert chat.main(["reserve", "--evidence", str(study.desk_ack)]) == 1  # Front's own post

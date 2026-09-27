@@ -134,12 +134,18 @@ def test_an_interrupted_acceptance_is_finished_by_the_next_attempt(world):
 def test_a_person_recording_their_own_decision_needs_no_post(world):
     """The operation room's completion door: the Developer presses it."""
     realm, mission, _ = world
-    done = accept_mission(Client(realm, DEV, is_bot=False), mission)
-    assert (done.evidence, done.by_id) == (0, DEV)
-    assert trace(Client(realm, DEV), mission).root.state == "done"
+    done = accept_mission(Client(realm, OMNI, is_bot=False), mission)
+    assert (done.evidence, done.by_id) == (0, OMNI)
+    assert trace(Client(realm, OMNI), mission).root.state == "done"
 
 
-@pytest.mark.parametrize("case", ["no evidence", "own post", "owner's post", "older than the mission",
+def test_a_person_who_does_not_hold_the_decision_cannot_record_it_in_person(world):
+    realm, mission, _ = world
+    with pytest.raises(AcceptanceRefused, match="Front or Omni Agent"):
+        accept_mission(Client(realm, DEV, is_bot=False), mission)
+
+
+@pytest.mark.parametrize("case", ["no evidence", "not a holder", "owner's post", "older than the mission",
                                   "unfinished task", "cancelled", "not a mission"])
 def test_every_refusal_writes_nothing(world, case):
     realm, mission, accepted = world
@@ -147,8 +153,8 @@ def test_every_refusal_writes_nothing(world, case):
     target, evidence = mission, accepted
     if case == "no evidence":
         evidence = None
-    elif case == "own post":
-        evidence = post(realm, "front", "front-c", "@**Omni Agent** recorded.", FRONT)
+    elif case == "not a holder":
+        evidence = post(realm, "front", "front-c", "Looks accepted to me.", DEV)
     elif case == "owner's post":
         evidence = post(realm, "pj-x", "workplan-average", "@**Front** every task is finished", AUTOLAB)
     elif case == "older than the mission":
@@ -186,17 +192,25 @@ def test_naming_the_accepting_post_instead_of_the_mission_is_refused_with_how_to
     assert "Name the mission first" in str(refused.value) and f"--evidence {accepted}" in str(refused.value)
 
 
-def test_baseline_front_s_own_agreement_is_refused_to_front_but_accepted_from_autolab(world):
-    """failsafe p5 step 1 (progress_panel p1 trial B, #13798/#13804): the
-    runner (Front) was entrusted with the acceptance and agreed in the plan's
-    conversation. `agentchat accept` as Front refuses that post as "your own
-    post"; autolab's close-out records the very same post as the acceptance.
-    The route decided the outcome, not who held the decision."""
+def test_front_s_own_agreement_gives_the_same_record_whoever_records_it(world):
+    """failsafe p5 step 3 (step 1's reproduction, progress_panel p1 trial B
+    #13798/#13804): the runner (Front) was entrusted with the acceptance and
+    agreed. `agentchat accept` as Front refused that post; autolab's close-out
+    recorded it. Now the holder decides, not the route: both record the same
+    decision, and a repeat by the other writes nothing."""
     realm, mission, _ = world
     agreed = post(realm, "pj-x", "workplan-average", "Both tasks are in; that completes the mission.", FRONT)
+    first = accept_mission(Client(realm, FRONT), mission, evidence=agreed, resolve=False)
+    assert (first.evidence, first.by_id) == (agreed, FRONT)
+    (note,) = notes(realm, "pj-x", "workplan-average", "acceptance")
     before = len(realm.messages)
-    with pytest.raises(AcceptanceRefused, match="your own post"):
-        accept_mission(Client(realm, FRONT), mission, evidence=agreed)
-    assert len(realm.messages) == before
+    again = accept_mission(Client(realm, AUTOLAB), mission, evidence=agreed, resolve=False)
+    assert again.already and len(realm.messages) == before
+    assert (again.evidence, again.by_id) == (agreed, FRONT)
+
+
+def test_autolab_recording_front_s_agreement_writes_what_front_would(world):
+    realm, mission, _ = world
+    agreed = post(realm, "pj-x", "workplan-average", "Both tasks are in; that completes the mission.", FRONT)
     done = accept_mission(Client(realm, AUTOLAB), mission, evidence=agreed, resolve=False)
-    assert (done.evidence, done.by_id) == (agreed, FRONT)
+    assert (done.evidence, done.by_id, done.by_name) == (agreed, FRONT, "Front")

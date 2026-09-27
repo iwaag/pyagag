@@ -26,13 +26,36 @@ done` in the mission's conversation, which is then resolved. The trace reads
 mission is finished for every reader at once, and Observer releases the
 request on its next look.
 
+**Whose decision it is** (failsafe p5). The acceptance rests on a post by
+somebody who **holds** the decision, whoever records it:
+
+- the mission's **requester** — the one who asked for it in the plan's
+  conversation (its root note there, else the first person to speak) — and
+  everybody that requester was asking *for*, up its root notes to the
+  request's origin (Front asking for a routine run asking for the
+  Developer's request: Front and the Developer). A requester entrusted with
+  the work may accept it, and its own agreement is evidence like anybody's;
+- unless the approval was **reserved**: `[selfnote][approval] reserved
+  <user id> (<name>) #<post>` in any of those conversations (written by
+  `agentchat reserve` on that person's own words) leaves that person as the
+  only holder. The mission then waits for their words.
+
+The recorder — the holder itself, autolab's close-out, the completion
+door, anybody — changes nothing: the same post gives the same record. The
+evidence must be a holder's post (never the mission's own agent: a
+worker's completion claim is not acceptance), in the mission's own
+conversations or the requester's chain, and **later than the last result
+shown** for review (each task's `[change] accepted … +shown=<id>`, else its
+newest report): the initial request, or an agreement given before the
+result existed, accepts nothing. The note says whose decision it was, on
+which post, and which shown result it followed (`after=#<shown>`).
+
 What it refuses, before writing anything: a conversation that is not a
 mission; a mission cancelled, replaced or retired; a task not finished yet
 (accepting the last task and the mission may coincide in the requester's
-words, but the record waits until the task is closed); an acceptance without
-the post it rests on, unless a person is recording their own decision; and
-evidence written by the recorder itself or by the mission's owner — an
-acceptance is quoted, never performed.
+words, but the record waits until the task is closed); an acceptance
+without the post it rests on, unless a holder is recording their own
+decision in person; and evidence that fails the rules above.
 
 **Repeating it is safe.** Every write is skipped when it is already there, and
 an acceptance note already on record is the one that counts: a retry after
@@ -45,9 +68,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from .selfnote import note, parse_note
+from .selfnote import Conversation, effective_rootchat, is_speech, note, parse_note, parse_rootchat
 from .trace import CANCELLED_WORDS, trace
-from .zulip import RESOLVED_TOPIC_PREFIX, ZulipClient, ZulipError, log as default_log
+from .zulip import RESOLVED_TOPIC_PREFIX, ZulipClient, ZulipError, locate, log as default_log
 
 ACCEPTANCE_TAG = "acceptance"
 STATE_TAG = "state"
@@ -56,11 +79,21 @@ TASK_ACCEPTED = "accepted"
 #: A task the requester may be said to have accepted: its run closed it.
 FINISHED_TASK = ("completed", "accepted")
 HISTORY = 1000
-_ACCEPTANCE = re.compile(r"^#(?P<evidence>\d+) by (?P<by>\d+)(?: \((?P<name>.*)\))?")
+_ACCEPTANCE = re.compile(r"^#(?P<evidence>\d+) by (?P<by>\d+)(?: \((?P<name>[^)]*)\))?")
+APPROVAL_TAG = "approval"
+_RESERVED = re.compile(r"^reserved (?P<user>\d+)(?: \((?P<name>[^)]*)\))?(?: #(?P<post>\d+))?")
+_SHOWN = re.compile(r"\+shown=(\d+)")
+#: How far up the requester's root notes the chain is followed.
+CHAIN_DEPTH = 4
 _MISSION = re.compile(r"^mission m(?P<id>\d+)\b")
 
 __all__ = [
     "ACCEPTANCE_TAG",
+    "APPROVAL_TAG",
+    "Decision",
+    "decision",
+    "parse_reservation",
+    "reservation_note",
     "Acceptance",
     "AcceptanceRefused",
     "accept_mission",
@@ -73,12 +106,120 @@ class AcceptanceRefused(RuntimeError):
     """The mission cannot be accepted now, and nothing was written."""
 
 
-def acceptance_note(evidence: int, by_id: int, by_name: str = "") -> str:
-    """`[selfnote][acceptance] #<evidence> by <user id> (<name>)`. Evidence 0
-    means a person recorded their own decision with no post to point at (the
-    completion door)."""
+def acceptance_note(evidence: int, by_id: int, by_name: str = "", after: int = 0) -> str:
+    """`[selfnote][acceptance] #<evidence> by <user id> (<name>) [after=#<shown>]`.
+    Evidence 0 means a holder recorded their own decision with no post to
+    point at (the completion door); `after` is the shown result the decision
+    followed."""
     name = f" ({by_name})" if by_name else ""
-    return note(ACCEPTANCE_TAG, f"#{int(evidence)} by {int(by_id)}{name}")
+    shown = f" after=#{int(after)}" if after else ""
+    return note(ACCEPTANCE_TAG, f"#{int(evidence)} by {int(by_id)}{name}{shown}")
+
+
+def reservation_note(user_id: int, name: str = "", post: int = 0) -> str:
+    """`[selfnote][approval] reserved <user id> (<name>) #<post>`: the final
+    approval of the work opened from here is that person's own (failsafe p5).
+    `post` is where they said so."""
+    who = f" ({name})" if name else ""
+    return note(APPROVAL_TAG, f"reserved {int(user_id)}{who}" + (f" #{int(post)}" if post else ""))
+
+
+def parse_reservation(content) -> tuple[int, str, int] | None:
+    """`(user id, name, post)` of a reservation note, or None."""
+    value = parse_note(content, APPROVAL_TAG)
+    match = _RESERVED.match(value.strip()) if value else None
+    if match is None:
+        return None
+    return int(match.group("user")), match.group("name") or "", int(match.group("post") or 0)
+
+
+@dataclass
+class Decision:
+    """Who holds a mission's acceptance, and where it may be given."""
+
+    requester: int = 0
+    #: `(user id, name)`, the requester first and the origin's asker last.
+    holders: list[tuple[int, str]] = field(default_factory=list)
+    #: `(user id, name, post)` when a person reserved the approval.
+    reserved: tuple[int, str, int] | None = None
+    #: `(channel, bare topic)` of every conversation the decision may be
+    #: given in: the mission's, its tasks', and the requester chain's.
+    conversations: set[tuple[str, str]] = field(default_factory=set)
+
+    def may_decide(self, user_id: int) -> bool:
+        if self.reserved is not None:
+            return int(user_id) == self.reserved[0]
+        return any(int(user_id) == holder for holder, _ in self.holders)
+
+    def describe(self) -> str:
+        if self.reserved is not None:
+            return f"{self.reserved[1] or self.reserved[0]} (who reserved the approval)"
+        return " or ".join(str(name or uid) for uid, name in self.holders) or "nobody known"
+
+
+def _bare(topic: str) -> str:
+    return topic[len(RESOLVED_TOPIC_PREFIX):] if topic.startswith(RESOLVED_TOPIC_PREFIX) else topic
+
+
+def _read(client, conversation: Conversation) -> tuple[Conversation, list[dict]]:
+    found = locate(client, conversation) or conversation
+    try:
+        return found, client.topic_history(found.channel, found.topic, num_before=HISTORY)
+    except ZulipError:
+        return found, []
+
+
+def decision(client, history: list[dict], owner: int | None, channel: str, topic: str) -> Decision:
+    """Who holds the acceptance of the mission whose conversation is
+    `history`: its requester and everybody up the requester's root notes to
+    the request's origin — or the one person who reserved it."""
+    found = Decision(conversations={(channel, _bare(topic))})
+    speakers = [m for m in history if is_speech(m) and m.get("sender_id") != owner]
+    notes = [m for m in history if m.get("sender_id") != owner and parse_rootchat(m.get("content"))]
+    requester = int((notes or speakers or [{}])[0].get("sender_id") or 0)
+    found.requester = requester
+    if not requester:
+        return found
+    names = {int(m.get("sender_id") or 0): str(m.get("sender_full_name") or "") for m in history}
+    found.holders.append((requester, names.get(requester, "")))
+    reservations = [r for m in history if (r := parse_reservation(m.get("content")))]
+    asker, messages, depth = requester, history, 0
+    while depth < CHAIN_DEPTH:
+        depth += 1
+        home = effective_rootchat(messages, asker)
+        if home is None:
+            break
+        where, messages = _read(client, home)
+        found.conversations.add((where.channel, _bare(where.topic)))
+        reservations += [r for m in messages if (r := parse_reservation(m.get("content")))]
+        names.update({int(m.get("sender_id") or 0): str(m.get("sender_full_name") or "") for m in messages})
+        # Whoever asked there: a root note of another agent, else the first
+        # person who spoke that is not the asker.
+        above = effective_rootchat(messages, asker)
+        first = next((m for m in messages if is_speech(m) and int(m.get("sender_id") or 0) != asker), None)
+        if above is not None and (above.channel, _bare(above.topic)) != (where.channel, _bare(where.topic)):
+            continue  # the same asker, one conversation further up (a run opened from a desk)
+        if first is None:
+            break
+        asker = int(first.get("sender_id") or 0)
+        if asker and all(asker != h for h, _ in found.holders):
+            found.holders.append((asker, names.get(asker, "")))
+    if reservations:
+        found.reserved = reservations[-1]
+    return found
+
+
+def _shown(tasks) -> int:
+    """The newest result shown for review among the mission's tasks, as
+    their close-outs bound it (`[change] accepted … +shown=<id>`, failsafe
+    p4). A task closed before that binding existed says nothing here."""
+    newest = 0
+    for task in tasks:
+        for record in getattr(task, "records", []) or []:
+            match = _SHOWN.search(str(record.get("value") or "")) if record.get("tag") == "change" else None
+            if match:
+                newest = max(newest, int(match.group(1)))
+    return newest
 
 
 def parse_acceptance(content) -> tuple[int, int, str] | None:
@@ -106,6 +247,7 @@ class Acceptance:
     tasks: list[str] = field(default_factory=list)
     written: list[str] = field(default_factory=list)
     resolved: bool = False
+    after: int = 0
 
     @property
     def label(self) -> str:
@@ -211,28 +353,44 @@ def accept_mission(
             f"m{mission_id} still has unfinished task(s): {listed}. A task is closed by its run once you "
             "agree it is done; accept the mission after that")
 
+    held = decision(client, history, owner, root.channel, root.topic)
+    for task in tasks:
+        held.conversations.add((task.channel, _bare(task.topic)))
+    shown = _shown(tasks)
     if not recorded:
         if evidence is None:
-            if me.get("is_bot", True):
+            if me.get("is_bot", True) or not held.may_decide(me_id):
                 raise AcceptanceRefused(
                     "an acceptance is recorded with the post where it was given: pass the message id of the "
-                    "requester's words (--evidence). Only a person recording their own decision needs none")
+                    f"words of {held.describe()} (--evidence). Only a holder recording their own decision in "
+                    "person needs none")
             done.evidence, done.by_id, done.by_name = 0, me_id, str(me.get("full_name") or "")
         else:
             said = client.message(int(evidence), strict=True)
             if said is None:
                 raise AcceptanceRefused(f"the evidence #{evidence} does not exist")
             speaker = int(said.get("sender_id") or 0)
-            if speaker == me_id:
-                raise AcceptanceRefused(
-                    f"#{evidence} is your own post; an acceptance is the requester's decision — pass the post "
-                    "where they gave it")
             if owner is not None and speaker == owner:
-                raise AcceptanceRefused(f"#{evidence} was written by the mission's own agent, not by its requester")
+                raise AcceptanceRefused(f"#{evidence} was written by the mission's own agent: a worker's own "
+                                        "completion is not its requester's acceptance")
             if int(evidence) < mission_id:
                 raise AcceptanceRefused(f"#{evidence} is older than m{mission_id} itself, so it cannot accept it")
+            if not held.may_decide(speaker):
+                raise AcceptanceRefused(
+                    f"#{evidence} was written by {said.get('sender_full_name') or speaker}, who does not hold "
+                    f"m{mission_id}'s acceptance; it is {held.describe()}'s to give")
+            where = (str(said.get("display_recipient") or ""), _bare(str(said.get("subject") or "")))
+            if where not in held.conversations:
+                raise AcceptanceRefused(
+                    f"#{evidence} is in #{where[0]} > {where[1]}, which is not m{mission_id}'s conversation, one of "
+                    "its tasks', or a conversation it was requested from")
+            if shown and int(evidence) < shown:
+                raise AcceptanceRefused(
+                    f"#{evidence} was said before the result it would accept was shown (#{shown}): an acceptance "
+                    "follows the reviewed result")
             done.evidence, done.by_id = int(evidence), speaker
             done.by_name = str(said.get("sender_full_name") or "")
+        done.after = shown
 
     # The record, in an order a repeat can finish: the tasks, the note that
     # says whose decision it is, then `done`, then the resolve.
@@ -243,7 +401,8 @@ def accept_mission(
         done.tasks.append(task.identity.split("#")[-1])
         done.written.append(f"{task.channel}/{task.topic}: accepted")
     if not recorded:
-        client.send_to_channel(root.channel, root.topic, acceptance_note(done.evidence, done.by_id, done.by_name))
+        client.send_to_channel(root.channel, root.topic,
+                               acceptance_note(done.evidence, done.by_id, done.by_name, done.after))
         done.written.append(f"{root.channel}/{root.topic}: acceptance #{done.evidence}")
     client.send_to_channel(root.channel, root.topic, note(STATE_TAG, MISSION_DONE))
     done.written.append(f"{root.channel}/{root.topic}: done")

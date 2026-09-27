@@ -61,7 +61,12 @@ from .zulip import (
     ZulipError,
     ZulipRejected,
     live_topic_name,
+    locate,
 )
+
+def _bare_topic(topic: str) -> str:
+    return topic[len(RESOLVED_TOPIC_PREFIX):] if topic.startswith(RESOLVED_TOPIC_PREFIX) else topic
+
 
 ENV_VARIABLE = "AGENTCHAT_ZULIP_ENV"
 DEFAULT_READ_COUNT = 30
@@ -146,9 +151,11 @@ Examples
   # Resolved by mistake? Put it back: same conversation, same record.
   agentchat unresolve <their-channel> <topic>
 
-  # The requester has accepted a whole mission: record it — whose decision,
-  # on which post — and the mission is done. No post, nobody is served.
+  # A whole mission was accepted by whoever holds that decision: record it —
+  # whose decision, on which post — and the mission is done. No post, nobody
+  # is served. The person you serve keeps the approval? Record that first.
   agentchat accept <any message id in the mission's conversation> --evidence <message id>
+  agentchat reserve --evidence <their post saying they approve it themselves>
 
   # Who can be asked to run under a particular execution option, and what
   # each of their options costs and covers.
@@ -247,8 +254,12 @@ Notes
   human is the one expected to speak next. A stem already in use is refused.
 
   `accept` records a mission's acceptance where the mission is, with the post
-  it rests on: the requester's own words, which you quote, never your own
-  judgment. It writes selfnotes only — each finished task `accepted`, the
+  it rests on: the words of whoever holds the decision — the mission's
+  requester (you, when the work was entrusted to you: your own agreement
+  counts), or whoever that requester asked for, unless a person reserved it
+  (`reserve`). It counts only after the result it accepts was shown, and a
+  worker's own "done" never counts. Whoever records it, the record is the
+  same. It writes selfnotes only — each finished task `accepted`, the
   acceptance note, `done` — and resolves the mission's conversation, so it
   buys nobody a run; posting the acceptance into the plan's conversation
   instead asks its agent to plan again. It refuses, and writes nothing, while
@@ -722,7 +733,24 @@ def build_parser() -> argparse.ArgumentParser:
     accept.add_argument("message_id", type=int,
                         help="the mission: its mission note's id (m<id> without the m) or any post in its conversation")
     accept.add_argument("--evidence", type=int, default=None,
-                        help="the post where the requester accepted the mission (their words, not yours)")
+                        help="the post where the decision was given: the words of whoever holds it — the mission's "
+                             "requester (you, when you asked for it and it was entrusted to you) or whoever you asked "
+                             "for; after the result it accepts was shown")
+
+    reserve = subcommands.add_parser(
+        "reserve",
+        help="record that a person keeps the final approval of the work asked for here",
+        description=(
+            "When the person you serve says they will approve the result themselves (\"I want "
+            "to approve it before it is done\"), record it here, in the conversation you are "
+            "serving: `[selfnote][approval] reserved <user> #<their post>`. Every mission "
+            "opened from this conversation — and from the runs opened from it — then waits for "
+            "that person's own words; your agreement closes tasks but does not accept the "
+            "mission. A selfnote: nobody is served by it."
+        ),
+    )
+    reserve.add_argument("--evidence", type=int, required=True,
+                         help="their post that reserved the approval (it names who it is)")
 
     options = subcommands.add_parser(
         "options",
@@ -1014,6 +1042,28 @@ def _run(args, client: ZulipClient, out) -> int:
         folded = f" (folding in {len(twin)} stray post(s) made under the old name after the ✔)" if twin else ""
         print(f"unresolved #{args.channel} > {bare}{folded}", file=out)
         return 0
+    if args.command == "reserve":
+        from .acceptance import reservation_note
+
+        home = home_from_environment()
+        if home is None:
+            raise AgentChatError("reserve records into the conversation you are serving; none is set (AGENTCHAT_HOME)")
+        said = client.message(int(args.evidence))
+        if said is None:
+            raise AgentChatError(f"#{args.evidence} does not exist")
+        where = locate(client, home) or home
+        if (str(said.get("display_recipient") or ""), _bare_topic(str(said.get("subject") or ""))) != \
+                (where.channel, _bare_topic(where.topic)):
+            raise AgentChatError(f"#{args.evidence} is not in {where.channel}/{where.topic}: a reservation is "
+                                 "recorded where the person said it")
+        if int(said.get("sender_id") or 0) == int(client.whoami()["user_id"]):
+            raise AgentChatError(f"#{args.evidence} is your own post: the reservation is the person's own words")
+        client.send_to_channel(where.channel, where.topic,
+                               reservation_note(int(said["sender_id"]), str(said.get("sender_full_name") or ""),
+                                                int(args.evidence)))
+        print(f"recorded in {where.channel}/{where.topic}: the final approval is "
+              f"{said.get('sender_full_name') or said['sender_id']}'s own (#{args.evidence})", file=out)
+        return 0
     if args.command == "accept":
         from .acceptance import AcceptanceRefused, accept_mission
 
@@ -1136,7 +1186,7 @@ def _run(args, client: ZulipClient, out) -> int:
 #: The commands that change the realm. A failure of one of them is an event
 #: the run's own report may leave out; `OPFAIL_TAG` keeps it where a reader
 #: of the request can find it (`agag.trace`).
-WRITE_COMMANDS = ("send", "resolve", "unresolve", "use", "anchor", "argue", "accept")
+WRITE_COMMANDS = ("send", "resolve", "unresolve", "use", "anchor", "argue", "accept", "reserve")
 OPFAIL_TAG = "opfail"
 
 

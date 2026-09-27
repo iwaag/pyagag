@@ -222,3 +222,9 @@ def test_the_command_line_prints_one_document(tmp_path, capsys):
     assert health.main(["--dir", str(tmp_path / "exec"), "--ack", "41", "--window", "1"]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["schema"] == health.SCHEMA and report["process"]["state"] == "alive"
+
+
+def test_without_a_record_a_delivered_serving_is_ended(tmp_path):
+    q = queue(tmp_path / "listener.sqlite", state="delivered", delivered=77)
+    report = health.probe(tmp_path / "exec", ack=41, queue=q, now=1200.0)
+    assert report["verdict"] == "ended" and "#77" in report["why"]

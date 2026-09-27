@@ -204,6 +204,9 @@ def probe(directory: Path, *, ack: int = 0, channel: str = "", topic: str = "", 
         else:
             unknowns.append("no execution record for this serving (the run kept none, or has not started)")
         report["why"] = "nothing on record says what this serving's run is doing"
+        if stage is not None and stage.get("state") == "delivered" and stage.get("delivered_id"):
+            report["verdict"] = ENDED
+            report["why"] = f"its serving delivered its reply #{stage['delivered_id']} (no execution record)"
         if stage is not None and stage.get("queued"):
             report["why"] += f"; its conversation is {', '.join(stage['queued'])} in the listener's queue"
         return report

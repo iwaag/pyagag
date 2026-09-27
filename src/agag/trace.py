@@ -1611,6 +1611,14 @@ def recheck(client, message_id: int, after: int, *, now: int | None = None) -> R
     state, _ = _note_state(messages, owner)
     result = Recheck("stopped", channel, topic, owner_name, int(after), facts["ack"], facts["ack_at"],
                      facts["work"], facts["work_at"], facts["execution"], state, observed_at=now)
+    if owner is None and not state:
+        # No agent has ever served this conversation (failsafe p5 trial E: a
+        # post went to a topic nobody listens to, and "asked" told the
+        # requester to wait for an owner that does not exist).
+        result.verdict = "unowned"
+        result.detail = ("no agent has acknowledged anything in this conversation: whatever was posted here "
+                         "has nobody to serve it")
+        return result
     if state in ("completed", "done", "accepted", "cancelled", "finished", "ended"):
         result.verdict, result.detail = "finished", f"its record says `{state}`"
         return result
@@ -1647,6 +1655,8 @@ RECHECK_NEXT = {
     "asked": "a resume is already waiting for its owner: do not ask again",
     "stopped": "not resumed: post in that conversation to resume it (once)",
     "unreadable": "nothing can be concluded; ask the developer if it stays so",
+    "unowned": "check that this is the conversation the work is in (its owner's topic); post there instead, "
+               "or ask the developer",
 }
 
 

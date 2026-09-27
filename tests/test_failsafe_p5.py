@@ -395,3 +395,25 @@ def test_a_task_not_started_is_not_said_to_wait_behind_the_executor():
     for unit in progress._walk(cards[1]["root"]):
         if unit["work"]["state"] == "not_started":
             assert "queue" not in unit
+
+
+def test_a_topic_spelled_as_channel_slash_topic_is_refused(monkeypatch, capsys):
+    realm = Realm()
+    study = Study(realm, "growbox", "e1")
+    study.ask()
+    study.open_run()
+    realm.stream_id = lambda name: {"work-m1": 7, "pj-growbox": 6}[name]
+    assert _send(monkeypatch, realm, f"{study.run_channel}/{study.run_topic}", study.run_open, "pj-growbox",
+                 "work-m1/workrun-task1-m1", "Agreed.") == 1
+    assert "did you mean `#work-m1 > workrun-task1-m1`" in capsys.readouterr().err
+    assert not realm.topic_history("pj-growbox", "work-m1/workrun-task1-m1", 10)
+    # A slash that names no channel is an ordinary topic.
+    assert _send(monkeypatch, realm, f"{study.run_channel}/{study.run_topic}", study.run_open, "pj-growbox",
+                 "notes/2026", "a note") == 0
+
+
+def test_recheck_of_a_conversation_nobody_serves_says_so():
+    realm = Realm()
+    stray = realm.post("pj-growbox", "work-m1/workrun-task1-m1", "Agreed — please close the task.", FRONT)
+    checked = tracing.recheck(realm, stray, stray, now=realm.clock + 600)
+    assert checked.verdict == "unowned" and "nobody to serve it" in checked.detail

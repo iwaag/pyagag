@@ -893,6 +893,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def refuse_path_topic(client: ZulipClient, channel: str, topic: str) -> None:
+    """Refuse a topic spelled `<channel>/<topic>` whose first part is a real
+    channel: the post would open a new topic of that literal name in
+    `channel`, where nobody listens (failsafe p5 trial E: Front's agreement
+    went to `#pj-growbox > work-m14270/workrun-task1-m14270` and autolab never
+    saw it). A topic that merely contains a slash is left alone."""
+    head, sep, rest = topic.partition("/")
+    if not sep or not head or not rest or head == channel:
+        return
+    try:
+        client.stream_id(head)
+    except (ZulipError, KeyError, TypeError, ValueError):
+        return  # not a channel name: an ordinary topic with a slash
+    raise AgentChatError(
+        f"the topic {topic!r} names the channel #{head}: did you mean `#{head} > {rest}` "
+        f"(channel {head}, topic {rest})? Posting as given would open a new topic in #{channel} that nobody "
+        "listens to")
+
+
 def refuse_resolved(client: ZulipClient, channel: str, topic: str) -> None:
     """Refuse to post under the bare name of a conversation that is resolved.
 
@@ -961,6 +980,7 @@ def _run(args, client: ZulipClient, out) -> int:
         if not text:
             raise AgentChatError("refusing to send an empty message")
         text = compose(text, send_meta(client, args))
+        refuse_path_topic(client, args.channel, args.topic)
         refuse_resolved(client, args.channel, args.topic)
         joined = join_and_record(client, args.channel, args.topic, out)
         ensure_rootchat(client, args.channel, args.topic, out)

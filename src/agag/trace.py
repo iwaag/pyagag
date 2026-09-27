@@ -948,6 +948,16 @@ def _owed_names(messages, owner, homes, home_messages, here, receipts_from, name
     return owed[1].split(", ") if owed else []
 
 
+def _with_receipts(home: list[dict] | None, receipts: list[dict] | None) -> list[dict] | None:
+    """The requester's home, plus its served marks written elsewhere in the
+    tree (deduplicated, oldest first)."""
+    if not receipts:
+        return home
+    seen = {int(m.get("id") or 0) for m in home or ()}
+    extra = [m for m in receipts if int(m.get("id") or 0) not in seen]
+    return sorted([*(home or []), *extra], key=lambda m: int(m.get("id") or 0))
+
+
 def _identity_id(messages: list[dict]) -> int:
     for message in messages:
         for tag in IDENTITY_TAGS:
@@ -1107,7 +1117,8 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
             # and never "not started" (robust_workflow p2 step 1, R1).
             messages = None
         homes = {requester: home for requester, _, home in requested}
-        home_messages = {requester: read(home) for requester, _, home in requested}
+        home_messages = {requester: _with_receipts(read(home), receipts.get(requester))
+                         for requester, _, home in requested}
         state, detail, identity, owner, evidence, last = classify(
             messages, human=human, now=now, home_messages=home_messages, homes=homes, here=key,
             receipts_from=receipts_from, requester_names={requester: name for requester, name, _ in requested},
@@ -1177,6 +1188,20 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
         _order_tasks(node)
         node.holder = _holder(node, ending)
         return node
+
+    # A receipt is the requester's `[served]` mark, and it is written in the
+    # home of the serving that took the answer up — which need not be the
+    # conversation the root note names: Front served a routine run's task
+    # result from the request's own conversation (progress_panel p1 step 5),
+    # and the mark there was never read, so the answer stayed "undelivered"
+    # and Observer asked, again and again. Marks are matched by the post they
+    # name, so a requester's mark anywhere in this request's tree is its
+    # receipt.
+    receipts: dict[int, list[dict]] = {}
+    for messages in histories.values():
+        for message in messages or ():
+            if parse_served(message.get("content")) is not None:
+                receipts.setdefault(int(message.get("sender_id") or 0), []).append(message)
 
     result.root = build(root_key, 0, set(), True, [])
     result.calls = reader.calls

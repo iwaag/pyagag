@@ -211,7 +211,7 @@ def _run_meter(node: Node, execution: dict, now: int) -> dict[str, Any] | None:
 
 def _display(node: Node, kind: str, execution: dict, recovery: dict | None, *, now: int, viewer_id: int | None,
              pending: list[dict], turn_blocked_by: int, awaiting_agreement: bool,
-             child_states: list[str]) -> tuple[str, str, str]:
+             child_states: list[str], asked: list[dict] = ()) -> tuple[str, str, str]:
     """`(state, reason, next actor)` for one unit (module table)."""
     state = node.state
     word = node.note_state or ""
@@ -239,7 +239,10 @@ def _display(node: Node, kind: str, execution: dict, recovery: dict | None, *, n
     if verdict == "stopped":
         return "stopped", f"health check: {health.get('why')}", requester
     if recovery and (recovery.get("open") or recovery.get("unrecovered")) \
-            and recovery.get("kind") in ("stopped", "unheld", "unanswered", "failed"):
+            and recovery.get("kind") in ("stopped", "unheld", "unanswered", "failed") \
+            and not (recovery.get("kind") == "unheld" and node.holder != "none"):
+        # An `unheld` incident whose unit is held again reads as its work
+        # does; the incident stays on the unit as its recovery record.
         return "stopped", f"Observer: {recovery.get('fact') or recovery.get('kind')}", recovery.get("responsible", "")
     if recovery and recovery.get("open") and recovery.get("kind") in ("uncertain", "quiet", "silent"):
         return "unknown", f"Observer: {recovery.get('fact') or recovery.get('kind')}", recovery.get("responsible", "")
@@ -292,6 +295,14 @@ def _display(node: Node, kind: str, execution: dict, recovery: dict | None, *, n
     if node.holder == "delegate":
         return "waiting", "on work opened from it", ""
     if node.holder == "none":
+        if asked:
+            # Nothing below holds it, but the request's own conversation has
+            # a question to a person still open: the request waits for that
+            # answer (step 5: growbox's run after Front asked for acceptance).
+            who = asked[0].get("to_name") or asked[0].get("to") or "a person"
+            if viewer_id is not None and asked[0].get("to") == viewer_id:
+                return "awaiting_you", f"the request waits for your answer to #{asked[0]['id']}", "you"
+            return "waiting", f"the request waits for {who}'s answer to #{asked[0]['id']}", str(who)
         return "unknown", "its last serving ended saying the work goes on, and nothing holds it", requester
     if kind in ("request", "conversation") and state in ("awaiting_requester", "answered", "awaiting_human"):
         # A plain conversation has no record of its own end: its agent
@@ -362,13 +373,16 @@ def _meter(plan: Node, tasks: list[dict]) -> dict[str, Any] | None:
 
 
 def _unit(node: Node, *, root: bool, now: int, health: dict[int, dict], recovery: dict[int, dict],
-          viewer_id: int | None, pending: list[dict], turn_blocked_by: int = 0) -> dict[str, Any]:
+          viewer_id: int | None, pending: list[dict], turn_blocked_by: int = 0,
+          asked: list[dict] | None = None) -> dict[str, Any]:
     kind = unit_kind(node, root=root)
     execution = _execution(node, health.get(int(node.anchor)), now)
     # Children first: a plan's display depends on whether any task exists.
     children: list[dict] = []
     finished_before = True
     tasks_open = 0
+    if root:
+        asked = [] if node.topic.startswith(RESOLVED_TOPIC_PREFIX) else list(pending)
     ordered = sorted(node.children, key=lambda c: (_serial(c) == 0, _serial(c)))
     for child in ordered:
         blocked = 0
@@ -380,13 +394,13 @@ def _unit(node: Node, *, root: bool, now: int, health: dict[int, dict], recovery
                     tasks_open = _serial(child)
                 finished_before = False
         children.append(_unit(child, root=False, now=now, health=health, recovery=recovery, viewer_id=viewer_id,
-                              pending=[], turn_blocked_by=blocked))
+                              pending=[], turn_blocked_by=blocked, asked=asked))
     rec = recovery.get(int(node.anchor))
     awaiting = _awaiting_agreement(node)
     state, reason, next_actor = _display(
         node, kind, execution, rec, now=now, viewer_id=viewer_id, pending=pending if root else [],
         turn_blocked_by=turn_blocked_by, awaiting_agreement=awaiting,
-        child_states=[c["display"]["state"] for c in children if c["kind"] == "task"])
+        child_states=[c["display"]["state"] for c in children if c["kind"] == "task"], asked=asked or [])
     cancelled_at = next((r["id"] for r in reversed(_records(node, "state"))
                          if (r.get("value") or "").split()[:1] == ["cancelled"]), None)
     unit = {

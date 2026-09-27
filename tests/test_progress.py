@@ -496,3 +496,15 @@ def test_a_question_to_a_person_in_the_request_is_the_cards_reason():
     assert pending and pending[-1]["to"] == 9
     found = progress.card(result, now=t_at[upto] + 5, viewer_id=DEVELOPER, pending=pending)
     assert found["state"] == "waiting" and found["reason"].startswith(f"#{pending[0]['id']} asks")
+
+
+def test_a_receipt_written_in_another_conversation_of_the_request_is_a_receipt():
+    """Step 5's trial: Front took task 13292#1's close-out (#13397) up while
+    serving the request's own conversation, and marked it there (#13448); the
+    task's root note names the routine run. The mark is the receipt."""
+    t_at = {m["id"]: m["timestamp"] for m in TRIAL["messages"]}
+    before = tracing.trace(Realm(13447, TRIAL["messages"]), 13270, now=t_at[13447])
+    assert node(before, "workrun-task1-m13292").state == "awaiting_delivery"
+    after = tracing.trace(Realm(13448, TRIAL["messages"]), 13270, now=t_at[13448])
+    task = node(after, "workrun-task1-m13292")
+    assert task.state == "done" and task.note_state in ("completed", "accepted")

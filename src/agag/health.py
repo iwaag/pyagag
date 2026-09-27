@@ -12,6 +12,7 @@ could not be established (`agag.health.v1`):
 | `progress` — the last harness event, its age and what it was | the live record |
 | `wait` — `tool` (a call that has not returned), `children` (processes under the harness), `none` or `unknown` | the live record's open tool calls; the process table under the pid |
 | `serving` — the listener's journal stage for that ack, and whether the conversation is queued or running again | the listener's queue file, read-only |
+| `queue` — for a post not yet acknowledged: the conversation's entry, what the executor runs meanwhile (and that serving's own health), how many servings began since | the listener's queue file, read-only; the live records of the serving ahead |
 
 The verdict:
 
@@ -31,6 +32,26 @@ The verdict:
 - `ended`: the run ended and its serving delivered (or is delivering) a
   reply: nothing is running, which is the conversation's business;
 - `unknown`: anything else, with `unknowns` saying why.
+
+**A post nobody acknowledged yet** (failsafe p5) is asked about with
+`queued=True` (`--queued`, no ack): the listener serves one conversation at
+a time, so a post can wait behind another request's healthy task for as
+long as that task runs. `probe_queue` reads the conversation's entry in the
+listener's queue and what the executor runs meanwhile, and answers:
+
+- `queued`: the entry waits and the serving ahead of it is healthy
+  (`running`/`waiting`, checked the same way, `queue.ahead`);
+- `stopped`: the entry waits while the executor runs **nothing** for
+  `PICKUP_SECONDS` (an idle listener that has not picked it up), it was
+  passed over by `PASSED_OVER` servings begun after it, or the listener
+  gave up on it (`failed`);
+- `running`/`waiting`/…: it was picked up — the verdict of that serving;
+- `unknown`: the serving ahead cannot be confirmed healthy (it is
+  `stopped` or `unknown` itself, said in `queue.ahead`), the entry is not
+  in the queue at all, or the file cannot be read.
+
+The original queued time (`queue.enqueued_at`) and the serving ahead are
+facts of each look; a reader that compares looks sees the work ahead change.
 
 **What this does not claim.** A live listener or a heartbeat is not task
 health: an alive process that has sent nothing for longer than `window` and
@@ -79,10 +100,19 @@ MAX_CHILDREN = 8
 #: still open after it is not the call doing its work.
 TOOL_GRACE = 60.0
 
-RUNNING, WAITING, STOPPED, ENDED, UNKNOWN = "running", "waiting", "stopped", "ended", "unknown"
-VERDICTS = (RUNNING, WAITING, STOPPED, ENDED, UNKNOWN)
+#: A queued conversation while the executor runs nothing, this long after
+#: it became eligible: the listener is not picking it up (failsafe p5). A
+#: healthy executor takes an eligible entry within a second.
+PICKUP_SECONDS = 90.0
+#: Servings of other conversations begun after this one was queued: past
+#: this many it has been passed over while the listener served others.
+PASSED_OVER = 3
 
-__all__ = ["SCHEMA", "VERDICTS", "probe", "main"]
+RUNNING, WAITING, STOPPED, ENDED, UNKNOWN, QUEUED = "running", "waiting", "stopped", "ended", "unknown", "queued"
+VERDICTS = (RUNNING, WAITING, STOPPED, ENDED, UNKNOWN, QUEUED)
+HEALTHY = (RUNNING, WAITING)
+
+__all__ = ["SCHEMA", "VERDICTS", "HEALTHY", "probe", "probe_queue", "queue_state", "main"]
 
 
 def _bare(topic: str) -> str:
@@ -181,6 +211,155 @@ def serving_stage(queue: Path, ack: int, channel: str, topic: str,
         "queued": [p["state"] for p in pending],
         "later_servings": int(later),
     }
+
+
+_OPEN_SERVING = ("received", "acked", "executed")
+
+
+def queue_state(queue: Path, channel: str, topic: str, timeout: float = QUEUE_TIMEOUT) -> dict[str, Any] | None:
+    """The conversation's entry in the listener's queue, what the executor
+    runs meanwhile, and how many servings began since it was queued — or
+    None when the file cannot be read (failsafe p5)."""
+    try:
+        db = sqlite3.connect(f"file:{queue}?mode=ro", uri=True, timeout=timeout)
+    except sqlite3.Error:
+        return None
+    try:
+        db.row_factory = sqlite3.Row
+        names = (_bare(topic), f"✔ {_bare(topic)}")
+        rows = [dict(r) for r in db.execute("SELECT channel, topic, route, state, message_id, enqueued_at, started_at,"
+                                           " attempts, next_at, failure FROM pending ORDER BY enqueued_at")]
+        mine = next((r for r in rows if r["channel"] == channel and r["topic"] in names), None)
+        running = []
+        for row in rows:
+            if row["state"] != "running":
+                continue
+            serving = db.execute("SELECT id, state, ack_id, started_at, home_channel, home_topic FROM servings "
+                                 "WHERE channel = ? AND topic = ? AND route = ? ORDER BY id DESC LIMIT 1",
+                                 (row["channel"], row["topic"], row["route"])).fetchone()
+            running.append({"channel": row["channel"], "topic": row["topic"], "route": row["route"],
+                            "started_at": row["started_at"],
+                            "serving": dict(serving) if serving is not None and serving["state"] in _OPEN_SERVING
+                            else None})
+        since = float(mine["enqueued_at"]) if mine is not None else None
+        began = db.execute("SELECT channel, topic, started_at FROM servings WHERE started_at > ? "
+                           "ORDER BY id", (since or 0.0,)).fetchall() if since is not None else []
+        latest = db.execute("SELECT id, state, ack_id, started_at FROM servings WHERE channel = ? AND topic IN (?, ?) "
+                            "ORDER BY id DESC LIMIT 1", (channel, *names)).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        db.close()
+    eligible = [r for r in rows if r["state"] == "pending"]
+    return {
+        "entry": mine,
+        "position": next((i + 1 for i, r in enumerate(eligible) if r is mine), None),
+        "waiting": len(eligible),
+        "running": running,
+        "served_since": sum(1 for r in began if not (r["channel"] == channel and r["topic"] in names)),
+        "latest_serving": dict(latest) if latest is not None else None,
+    }
+
+
+def probe_queue(directory: Path, *, channel: str, topic: str, queue: Path | None, since: float = 0.0,
+                window: float = WINDOW_SECONDS, now: float | None = None, table=None) -> dict[str, Any]:
+    """Whether a post nobody acknowledged is waiting its turn (module doc):
+    `queued` behind a healthy serving, `stopped` when the listener is not
+    serving it, the picked-up serving's own verdict, or `unknown`. `since` is
+    when the post was made. Never raises."""
+    now = float(now if now is not None else time.time())
+    report: dict[str, Any] = {
+        "schema": SCHEMA, "observed_at": now, "subject": {"ack": 0, "channel": channel, "topic": topic,
+                                                           "queued": True, "since": since or None},
+        "source": {"records": str(directory), "queue": str(queue) if queue else None, "host": os.uname().nodename},
+        "process": {"state": UNKNOWN}, "progress": {}, "wait": {"kind": UNKNOWN}, "serving": None,
+        "verdict": UNKNOWN, "why": "", "unknowns": [],
+    }
+    if queue is None:
+        report["why"] = "no listener queue to read"
+        report["unknowns"].append("the listener's queue")
+        return report
+    try:
+        state = queue_state(queue, channel, topic)
+    except Exception as error:  # noqa: BLE001 - a probe answers, it does not raise
+        state = None
+        report["unknowns"].append(f"the queue could not be read: {error!r}")
+    if state is None:
+        report["why"] = "the listener's queue could not be read"
+        report["unknowns"].append("the listener's queue")
+        return report
+    entry = state["entry"]
+    latest = state["latest_serving"]
+    facts = {"entry": entry, "enqueued_at": entry["enqueued_at"] if entry else None, "position": state["position"],
+             "waiting": state["waiting"], "served_since": state["served_since"], "ahead": []}
+    report["queue"] = facts
+    # A serving begun after the post read it: its turn came, whatever was
+    # queued for the conversation since.
+    picked = latest is not None and float(latest.get("started_at") or 0) >= float(since or 0)
+    if picked:
+        # Its turn came: what that serving is doing is the answer.
+        served = probe(directory, ack=int(latest.get("ack_id") or 0), channel=channel, topic=topic, queue=queue,
+                       window=window, now=now, table=table)
+        served["subject"] = {**served.get("subject", {}), "queued": True, "since": since or None}
+        served["queue"] = facts
+        if not latest.get("ack_id"):
+            served["verdict"], served["why"] = RUNNING, (
+                f"picked up {int(now - float(latest['started_at']))} s ago; its acknowledgement is being posted")
+        return served
+    if entry is None:
+        report["why"] = ("the post is not in the listener's queue and no serving of its conversation began after "
+                         "it: the listener did not take it in, or has not yet")
+        report["unknowns"].append("whether the listener saw the post")
+        return report
+    if entry["state"] == "failed":
+        report["verdict"], report["why"] = STOPPED, (
+            f"the listener gave up on this conversation: {str(entry.get('failure') or 'no reason recorded')[:200]}")
+        return report
+    queued_for = int(now - float(entry["enqueued_at"]))
+    if state["served_since"] >= PASSED_OVER:
+        report["verdict"], report["why"] = STOPPED, (
+            f"queued {queued_for} s and passed over: {state['served_since']} serving(s) of other conversations "
+            f"began after it")
+        return report
+    running = state["running"]
+    if not running:
+        eligible_at = max(float(entry["enqueued_at"]), float(entry.get("next_at") or 0))
+        idle = now - eligible_at
+        if idle >= PICKUP_SECONDS:
+            report["verdict"], report["why"] = STOPPED, (
+                f"queued {queued_for} s while the listener's executor runs nothing: it has not picked the "
+                f"conversation up for {int(idle)} s")
+        else:
+            report["why"] = f"queued {queued_for} s; the executor is idle and should take it within seconds"
+            report["unknowns"].append("whether the executor will pick it up")
+        return report
+    for ahead in running:
+        serving = ahead.get("serving") or {}
+        row = {"channel": ahead["channel"], "topic": ahead["topic"], "route": ahead["route"],
+               "started_at": ahead["started_at"], "ack": serving.get("ack_id"), "journal": serving.get("state")}
+        if serving.get("ack_id"):
+            checked = probe(directory, ack=int(serving["ack_id"]), channel=ahead["channel"], topic=ahead["topic"],
+                            queue=None, window=window, now=now, table=table)
+            row.update(verdict=checked.get("verdict"), why=str(checked.get("why") or "")[:300],
+                       last_work=(checked.get("progress") or {}).get("last_work"),
+                       last_work_at=(checked.get("progress") or {}).get("last_work_at"))
+        elif ahead.get("started_at") and now - float(ahead["started_at"]) <= window:
+            row.update(verdict=RUNNING, why="just picked up; its acknowledgement is being posted")
+        else:
+            row.update(verdict=UNKNOWN, why="the serving ahead has no acknowledgement and no record to check")
+        facts["ahead"].append(row)
+    first = facts["ahead"][0]
+    where = f"{first['channel']}/{_bare(first['topic'])}"
+    if all(row.get("verdict") in HEALTHY for row in facts["ahead"]):
+        report["verdict"], report["why"] = QUEUED, (
+            f"queued {queued_for} s (position {state['position'] or '?'} of {state['waiting']}) behind "
+            f"{where}, whose serving is {first['verdict']}: {first.get('why') or ''}")
+        report["wait"] = {"kind": "queue", "name": where, "since": entry["enqueued_at"]}
+    else:
+        report["why"] = (f"queued {queued_for} s behind {where}, whose serving is {first.get('verdict')}: "
+                         f"{first.get('why') or ''}")
+        report["unknowns"].append("whether the serving ahead is still being done")
+    return report
 
 
 #: Beside a live record, a trial fault a person injected into that run
@@ -386,10 +565,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--channel", default="")
     parser.add_argument("--topic", default="")
     parser.add_argument("--window", type=float, default=WINDOW_SECONDS)
+    parser.add_argument("--queued", action="store_true",
+                        help="the conversation holds a post nobody acknowledged: where is it in the queue")
+    parser.add_argument("--since", type=float, default=0.0, help="with --queued: when the post was made")
     args = parser.parse_args(argv)
     try:
-        report = probe(args.dir, ack=args.ack, channel=args.channel, topic=args.topic, queue=args.queue,
-                       window=args.window)
+        if args.queued:
+            report = probe_queue(args.dir, channel=args.channel, topic=args.topic, queue=args.queue,
+                                 since=args.since, window=args.window)
+        else:
+            report = probe(args.dir, ack=args.ack, channel=args.channel, topic=args.topic, queue=args.queue,
+                           window=args.window)
     except Exception as error:  # noqa: BLE001 - the interface answers
         report = {"schema": SCHEMA, "observed_at": time.time(), "verdict": UNKNOWN,
                   "why": f"the probe failed: {error!r}", "unknowns": ["everything"]}

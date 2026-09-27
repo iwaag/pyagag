@@ -110,3 +110,63 @@ def test_baseline_the_refresh_stage_is_matched_by_project_and_time_only():
                   "id": done + 50, "at": now, "by": ARCHSAGE}]  # another run's refresh, another revision
     found = progress.card(result, now=now, syncs=elsewhere)
     assert {s["stage"]: s["status"] for s in found["stages"]}["knowledge_refreshed"] == "done"
+
+
+# --- step 2: one reading of a queue, shared ------------------------------------------------
+
+
+def test_the_conversations_say_the_queued_post_waits_behind_the_other_requests_task():
+    from agag import waits
+
+    realm, growbox, worldtrend = two_studies()
+    now = realm.at(worldtrend.start_request) + 301
+    results = [tracing.trace(realm, s.origin, now=now) for s in (growbox, worldtrend)]
+    plan = node(results[1], worldtrend.plan_topic)
+    wait = waits.from_conversation(plan, waits.open_servings(results, now), now)
+    assert wait.state == "behind" and wait.evidence == "conversation" and wait.excused
+    assert wait.post == worldtrend.start_request and wait.queued_at == realm.at(worldtrend.start_request)
+    assert [row["topic"] for row in wait.ahead] == [growbox.task_topic]
+    # A conversation-only excuse lapses: an open conversation is not health.
+    late = waits.from_conversation(plan, waits.open_servings(results, now), realm.at(worldtrend.start_request)
+                                   + waits.CONVERSATION_MAX + 1)
+    assert late.state == "unknown" and not late.excused
+
+
+def test_a_confirmed_check_decides_and_an_old_one_excuses_nothing():
+    from agag import waits
+
+    realm, growbox, worldtrend = two_studies()
+    now = realm.at(worldtrend.start_request) + 301
+    plan = node(tracing.trace(realm, worldtrend.origin, now=now), worldtrend.plan_topic)
+    report = {"verdict": "queued", "observed_at": now, "why": "queued 301 s behind work-m/workrun",
+              "queue": {"ahead": [{"channel": growbox.task_channel, "topic": growbox.task_topic, "ack": 1,
+                                   "verdict": "running"}]}}
+    assert waits.from_probe(plan, report, now).state == "behind"
+    assert waits.from_probe(plan, report, now + waits.CONFIRMED_FRESH + 1).state == "unknown"
+    stopped_ahead = {**report, "verdict": "unknown",
+                     "queue": {"ahead": [{**report["queue"]["ahead"][0], "verdict": "stopped"}]}}
+    assert waits.from_probe(plan, stopped_ahead, now).state == "blocked"
+    idle = {"verdict": "stopped", "observed_at": now, "why": "the executor runs nothing", "queue": {"ahead": []}}
+    assert waits.from_probe(plan, idle, now).state == "unserved"
+    assert waits.from_probe(plan, None, now).state == "unknown"
+
+
+def test_the_panel_names_what_the_post_waits_behind_with_its_evidence():
+    realm, growbox, worldtrend = two_studies()
+    now = realm.at(worldtrend.start_request) + 301
+    cards = []
+    for study in (growbox, worldtrend):
+        found = progress.card(tracing.trace(realm, study.origin, now=now), now=now)
+        found["topic"] = study.desk_topic
+        cards.append(found)
+    progress.queue_behind(cards, now=now)
+    plan = next(u for u in progress._walk(cards[1]["root"]) if u["topic"] == worldtrend.plan_topic)
+    assert plan["queue"]["state"] == "behind" and plan["queue"]["post"] == worldtrend.start_request
+    assert f"of another request ({growbox.desk_topic})" in plan["display"]["reason"]
+
+
+def test_recheck_of_a_queued_post_says_it_is_asked_not_stopped():
+    realm, growbox, worldtrend = two_studies()
+    checked = tracing.recheck(realm, worldtrend.request, worldtrend.start_request,
+                              now=realm.at(worldtrend.start_request) + 301)
+    assert checked.verdict == "asked" and checked.pending == [worldtrend.start_request]

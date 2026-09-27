@@ -65,8 +65,10 @@ from __future__ import annotations
 
 import re
 import time
+from types import SimpleNamespace
 from typing import Any, Iterable
 
+from . import waits
 from .trace import Node, Trace
 from .zulip import RESOLVED_TOPIC_PREFIX
 
@@ -422,6 +424,8 @@ def _unit(node: Node, *, root: bool, now: int, health: dict[int, dict], recovery
         "display": {"state": state, "reason": reason, "next": next_actor},
         "latest_work_at": _latest_work(node) or None,
         "evidence_id": (node.evidence[-1] if node.evidence else node.anchor) or None,
+        "posted_at": int(node.last_activity or 0) or None,
+        "post_id": (node.evidence[0] if node.evidence else 0) or None,
         "failures": list(node.failures),
         "awaiting_agreement": awaiting,
         "cancelled_at_id": cancelled_at,
@@ -429,9 +433,22 @@ def _unit(node: Node, *, root: bool, now: int, health: dict[int, dict], recovery
         "run": _run_meter(node, execution, now),
         "children": children,
     }
+    report = health.get(int(node.anchor)) or {}
+    if node.state == "queued" and (report.get("subject") or {}).get("queued"):
+        # The owner's own listener says where the post is (failsafe p5):
+        # confirmed, and never replaced by the conversation-only reading.
+        wait = waits.from_probe(node, report, now)
+        unit["queue"] = wait.as_dict()
+        unit["display"]["reason"] = _queue_reason(unit["display"]["reason"], wait, "")
     if kind == "plan":
         unit["meter"] = _meter(node, [c for c in children if c["kind"] == "task"])
     return unit
+
+
+def _queue_reason(base: str, wait: waits.QueueWait, elsewhere: str) -> str:
+    what = {"behind": "", "blocked": "blocked: ", "unserved": "not being served: ",
+            "unknown": "why it waits is not established: "}[wait.state]
+    return f"{base}; {what}{wait.why}{elsewhere}" if base else f"{what}{wait.why}{elsewhere}"
 
 
 # --- the card ----------------------------------------------------------------------
@@ -592,46 +609,52 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
     }
 
 
-def queue_behind(cards: list[dict]) -> list[dict]:
+def queue_behind(cards: list[dict], now: int | None = None) -> list[dict]:
     """Say what a queued post waits behind, across requests.
 
     An agent's listener serves one conversation at a time (`agag.listen`:
     one executor), so a post its owner has not acknowledged while that owner
     has a serving open elsewhere waits for that serving — the difference
     between two requests being *concurrent* and their work *executing*
-    concurrently. Each queued unit whose owner has an open serving in any
-    card gets `queue` = the serving(s) it waits behind, and its reason says
-    so; the card's reason follows when that unit is its focus. Mutates and
-    returns `cards`."""
+    concurrently. The reading is `agag.waits`, the one Observer uses: a
+    unit whose owner's listener was checked (`queue` already set by `card`)
+    keeps that confirmed answer; every other queued unit gets the
+    conversation-only reading over the open servings in all these cards.
+    Its reason says so; the card's reason follows when that unit is its
+    focus. Mutates and returns `cards`."""
+    now = int(now if now is not None else time.time())
     open_by_owner: dict[str, list[dict]] = {}
     for found in cards:
         if not found.get("root"):
             continue
         for unit in _walk(found["root"]):
             # Only a serving with evidence of being served: a stale or dead
-            # open serving (`unknown`) is not what the agent is doing now.
+            # open serving (`unknown`, `stopped`) is not what the agent is doing now.
             if unit["execution"]["serving"] == "open" and unit["owner"] and unit["display"]["state"] in (
                     "working", "waiting", "planning"):
                 open_by_owner.setdefault(unit["owner"], []).append({
-                    "anchor": unit["anchor"], "label": unit["label"], "origin": found["origin"],
-                    "topic": found.get("topic") or "", "since": unit["execution"].get("ack_at"),
-                    "state": unit["display"]["state"], "evidence": unit["execution"]["evidence"]})
+                    "anchor": unit["anchor"], "channel": unit["channel"], "topic": _bare(unit["topic"]),
+                    "label": unit["label"], "origin": found["origin"], "request": found.get("topic") or "",
+                    "since": unit["execution"].get("ack_at"),
+                    "work_at": unit.get("latest_work_at") or unit["execution"].get("ack_at"),
+                    "evidence": unit["execution"]["evidence"]})
     for found in cards:
         if not found.get("root"):
             continue
         for unit in _walk(found["root"]):
             if unit["display"]["state"] != "queued" or unit["work"]["state"] not in ("queued", "not_started") \
-                    or "queue" in unit:
+                    or "queue" in unit or not unit["owner"]:
                 continue
-            ahead = sorted((row for row in open_by_owner.get(unit["owner"], []) if row["anchor"] != unit["anchor"]),
-                           key=lambda row: row["evidence"] != "confirmed")
-            if not ahead:
-                continue
-            unit["queue"] = ahead
-            first = ahead[0]
-            where = "" if first["origin"] == found["origin"] else f" of another request ({_bare(first['topic'])})"
-            unit["display"]["reason"] = (f"{unit['display']['reason']}; {unit['owner']} serves one conversation at a "
-                                         f"time and is serving {first['label']}{where}")
+            node = SimpleNamespace(anchor=unit["anchor"], owner=unit["owner"], last_activity=unit.get("posted_at") or 0,
+                                   evidence=[unit["post_id"]] if unit.get("post_id") else [])
+            wait = waits.from_conversation(node, open_by_owner, now)
+            if wait.state == waits.UNKNOWN and not wait.ahead:
+                continue  # nothing is open anywhere: the plain "queued" stands
+            unit["queue"] = wait.as_dict()
+            first = wait.ahead[0] if wait.ahead else None
+            elsewhere = f" of another request ({_bare(first['request'])})" \
+                if first and first.get("origin") != found["origin"] and first.get("request") else ""
+            unit["display"]["reason"] = _queue_reason(unit["display"]["reason"], wait, elsewhere)
             if found.get("focus") == unit["anchor"]:
                 found["reason"] = unit["display"]["reason"]
     return cards

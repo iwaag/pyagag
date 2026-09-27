@@ -435,10 +435,11 @@ def test_a_post_waiting_for_a_busy_agent_says_what_it_waits_behind():
     mine = progress.card(tracing.trace(Realm(13600, rows), 13116, now=now), now=now, viewer_id=DEVELOPER)
     other = progress.card(traced(11711, 11770, now), now=now, viewer_id=DEVELOPER)
     mine["topic"], other["topic"] = "front-failsafe-p4-t2", "front-desk-20260926-221323"
-    progress.queue_behind([mine, other])
+    progress.queue_behind([mine, other], now=now)
     plan = unit(mine, "plan", "m13123")
     assert plan["display"]["state"] == "queued"
-    ahead = {row["label"] for row in plan["queue"]}
+    assert plan["queue"]["state"] == "behind" and plan["queue"]["evidence"] == "conversation"
+    ahead = {row["label"] for row in plan["queue"]["ahead"]}
     # m11741's task is open but dead (unknown): not what autolab is serving.
     assert ahead == {"task 13123#1"}
     assert "serves one conversation at a time" in plan["display"]["reason"]

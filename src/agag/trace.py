@@ -684,7 +684,11 @@ def classify(
     if owner is None:
         if last_other is None:
             return "not_started", "nothing has been said here", identity, "", [], last_activity
-        return "queued", "no agent has acknowledged it", identity, "", [mid(last_other)], last_activity
+        # The agent the post names is whose queue it waits in (failsafe p5:
+        # a first request to a busy agent is the common queued post).
+        named = MENTION.search(str(last_other.get("content") or ""))
+        return ("queued", "no agent has acknowledged it", identity, named.group("name").strip() if named else "",
+                [mid(last_other)], last_activity)
 
     if last_answer is not None and mid(last_answer) > mid(last_other) and _is_failure(last_answer.get("content")):
         # The notice's own line, not the mention that opens the post (p3
@@ -1608,8 +1612,13 @@ def recheck(client, message_id: int, after: int, *, now: int | None = None) -> R
         return result
     since = int(after)
     newer_ack = facts["ack"] > since
+    # A post waiting for its owner counts from `after` itself: Observer names
+    # an unacknowledged post as the `after` of its re-check, and that post is
+    # exactly the one waiting (failsafe p5, #13702: a queued post read
+    # STOPPED, and Front "resumed" into the same queue).
     result.pending = [int(m.get("id") or 0) for m in messages
-                      if m.get("sender_id") != owner and is_speech(m) and int(m.get("id") or 0) > max(since, facts["ack"])]
+                      if m.get("sender_id") != owner and is_speech(m) and int(m.get("id") or 0) >= since
+                      and int(m.get("id") or 0) > facts["ack"]]
     if newer_ack and (facts["work"] > facts["ack"] or facts["execution"] == "ended"):
         result.verdict = "resumed"
         result.detail = (f"a serving acknowledged at #{facts['ack']} after the stopped #{since} has "

@@ -311,3 +311,92 @@ def test_a_trial_fault_beside_the_record_is_reported(tmp_path):
     record(tmp_path / "exec", "a.json", last_event_at=1100.0)
     (tmp_path / "exec" / "a.injected").unlink()
     assert probe(tmp_path, 1200.0, table((1, 0, 9999, "launchd")))["run"]["injected"] is None
+
+
+# --- a post nobody acknowledged yet: where is it in the queue (failsafe p5) -------------------
+
+
+def listener_queue(path: Path):
+    from agag.listen import Queue
+
+    return Queue(path)
+
+
+def growbox_task_running(tmp_path, *, last_event_at=1290.0, pid=5000):
+    """autolab's executor serves growbox's task (acked #41) while worldtrend's
+    plan conversation waits (trial B, #13702)."""
+    q = listener_queue(tmp_path / "listener.sqlite")
+    q.enqueue("work-m1", "workrun-task1-m1", "owner", revision=1, message_id=40, at=1000.0)
+    entry = q.take(at=1001.0)
+    q.open_serving(entry, at=1001.0).acked(41)
+    q.enqueue("pj-w", "workplan-w", "owner", revision=2, message_id=70, at=1100.0)
+    record(tmp_path / "exec", "a.json", last_event_at=last_event_at, last_work_at=last_event_at, pid=pid)
+    return q
+
+
+def queued_probe(tmp_path, now, rows, **kwargs):
+    return health.probe_queue(tmp_path / "exec", channel="pj-w", topic="workplan-w",
+                              queue=tmp_path / "listener.sqlite", since=1099.0, now=now, table=rows, **kwargs)
+
+
+def test_a_post_behind_a_healthy_serving_is_queued_with_what_it_waits_behind(tmp_path):
+    growbox_task_running(tmp_path)
+    report = queued_probe(tmp_path, 1300.0, table((5000, 1, 299, "claude")))
+    assert report["verdict"] == "queued", report["why"]
+    facts = report["queue"]
+    assert facts["enqueued_at"] == 1100.0 and facts["position"] == 1 and facts["served_since"] == 0
+    (ahead,) = facts["ahead"]
+    assert (ahead["channel"], ahead["ack"], ahead["verdict"]) == ("work-m1", 41, "running")
+    assert "behind work-m1/workrun-task1-m1" in report["why"]
+
+
+def test_a_post_behind_a_stopped_serving_is_not_excused(tmp_path):
+    growbox_task_running(tmp_path)
+    report = queued_probe(tmp_path, 1300.0, table())  # the task's harness is gone
+    assert report["verdict"] == "unknown"
+    assert report["queue"]["ahead"][0]["verdict"] == "stopped"
+    assert "whose serving is stopped" in report["why"]
+
+
+def test_a_post_the_idle_executor_does_not_pick_up_is_stopped(tmp_path):
+    q = listener_queue(tmp_path / "listener.sqlite")
+    q.enqueue("pj-w", "workplan-w", "owner", revision=2, message_id=70, at=1100.0)
+    soon = queued_probe(tmp_path, 1100.0 + health.PICKUP_SECONDS - 5, table())
+    assert soon["verdict"] == "unknown" and "should take it within seconds" in soon["why"]
+    late = queued_probe(tmp_path, 1100.0 + health.PICKUP_SECONDS + 5, table())
+    assert late["verdict"] == "stopped" and "has not picked the conversation up" in late["why"]
+
+
+def test_a_post_passed_over_while_others_are_served_is_stopped(tmp_path):
+    q = listener_queue(tmp_path / "listener.sqlite")
+    q.enqueue("pj-w", "workplan-w", "mention", revision=2, message_id=70, at=1100.0)
+    for n in range(health.PASSED_OVER):
+        q.enqueue("front", f"front-{n}", "owner", revision=3 + n, message_id=80 + n, at=1110.0 + n)
+        entry = q.take(at=1120.0 + n)
+        q.open_serving(entry, at=1120.0 + n)
+        q.drop(entry)
+    report = queued_probe(tmp_path, 1200.0, table())
+    assert report["verdict"] == "stopped" and "passed over" in report["why"]
+
+
+def test_a_post_that_was_picked_up_answers_for_its_serving(tmp_path):
+    q = growbox_task_running(tmp_path)
+    q.drop(q.entries("running")[0])
+    entry = q.take(at=1310.0)
+    q.open_serving(entry, at=1310.0)
+    report = queued_probe(tmp_path, 1312.0, table())
+    assert report["verdict"] == "running" and "picked up" in report["why"]
+
+
+def test_a_post_the_listener_never_took_in_is_unknown(tmp_path):
+    listener_queue(tmp_path / "listener.sqlite")
+    report = queued_probe(tmp_path, 1300.0, table())
+    assert report["verdict"] == "unknown" and "not in the listener's queue" in report["why"]
+
+
+def test_the_command_line_answers_for_a_queued_post(tmp_path, capsys):
+    growbox_task_running(tmp_path, last_event_at=10**10)
+    assert health.main(["--dir", str(tmp_path / "exec"), "--queue", str(tmp_path / "listener.sqlite"),
+                        "--queued", "--since", "1099", "--channel", "pj-w", "--topic", "workplan-w"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["subject"]["queued"] is True and report["queue"]["ahead"][0]["ack"] == 41

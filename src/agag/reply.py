@@ -73,7 +73,10 @@ __all__ = [
     "REPLY_GUIDE",
     "REPLY_LANGUAGE",
     "ReplySplit",
+    "REPLY_ATTEMPTS",
     "failure_line",
+    "owed_reply",
+    "retry_notice",
     "record_reply_outcome",
     "repair_prompt",
     "repair_with",
@@ -274,9 +277,52 @@ def repair_with(run: Callable[[str], str], previous_output: str) -> Callable[[st
     return lambda reason: run(repair_prompt(previous_output, reason))
 
 
-def failure_line(reason: str) -> str:
-    """The visible system failure when no reply could be made."""
-    return f"(this run produced no reply: {reason}; its output is kept in the run record)"
+def failure_line(reason: str, *, final: bool = True) -> str:
+    """The visible system failure when no reply could be made. The input it
+    was given stays unanswered: the first failure says the reply is asked
+    for once more; the last says it is left for the monitor to report."""
+    then = ("the input stays unanswered and is reported" if final
+            else "the reply is still owed and is asked for once more")
+    return f"(this run produced no reply: {reason}; its output is kept in the run record; {then})"
+
+
+#: Servings that may try to produce one reply for the same input: the one
+#: that failed, and one re-serving of that input (`agag.listen`). Each runs
+#: its own in-run repair first.
+REPLY_ATTEMPTS = 2
+#: How much of a failed run's own output the journal keeps for the retry.
+OWED_OUTPUT_CHARS = 12000
+
+
+def owed_reply(record) -> dict | None:
+    """The reply a delivered serving still owes (`failsafe` p3), or None.
+
+    A serving whose run produced no usable reply even after its repair
+    posted a failure line, but the input it was given was not answered:
+    its journal record carries `extra.reply_owed` (the reason, the attempt,
+    the run's own output) until a later serving of the same input settles
+    it. The last attempt (`final`) owes nothing more to the listener; its
+    failure is the record the monitor escalates."""
+    extra = getattr(record, "extra", None) or {}
+    owed = extra.get("reply_owed") if isinstance(extra, dict) else None
+    if not isinstance(owed, dict) or owed.get("final") or owed.get("settled_by"):
+        return None
+    return owed
+
+
+def retry_notice(owed: dict) -> str:
+    """What the re-serving of an unanswered input is told: the previous
+    run's own output, and that everything it did has happened."""
+    shown = str(owed.get("output") or "").strip() or "(the output was empty)"
+    return (
+        "# Your previous run on this input produced no usable reply\n\n"
+        f"Its reply could not be posted ({owed.get('reason') or 'no reply'}), so the conversation was told that "
+        "the reply is still owed and this serving was started for it. Everything that run did has already "
+        "happened — posts elsewhere, files, commands, recorded decisions, machine blocks. Do not repeat any of "
+        "it; if you are unsure whether something happened, check the threads and the workspace. Its own output "
+        "is below for reference. Write the reply from where things stand now.\n\n"
+        f"===== PREVIOUS OUTPUT =====\n{shown}\n===== END OF PREVIOUS OUTPUT ====="
+    )
 
 
 def resolve_reply(output: str, repair: Callable[[str], str] | None = None, *, log=None) -> tuple[str, ReplySplit, bool]:

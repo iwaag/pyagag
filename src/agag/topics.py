@@ -40,7 +40,10 @@ from .execopt import ExecOptions, Selection
 from .memo import is_memo_channel
 from .continuation import CONTINUATION_GUIDE, continuation_note, split_continuation
 from .post import PROGRESS, REPORT, RESPONSE_REQUEST, PostMeta, combine, compose, label as post_label, parse_post
-from .reply import REPLY_GUIDE, record_reply_outcome, resolve_reply
+from .reply import (
+    OWED_OUTPUT_CHARS, REPLY_ATTEMPTS, REPLY_GUIDE, failure_line, owed_reply, record_reply_outcome, resolve_reply,
+    retry_notice,
+)
 from .selfnote import is_selfnote, is_speech, owed_start
 from .serving import NullJournal, Serving, note_input
 from .selfnote import Conversation
@@ -334,6 +337,9 @@ def prompt_with_guide(lines, guide_text: str, *, reply: bool = False, continuati
     prompt = "\n".join(lines) + f"\n\n{guide_text}"
     if reply:
         prompt = f"{prompt}\n\n{REPLY_GUIDE}"
+        notice = reply_retry_notice()
+        if notice:
+            prompt = f"{prompt}\n\n{notice}"
     if continuation:
         # The carry-forward block (`agag.continuation`), for a role whose
         # conversation outlives one serving and delegates elsewhere.
@@ -1019,6 +1025,7 @@ def serve_topic(
 
         parts: list[str] = []
         carried = None
+        owes_retry = False
         # What the handler's state requires or suggests, and what the words
         # declare, combine once below (`agag.post.combine`): a failed handler
         # never reached a state, so it requires nothing and its line is a report.
@@ -1038,11 +1045,26 @@ def serve_topic(
             if repaired:
                 log(f"reply for {reply_channel!r}/{reply_topic!r} came from the repair run"
                     f"{'' if split.ok else ' and still had no usable mark'}")
+            earlier = getattr(context, "previous", None)
+            earlier_owed = owed_reply(earlier) if earlier is not None else None
             if not split.ok:
-                log(f"no usable reply for {reply_channel!r}/{reply_topic!r}: {split.error}; posting the failure")
+                # The input stays unanswered (failsafe p3, p2's #12509): the
+                # journal owes the reply, the first failure says so without
+                # closing the serving, and the listener serves the input
+                # once more with this output in front of the run.
+                attempt = int((earlier_owed or {}).get("attempt") or 0) + 1
+                owes_retry = attempt < REPLY_ATTEMPTS
+                _remember(journal, reply_owed={"reason": split.error or "no reply", "attempt": attempt,
+                                               "final": not owes_retry,
+                                               "output": (output or "")[-OWED_OUTPUT_CHARS:]})
+                text = failure_line(split.error or "no reply", final=not owes_retry)
+                log(f"no usable reply for {reply_channel!r}/{reply_topic!r}: {split.error}; posting the failure "
+                    f"(attempt {attempt}/{REPLY_ATTEMPTS}{', the reply stays owed' if owes_retry else ''})")
+            if earlier_owed is not None:
+                _settle(journal, earlier)
             if split.meta_error:
-                log(f"reply intent unusable in {reply_channel!r}/{reply_topic!r}: {split.meta_error}; posted unclassified")
-            declared = split.meta if split.ok else PostMeta(intent=REPORT)
+                log(f"reply intent partly unusable in {reply_channel!r}/{reply_topic!r}: {split.meta_error}")
+            declared = split.meta if split.ok else PostMeta(intent=PROGRESS if owes_retry else REPORT)
             parts.append(text)
         parts += [section for section in result.sections if section]
         parts += [notice for notice in result.notices if notice]
@@ -1065,9 +1087,12 @@ def serve_topic(
         if body:
             quiet = result.quiet_progress and declared is not None and declared.intent == PROGRESS
             mention = mention_of(requester) if handoff and not quiet else ""
+            # A failure that still owes the reply does not end the serving's
+            # obligation: no `end=`, so the conversation reads as still in
+            # hand while the input is served once more.
             text = _with_meta(f"{mention}\n\n{body}" if mention else body, meta, requester, journal, log,
                               seen=context.processed_up_to if replies_here else 0,
-                              fallback=declared, self_id=self_id, end=ack_id)
+                              fallback=declared, self_id=self_id, end=0 if owes_retry else ack_id)
             journal.prepared(destination.channel, destination.topic, text,
                              resolve_after=bool(result.resolve_after), after_id=after_id)
             # `DeliveryError` escapes on purpose: the text is prepared and
@@ -1202,6 +1227,33 @@ def _remember(journal, **values) -> None:
         journal.queue.update_serving(journal.id, extra=extra)
     else:
         record.extra.update(values)
+
+
+def _settle(journal, earlier) -> None:
+    """The earlier serving's owed reply is settled by this serving — with
+    a reply, or with this serving's own failure, which is the last."""
+    extra = dict(getattr(earlier, "extra", None) or {})
+    owed = dict(extra.get("reply_owed") or {})
+    owed["settled_by"] = int(getattr(journal, "id", 0) or 0) or True
+    extra["reply_owed"] = owed
+    queue = getattr(journal, "queue", None)
+    if queue is not None and getattr(earlier, "id", None):
+        queue.update_serving(earlier.id, extra=extra)
+    else:
+        earlier.extra.update(extra)
+
+
+def reply_retry_notice() -> str:
+    """The notice for a serving that re-serves an input whose previous run
+    produced no usable reply, read from the serving bound to this thread;
+    empty otherwise. `prompt_with_guide(reply=True)` appends it."""
+    journal = serving_record.current()
+    try:
+        earlier = journal.previous() if journal is not None else None
+    except Exception:  # noqa: BLE001 - a notice never fails a serving
+        return ""
+    owed = owed_reply(earlier) if earlier is not None else None
+    return retry_notice(owed) if owed is not None else ""
 
 
 def _annotate_record(journal) -> None:

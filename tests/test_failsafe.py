@@ -219,3 +219,38 @@ def test_quiet_asks_about_the_deepest_unfinished_unit_only():
     at = 110 + tracing.THRESHOLDS["quiet"]
     result = tracing.trace(Realm(10**9, post.messages), origin, now=at)
     assert [(c.kind, c.topic) for c in tracing.stall_candidates(result, now=at)] == [("quiet", "workrun-task1-m9")]
+
+
+# --- a reply that could not be made (failsafe p3) ---------------------------------------
+
+
+def _front_failure_world(*, final: bool):
+    from agag.post import REPORT
+    from agag.reply import failure_line
+
+    post = Posts()
+    origin = post("front", "front-a", "Please ask autolab.", DEV, 100)
+    ack = post("front", "front-a", ACK, FRONT, 101)
+    post("front", "front-a", compose(f"@**Developer**\n\n{failure_line('no block', final=False)}",
+                                      PostMeta(intent=PROGRESS)), FRONT, 120)
+    if final:
+        again = post("front", "front-a", ACK, FRONT, 141)
+        post("front", "front-a", compose(f"@**Developer**\n\n{failure_line('no block')}",
+                                          PostMeta(intent=REPORT, end=again)), FRONT, 160)
+    return post.messages, origin
+
+
+def test_a_first_reply_failure_keeps_the_conversation_in_hand():
+    messages, origin = _front_failure_world(final=False)
+    result = tracing.trace(Realm(10**9, messages), origin, now=1000)
+    assert result.root.state != "failed" and result.root.execution == "open"
+    assert not [c for c in tracing.stall_candidates(result, now=1000) if c.kind == "unanswered"]
+
+
+def test_the_last_reply_failure_leaves_the_requester_unanswered():
+    messages, origin = _front_failure_world(final=True)
+    result = tracing.trace(Realm(10**9, messages), origin, now=200)
+    assert result.root.state == "failed" and result.root.execution == "ended"
+    assert not [c for c in tracing.stall_candidates(result, now=200) if c.kind == "unanswered"], "not before 60 s"
+    found = [c for c in tracing.stall_candidates(result, now=230) if c.kind == "unanswered"]
+    assert len(found) == 1 and found[0].anchor == result.root.anchor and "unanswered" in tracing.FAILSAFE_KINDS

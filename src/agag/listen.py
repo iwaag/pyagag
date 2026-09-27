@@ -89,6 +89,7 @@ from . import serving as serving_record
 from .delivery import DeliveryError
 from .memo import is_memo_channel
 from .mirror import Change, Mirror, Message, bare_topic
+from .reply import owed_reply
 from .identity import served_key, whereabouts
 from .selfnote import (
     SELFNOTE_MARKER, Conversation, is_selfnote, is_speech, note as selfnote_line, owed_start, parse_served,
@@ -114,6 +115,10 @@ QUEUE_SCHEMA = "2"
 MAX_ATTEMPTS = 5
 RETRY_SECONDS = 5.0
 RETRY_CAP_SECONDS = 300.0
+#: The pause before an input whose run produced no usable reply is served
+#: again (failsafe p3): long enough for the failure line to be read as
+#: what it is, short against the monitor's `failed` threshold.
+REPLY_RETRY_SECONDS = 20.0
 
 __all__ = [
     "IDLE_SECONDS",
@@ -121,6 +126,7 @@ __all__ = [
     "MENTION",
     "OWNER",
     "QUEUE_NAME",
+    "REPLY_RETRY_SECONDS",
     "RETRY_SECONDS",
     "Entry",
     "Listener",
@@ -519,16 +525,23 @@ class QueueJournal:
         return None if row is None else Queue._serving(row)
 
     def previous(self) -> Serving | None:
-        """The newest interrupted record of the same conversation before
-        this one — the evidence the run may need to reconcile."""
+        """The newest record of the same conversation before this one that
+        this serving has to reconcile: one a restart interrupted, or one
+        that delivered a failure and still owes its reply (failsafe p3,
+        `agag.reply.owed_reply`)."""
         record = self.serving()
         if record is None:
             return None
         with self.queue._lock:
-            row = self.queue._db.execute(
-                "SELECT * FROM servings WHERE channel = ? AND topic = ? AND route = ? AND state = ? AND id < ?"
-                " ORDER BY id DESC LIMIT 1", (*record.key, INTERRUPTED, self.id)).fetchone()
-        return None if row is None else Queue._serving(row)
+            rows = self.queue._db.execute(
+                "SELECT * FROM servings WHERE channel = ? AND topic = ? AND route = ? AND id < ?"
+                " AND (state = ? OR (state = ? AND extra LIKE '%reply_owed%'))"
+                " ORDER BY id DESC LIMIT 5", (*record.key, self.id, INTERRUPTED, DELIVERED)).fetchall()
+        for row in rows:
+            found = Queue._serving(row)
+            if found.state == INTERRUPTED or owed_reply(found) is not None:
+                return found
+        return None
 
 
 class Listener:
@@ -550,6 +563,7 @@ class Listener:
         idle_seconds: float = IDLE_SECONDS,
         max_attempts: int = MAX_ATTEMPTS,
         retry_seconds: float = RETRY_SECONDS,
+        reply_retry_seconds: float = REPLY_RETRY_SECONDS,
         delivery: dict | None = None,
     ):
         self.mirror = mirror
@@ -564,6 +578,7 @@ class Listener:
         self.idle_seconds = float(idle_seconds)
         self.max_attempts = int(max_attempts)
         self.retry_seconds = float(retry_seconds)
+        self.reply_retry_seconds = float(reply_retry_seconds)
         #: Keyword overrides for `agag.delivery.deliver` on redelivery.
         self.delivery = dict(delivery or {})
         self.queue = Queue(queue_path or (mirror.store.path.parent / QUEUE_NAME))
@@ -670,8 +685,10 @@ class Listener:
             index = found[0] if found else None
         if index is None:
             return None
+        record = self.queue.latest_serving(entry.key, states=(DELIVERED,))
+        if record is not None and owed_reply(record) is not None:
+            return index.live_name  # its input is still unanswered (failsafe p3)
         if entry.route == OWNER:
-            record = self.queue.latest_serving(entry.key, states=(DELIVERED,))
             if record is not None and record.input_up_to is not None:
                 # The one completion rule, from the record: speech by
                 # somebody else past the input boundary the last delivered
@@ -923,7 +940,7 @@ class Listener:
             self.queue.requeue(entry)  # then judge what is owed now, once more
             return
         record = self.queue.latest_serving(entry.key, states=(DELIVERED,))
-        if record is not None and self._receipts_pending(entry, record):
+        if record is not None and owed_reply(record) is None and self._receipts_pending(entry, record):
             # Delivered, and the restart came before the receipts: write
             # them now, then judge again — a receipt is what keeps an answer
             # the serving was given from being served twice.
@@ -948,6 +965,16 @@ class Listener:
             serve(entry.channel, live)  # type: ignore[misc]
         self.served += 1
         record = journal.serving()
+        owed = owed_reply(record) if record is not None and record.state == DELIVERED else None
+        if owed is not None:
+            # The run produced no usable reply (failsafe p3): what it was
+            # given is not answered, so no receipt is written, and the input
+            # is served once more after a pause — with that run's output in
+            # front of the next one (`agag.topics.reply_retry_notice`).
+            self.queue.retry_later(entry, self.reply_retry_seconds, f"reply owed: {owed.get('reason')}")
+            self.log(f"{entry.route} {entry.channel!r}/{entry.topic!r}: no usable reply ({owed.get('reason')}); "
+                     f"serving the input again in {self.reply_retry_seconds:g}s")
+            return
         if record is not None and record.state == DELIVERED:
             self._after_delivery(entry, record)
         elif record is not None and record.state == RECEIVED:

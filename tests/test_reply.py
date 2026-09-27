@@ -251,7 +251,8 @@ def serve(handler, client=None, **kwargs):
     kwargs.setdefault("ack_text", "ack")
     kwargs.setdefault("log", lambda t: None)
     kwargs.setdefault("handoff", False)
-    record = topics.serve_topic(client, "argue", "argue-x", handler, journal=serving.NullJournal(), **kwargs)
+    kwargs.setdefault("journal", serving.NullJournal())
+    record = topics.serve_topic(client, "argue", "argue-x", handler, **kwargs)
     return client, record
 
 
@@ -272,10 +273,55 @@ def test_an_unmarked_output_is_repaired_once_and_a_second_failure_is_posted_as_s
 
     client, record = serve(lambda ctx: topics.TopicResult(output="prose", repair=lambda why: "more prose",
                                                           notices=["— note kept"]))
-    assert plain(client.sent[-1]) == (failure_line("the output contains no <ag-reply> block") + "\n\n— note kept"
-                               "\n\n`ag-post intent=report`"), "a failure is information, never a question"
+    reason = "the output contains no <ag-reply> block"
+    assert plain(client.sent[-1]) == (failure_line(reason, final=False) + "\n\n— note kept"
+                                      "\n\n`ag-post intent=progress`"), "a failure is never a question"
+    assert "end=" not in client.sent[-1], "the input is not answered: the serving has not said its last word"
     assert record.reply_marked is False and "no <ag-reply> block" in record.reply_failure
-    assert record.state == serving.DELIVERED, "the failure is a delivered answer: the conversation is not left hanging"
+    assert record.state == serving.DELIVERED
+    owed = reply.owed_reply(record)
+    assert owed["attempt"] == 1 and owed["output"] == "prose" and owed["reason"] == reason
+
+
+class Retrying(serving.NullJournal):
+    """A journal whose previous serving of the same input owes its reply."""
+
+    def __init__(self, earlier):
+        super().__init__()
+        self.earlier = earlier
+
+    def previous(self):
+        return self.earlier
+
+
+def test_the_reserving_of_an_owed_reply_sees_the_output_and_settles_it():
+    first = serve(lambda ctx: topics.TopicResult(output="I posted #88 to autolab. Done", repair=lambda why: "x"))[1]
+    prompts = []
+
+    def handler(ctx):
+        prompts.append(topics.prompt_with_guide(["placement"], "guide", reply=True))
+        return topics.TopicResult(output=marked("Asked autolab (#88); I report when it answers."))
+
+    journal = Retrying(first)
+    with serving.bound(journal):
+        client, record = serve(handler, journal=journal)
+    assert "I posted #88 to autolab. Done" in prompts[0] and "Do not repeat any of it" in prompts[0]
+    assert plain(client.sent[-1]) == "Asked autolab (#88); I report when it answers."
+    assert "end=" in client.sent[-1]
+    assert reply.owed_reply(first) is None and first.extra["reply_owed"]["settled_by"]
+    with serving.bound(journal):
+        assert topics.prompt_with_guide(["p"], "g", reply=True).endswith(REPLY_GUIDE), "settled: no notice"
+
+
+def test_a_second_failure_on_the_same_input_is_the_last_and_closes_the_serving():
+    first = serve(lambda ctx: topics.TopicResult(output="prose"))[1]
+    journal = Retrying(first)
+    client, record = serve(lambda ctx: topics.TopicResult(output="prose again"), journal=journal)
+    assert plain(client.sent[-1]).startswith("(this run produced no reply")
+    assert "the input stays unanswered and is reported" in client.sent[-1]
+    assert "intent=report" in client.sent[-1] and "end=" in client.sent[-1]
+    assert record.extra["reply_owed"]["attempt"] == 2 and record.extra["reply_owed"]["final"]
+    assert reply.owed_reply(record) is None and reply.owed_reply(first) is None
 
 
 def test_the_outcome_is_recorded_beside_the_run_identity(tmp_path):

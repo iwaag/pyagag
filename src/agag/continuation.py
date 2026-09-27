@@ -301,6 +301,10 @@ def continuation_view(
     else:
         lines.append("You have made no request in another conversation for this one.")
 
+    if interrupted is not None and getattr(interrupted, "state", "") == "delivered":
+        # A delivered serving that still owes its reply (failsafe p3): the
+        # reply guide carries its output and what to do about it.
+        interrupted = None
     if interrupted is not None:
         lines.append("")
         stage = getattr(interrupted, "state", "unknown")

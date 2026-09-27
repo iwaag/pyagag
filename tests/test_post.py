@@ -190,10 +190,10 @@ def test_an_unmarked_intent_is_posted_unclassified_and_logged():
     record = topics.serve_topic(client, "c", "t", run_output("<ag-reply intent=asking>\nBuilt?\n</ag-reply>"),
                                 ack_text="ack", journal=serving.NullJournal(1), log=log.append)
     assert record.reply_text == "@**Developer**\n\nBuilt?\n\n`ag-post end=501`", "unclassified, and still the serving's end"
-    assert any("reply intent unusable" in line for line in log)
+    assert any("reply intent partly unusable" in line for line in log)
 
 
-def test_a_handler_failure_and_a_missing_reply_are_reports_not_requests():
+def test_a_handler_failure_and_a_missing_reply_are_not_requests():
     client = ScriptedClient([human("build it", 1)])
 
     def broken(ctx):
@@ -206,7 +206,9 @@ def test_a_handler_failure_and_a_missing_reply_are_reports_not_requests():
     record = topics.serve_topic(client, "c", "t", run_output("I forgot the mark"), ack_text="ack",
                                 journal=serving.NullJournal(1), log=lambda t: None)
     parsed = parse_post(record.reply_text)
-    assert plain(parsed.meta) == PostMeta(intent=REPORT) and "produced no reply" in parsed.text
+    # failsafe p3: the first missing reply leaves the input owed — progress,
+    # not the serving's last word; the second is the report (test_reply).
+    assert parsed.meta == PostMeta(intent=PROGRESS) and "produced no reply" in parsed.text
 
 
 def test_a_handler_may_classify_its_literal_sections():

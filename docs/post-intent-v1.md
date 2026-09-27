@@ -125,7 +125,7 @@ reference without knowing this contract: `agag.post.quoted_ids` reads the
   blocks are one post whose intent is the strongest any block declares
   (`response_request` > `report` > `progress`). A misspelt attribute never
   costs the answer: what cannot be read is dropped (a `to=` that is not a
-  user id included), the rest stands, and the reason is logged. A handler failure and the "produced no reply" line are `report`s.
+  user id included), the rest stands, and the reason is logged. A handler failure is a `report`. A "produced no reply" line is `progress` with no `end=` while the reply is still owed (the listener serves the input once more, `agag.listen`), and a `report` that ends the serving when it is the last attempt (`failsafe` p3).
   A handler posting literal sections says what they are with
   `TopicResult(meta=PostMeta(...))`.
 - **Handler and run together** (`agag.post.combine`, `clearer_chat_ui`

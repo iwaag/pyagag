@@ -126,7 +126,7 @@ class Harness:
     route both go through `serve_topic`."""
 
     def __init__(self, realm: FakeRealm, root, *, reply=None, gate=None, crash_in_handler=False,
-                 resolve=False, max_attempts=5, retry_seconds=0.05):
+                 resolve=False, max_attempts=5, retry_seconds=0.05, reply_retry_seconds=0.2):
         self.realm = realm
         self.client = RealmClient(realm)
         self.mirror = Mirror.open(root / "zulip.env", root / "mirror", client_factory=realm.facet,
@@ -169,6 +169,7 @@ class Harness:
             handler=handler, on_mention=mention, is_ack=lambda content: content == ACK,
             log=self.log.append, status=NoStatus(), idle_seconds=0.2,
             max_attempts=max_attempts, retry_seconds=retry_seconds, delivery=self.delivery,
+            reply_retry_seconds=reply_retry_seconds,
         )
         self.thread = threading.Thread(target=self.listener.run, daemon=True)
 

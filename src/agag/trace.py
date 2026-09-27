@@ -1237,13 +1237,16 @@ THRESHOLDS = {
     # seconds; failsafe p2 cut p1's five-minute grace to one look interval:
     # a confirmed end with unfinished work enters recovery on the next cycle.
     "unheld": 60,
+    # failsafe p3: the request's own conversation ends in its agent's failure
+    # notice after the listener's own second serving of the input.
+    "unanswered": 60,
     # Unfinished work whose holder cannot be established (or is an agent
     # that took it up), with nothing new in the request for this long.
     "quiet": 1800,
 }
 #: Kinds that exist since failsafe p1: a consumer that tracks requests from
 #: before its deployment may hold them to the older rules.
-FAILSAFE_KINDS = ("unheld", "quiet")
+FAILSAFE_KINDS = ("unheld", "quiet", "unanswered")
 
 
 def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | None = None) -> list[Candidate]:
@@ -1271,6 +1274,17 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
                 node.last_activity, tuple(node.evidence), anchor=node.anchor,
             ))
         if is_root:
+            if node.state == "failed" and overdue("unanswered", node.last_activity):
+                # The request's own conversation ends in a failure notice: the
+                # requester's input is unanswered, and the agent that failed is
+                # the one that would be asked (failsafe p3, p2's #12509). Its
+                # listener has already served the input twice.
+                found.append(Candidate(
+                    "unanswered", node.channel, node.topic, node.identity, node.detail,
+                    node.owner or "the agent that owns this conversation",
+                    "a person looks at why the agent could not answer, and answers or re-asks",
+                    node.last_activity, tuple(node.evidence), anchor=node.anchor,
+                ))
             continue
         if node.state == "awaiting_delivery" and overdue("undelivered", node.last_activity):
             requester = node.requested_by[0].split(" #")[0] if node.requested_by else "the requester"

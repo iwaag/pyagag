@@ -367,3 +367,31 @@ def test_two_runs_of_the_same_study_each_need_their_own_refresh_in_any_order():
     # A refresh for this run that does not hold its result is not the refresh.
     missed = for_first.replace("includes=", "missing=")
     assert stage(first, missed) == "pending"
+
+
+def test_a_name_that_is_part_of_an_account_s_name_is_suggested():
+    from agag import chat
+
+    class Users:
+        def users(self):
+            return [{"user_id": 24, "full_name": "archsage", "is_active": True},
+                    {"user_id": 15, "full_name": "Front", "is_active": True}]
+
+    with pytest.raises(chat.AgentChatError, match=r"did you mean 'archsage' \(24\)"):
+        chat.resolve_user(Users(), "archsage-agstudio1")
+    assert chat.resolve_user(Users(), "archsage") == 24
+
+
+def test_a_task_not_started_is_not_said_to_wait_behind_the_executor():
+    realm, growbox, worldtrend = two_studies()
+    worldtrend.autolab_starts()  # its task opened and not served yet; growbox's task still open
+    now = realm.clock + 5
+    cards = []
+    for study in (growbox, worldtrend):
+        found = progress.card(tracing.trace(realm, study.origin, now=now), now=now)
+        found["topic"] = study.desk_topic
+        cards.append(found)
+    progress.queue_behind(cards, now=now)
+    for unit in progress._walk(cards[1]["root"]):
+        if unit["work"]["state"] == "not_started":
+            assert "queue" not in unit

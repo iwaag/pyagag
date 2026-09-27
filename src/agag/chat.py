@@ -420,8 +420,16 @@ def resolve_user(client: ZulipClient, value: str) -> int:
     matches = [u for u in client.users() if str(u.get("full_name") or "").casefold() == text.casefold()
                and u.get("is_active", True)]
     if len(matches) != 1:
+        # Say who was meant, when the name is a part of one (failsafe p5
+        # trial C: an agent's channel name, `archsage-agstudio1`, tried
+        # three times for the account `archsage`).
+        folded = text.casefold()
+        near = [u for u in client.users() if u.get("is_active", True) and (name := str(u.get("full_name") or ""))
+                and (name.casefold() in folded or folded in name.casefold())] if not matches else []
+        hint = ("; did you mean " + ", ".join(f"{u['full_name']!r} ({u['user_id']})" for u in near[:4]) + "?"
+                if near else "")
         raise AgentChatError(f"--to {value!r} names {'nobody' if not matches else 'several people'}; "
-                             "give their user id or their exact Zulip name")
+                             f"give their user id or their exact Zulip name{hint}")
     return int(matches[0]["user_id"])
 
 

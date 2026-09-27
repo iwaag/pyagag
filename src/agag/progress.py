@@ -696,7 +696,10 @@ def queue_behind(cards: list[dict], now: int | None = None) -> list[dict]:
         if not found.get("root"):
             continue
         for unit in _walk(found["root"]):
-            if unit["display"]["state"] != "queued" or unit["work"]["state"] not in ("queued", "not_started") \
+            # Only a post waiting for its owner's ack: a task not started yet
+            # waits for its start, not for the owner's executor (trial C
+            # showed a task "behind" the other request's serving).
+            if unit["display"]["state"] != "queued" or unit["work"]["state"] != "queued" \
                     or "queue" in unit or not unit["owner"]:
                 continue
             node = SimpleNamespace(anchor=unit["anchor"], owner=unit["owner"], last_activity=unit.get("posted_at") or 0,

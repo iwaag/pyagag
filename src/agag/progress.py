@@ -295,7 +295,13 @@ def _display(node: Node, kind: str, execution: dict, recovery: dict | None, *, n
     if node.waiting_on:
         return "waiting", f"on {', '.join(node.waiting_on)}", ", ".join(node.waiting_on)
     if state == "awaiting_delivery":
-        return "waiting", "the answer is not yet taken up by " + requester, requester
+        # Whom the answer is owed to, as the trace found it — not the first
+        # root-note author: a task its owner started has only the owner's
+        # own note (failsafe p6: o9227 said "not yet taken up by autolab").
+        owed = ", ".join(node.owed_to) or requester
+        answer = (node.receipt or {}).get("answer")
+        return "waiting", (f"answer #{answer} is not yet taken up by {owed}" if answer
+                           else f"the answer is not yet taken up by {owed}"), owed
     if awaiting_agreement:
         return "waiting", f"a result was shown; waiting for {requester}'s agreement", requester
     if node.holder == "delegate":
@@ -430,6 +436,10 @@ def _unit(node: Node, *, root: bool, now: int, health: dict[int, dict], recovery
         "awaiting_agreement": awaiting,
         "cancelled_at_id": cancelled_at,
         "records": [r for r in node.records if r.get("tag") != "state"],
+        # An answer here without a receipt (failsafe p6): `missing` is what
+        # `waiting` above is about; `settled` is bookkeeping a decision
+        # already covers (`agentchat receipt` repairs it).
+        "receipt": dict(node.receipt) if node.receipt else None,
         "run": _run_meter(node, execution, now),
         "children": children,
     }
@@ -650,6 +660,11 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
             state = "completed"
             reason = "every unit of work is finished by its record"
         next_actor = ""
+    settled = [{"unit": u["anchor"], "label": u["label"], **u["receipt"]} for u in units
+               if u.get("receipt") and u["receipt"].get("state") == "settled"]
+    if settled and state in ("completed", "cancelled"):
+        reason += (f"; {len(settled)} answer(s) settled without a receipt "
+                   f"({', '.join('#' + str(r['answer']) for r in settled)}: bookkeeping, `agentchat receipt`)")
     latest = max((u["latest_work_at"] or 0 for u in units), default=0) or None
     if not source_live:
         reason = f"last known ({source_note or 'the source is not live'}): {reason}"
@@ -658,7 +673,7 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
         "state": state, "reason": reason, "next": next_actor,
         "focus": focus["anchor"] if focus else None,
         "latest_work_at": latest, "stale": not source_live, "problem": result.problem,
-        "stages": stages, "root": root,
+        "stages": stages, "root": root, "settled_receipts": settled,
         "counts": {s: sum(1 for u in units if u["display"]["state"] == s) for s in STATES},
     }
 

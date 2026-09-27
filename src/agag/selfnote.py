@@ -83,8 +83,11 @@ __all__ = [
     "SELFNOTE_MARKER",
     "SERVED_TAG",
     "OWED_TAG",
+    "RECEIPT_TAG",
     "owed_note",
     "parse_owed",
+    "parse_receipt",
+    "receipt_note",
     "START_TAG",
     "Conversation",
     "effective_rootchat",
@@ -387,6 +390,35 @@ def parse_owed(content) -> tuple[Conversation, int] | None:
     if value is None:
         return None
     return parse_served(note(SERVED_TAG, value))
+
+
+#: A reconciled receipt (failsafe p6): `[selfnote][receipt] #<answer> by
+#: #<evidence> (<why>) in <channel>/<topic>`, written into home by the agent
+#: the answer was owed to when no serving journal shows the answer was given
+#: to a serving, but a record says it was dealt with — the requester's own
+#: acceptance, a cancellation, a reply that relayed it. It is **not** a
+#: served mark and claims no serving: it covers exactly the one answer it
+#: names (a served mark covers everything up to its id), so an older or a
+#: newer answer in the same conversation stays owed.
+RECEIPT_TAG = "receipt"
+_RECEIPT = re.compile(r"^#(?P<answer>\d+) by #(?P<evidence>\d+)(?: \((?P<why>[^)]*)\))? in (?P<remote>.+)$", re.S)
+
+
+def receipt_note(remote: Conversation, answer: int, evidence: int, why: str = "") -> str:
+    reason = f" ({why.replace('(', '').replace(')', '').strip()})" if why.strip() else ""
+    return note(RECEIPT_TAG, f"#{int(answer)} by #{int(evidence)}{reason} in {Conversation(remote.channel, remote.topic)}")
+
+
+def parse_receipt(content) -> tuple[Conversation, int, int, str] | None:
+    """`(remote, answer id, evidence id, why)` of a receipt note, or None."""
+    value = parse_note(content, RECEIPT_TAG)
+    match = _RECEIPT.match(value.strip()) if value is not None else None
+    if match is None:
+        return None
+    remote = parse_conversation(match.group("remote").strip())
+    if remote is None:
+        return None
+    return remote, int(match.group("answer")), int(match.group("evidence")), (match.group("why") or "").strip()
 
 
 def parse_served(content) -> tuple[Conversation, int] | None:

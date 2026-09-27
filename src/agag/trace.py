@@ -66,6 +66,19 @@ its end record (`finished`/`ended`); each node carries its record notes
 A requester's `[served]` mark anywhere in the request's tree is its
 receipt.
 
+Completion, acceptance and receipt are separate facts (failsafe p6). An
+answer without a receipt is owed — whatever its producer's record says —
+until a **decision** recorded after it covers it (`decisions`: the
+requester's acceptance of that result, the mission's acceptance up to its
+shown result, a cancellation above it). Then the unit reads as its record
+does and `Node.receipt` keeps the missing receipt as bookkeeping
+(`settled`), which `agentchat receipt` repairs; a reconciled receipt
+(`[selfnote][receipt]`) covers exactly the answer it names. A root note
+written into a conversation that began as somebody else's request cites it
+and adopts nothing (`_reference`). Every reader — the panel, Observer,
+`agentchat trace` — applies this one rule; nothing is lenient for one of
+them.
+
 The state is decided from what each message *is*, not from topic names:
 identity notes (`[mission]`, `[task]`, `[asset]`, `[assetrun]`, `[change]`)
 and acks say who owns a conversation; `[state]` words are the owners' own
@@ -97,6 +110,7 @@ from .selfnote import (
     parse_start,
     parse_rootchat,
     parse_rootchat_moved,
+    parse_receipt,
     parse_served,
     replaced_anchor,
 )
@@ -135,6 +149,14 @@ OPFAIL_TAG = "opfail"
 HELD_WORD = "held"
 DONE_WORDS = frozenset({"completed", "accepted", "done", "delivered", "finished", "ended"})
 CANCELLED_WORDS = frozenset({"cancelled", "replaced", "retired"})
+#: `[state]` words a unit's **requester** writes on deciding its result
+#: (`agag.acceptance`, the completion door) — never the owner's claim.
+DECIDED_WORDS = frozenset({"accepted", "done"})
+#: `[selfnote][change] accepted … +shown=<id>` (autolab's close-out, bound to
+#: the result shown for review) and `[selfnote][acceptance] #<evidence> by
+#: <user> (<name>) [after=#<shown>]` (`agag.acceptance`).
+_SHOWN = re.compile(r"\+shown=(\d+)")
+_ACCEPTANCE_RECORD = re.compile(r"^#(?P<evidence>\d+) by (?P<by>\d+)(?: \((?P<name>[^)]*)\))?(?: after=#(?P<after>\d+))?")
 #: A routine run's end is its owner's `ag-routinerun` block
 #: (`ag.routinerun-finish.v1`, agfront `routine.record_text`), echoed into the
 #: run topic before the ✔: `finished` when the routine's goal was reached,
@@ -221,6 +243,14 @@ class Node:
     #: The record notes in this conversation, oldest first (`RECORD_TAGS`,
     #: plus `finish` for a routine run's end): `{tag, value, id, at, by}`.
     records: list[dict] = field(default_factory=list)
+    #: The newest answer here owed to a requester whose receipt is not on
+    #: record (failsafe p6): `{answer, at, to, home, state, settled_by}`.
+    #: `state` is `missing` (the answer is owed: `awaiting_delivery`) or
+    #: `settled` (a decision recorded after it covers it — the requester's
+    #: acceptance, a cancellation — so nothing is owed, and the missing
+    #: receipt is bookkeeping `agentchat receipt` can repair). Empty when the
+    #: answer was received (served, or reconciled) or nothing is owed.
+    receipt: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -439,7 +469,7 @@ class _NoMeta:
 _NO_META = _NoMeta()
 
 
-def _answer_taken_up(messages, owner, homes, home_messages, here, receipts_from=0, known_names=None) -> bool:
+def _answer_taken_up(messages, owner, homes, home_messages, here, known_names=None) -> bool:
     """Whether the owner's newest answer names a requester whose home holds
     a served mark covering it — the move went back to whoever asked."""
     if owner is None or not homes or not messages:
@@ -456,7 +486,7 @@ def _answer_taken_up(messages, owner, homes, home_messages, here, receipts_from=
         names = {_sender(m) for m in messages if m.get("sender_id") == requester_id}
         names |= {name for name in [(known_names or {}).get(requester_id)] if name}
         if names & named and _taken_up((home_messages or {}).get(requester_id), requester_id,
-                                       int(answer.get("id") or 0), here, here_ids, complete, receipts_from):
+                                       int(answer.get("id") or 0), here, here_ids, complete):
             return True
     return False
 
@@ -553,7 +583,7 @@ def _served_marks(home_messages: list[dict] | None, remote: tuple[str, str],
 
 
 def _unserved_answer(messages, owner, homes, home_messages, here, here_ids=frozenset(), complete=False,
-                     receipts_from=0, known_names=None):
+                     known_names=None):
     """`(answer, requester name, home)` for the owner's newest answer that
     names a requester whose home has not marked it served, or None."""
     if owner is None or not homes:
@@ -570,36 +600,113 @@ def _unserved_answer(messages, owner, homes, home_messages, here, here_ids=froze
         if not names or not (names & named):
             continue
         if not _taken_up((home_messages or {}).get(requester_id), requester_id, int(answer.get("id") or 0), here,
-                         here_ids, complete, receipts_from):
+                         here_ids, complete):
             return answer, ", ".join(sorted(names)), home
     return None
 
 
-def _taken_up(home_messages, requester_id: int, answer_id: int, here, here_ids=frozenset(), complete=False,
-              receipts_from: int = 0) -> bool:
+def _taken_up(home_messages, requester_id: int, answer_id: int, here, here_ids=frozenset(), complete=False) -> bool:
     """Whether the requester dealt with an answer: its home holds a served
     mark covering it — the receipt its listener writes after a *delivered*
-    serving, bound to the post that serving processed.
+    serving, bound to the post that serving processed — or a reconciled
+    receipt (`[selfnote][receipt]`, failsafe p6) the requester wrote for
+    exactly that answer.
 
     Nothing weaker counts (robust_workflow p2 step 3). p1 also accepted the
     requester speaking at home after the answer, and a reply to something
     else — a serving whose input ended before the answer arrived — then
     consumed an answer nothing had read (p2 step 1, R8). An answer that
     arrives during a serving stays owed until a serving marks it, which the
-    listener does on its next pass."""
+    listener does on its next pass. failsafe p6 retired the last of that
+    leniency (`receipts_from`, which only Observer applied): a reader that
+    wants an old answer settled asks the records that settle it
+    (`_settlement`), the same for everybody."""
     if _served_marks(home_messages, here, here_ids, complete) >= answer_id:
         return True
-    if answer_id >= receipts_from:
-        return False
-    # An answer from before `receipts_from` is read as p1 read it: the
-    # listeners of that time left marks one post short of an answer that
-    # arrived with its topic's ✔ (fixed in 87ac87e), so the requester
-    # speaking at home since is taken as the answer taken up.
-    return any(
-        m.get("sender_id") == requester_id and is_speech(m) and int(m.get("id") or 0) > answer_id
-        and not is_ack(str(m.get("content") or ""))
-        for m in home_messages or ()
-    )
+    return _reconciled(home_messages, requester_id, answer_id, here_ids) is not None
+
+
+def _reconciled(home_messages, requester_id: int, answer_id: int, here_ids=frozenset()) -> dict | None:
+    """The requester's `[selfnote][receipt]` naming exactly this answer, which
+    is in this conversation (`here_ids`): a receipt names a post, never a
+    range."""
+    if here_ids and int(answer_id) not in here_ids:
+        return None
+    for message in home_messages or ():
+        if int(message.get("sender_id") or 0) != int(requester_id):
+            continue
+        parsed = parse_receipt(message.get("content"))
+        if parsed is not None and parsed[1] == int(answer_id):
+            return {"id": int(message.get("id") or 0), "evidence": parsed[2], "why": parsed[3]}
+    return None
+
+
+#: The decisions that settle an answer's review without its receipt
+#: (failsafe p6, README_DEV "Completion, receipts and holds").
+def decisions(messages: list[dict] | None, owner: int | None) -> tuple[list[dict], list[dict]]:
+    """`(this unit's, handed down to the units below)` decision records in
+    one conversation, oldest first: `{kind, id, covers, by, what}`. An
+    answer is covered when its id is at most `covers`.
+
+    - the requester's `[state] accepted`/`done` (not the owner's): this
+      unit's answers before the note;
+    - `[change] accepted … +shown=<id>`: the result shown for review, as the
+      close-out bound it — a later close-out report is not covered;
+    - `[acceptance] #<evidence> … after=#<shown>`: the mission's answers and
+      its tasks' up to the shown result (up to the evidence post for a note
+      written before `after=` existed);
+    - `[state] cancelled`/`replaced`/`retired`: the units below (the unit's
+      own is its `cancelled` state). A cancellation is written on a holder's
+      request, and a cancelled mission's results are nobody's to take up.
+
+    A producer's completion claim (`completed`, `delivered`, `finished`) is
+    none of these: an answer it follows is still owed."""
+    own: list[dict] = []
+    down: list[dict] = []
+    for message in messages or ():
+        content = message.get("content")
+        mid = int(message.get("id") or 0)
+        by = int(message.get("sender_id") or 0)
+        who = _sender(message)
+        value = parse_note(content, STATE_TAG)
+        if value is not None:
+            word = value.split()[0].lower() if value.split() else ""
+            if word in DECIDED_WORDS and owner is not None and by != owner:
+                own.append({"kind": "accepted", "id": mid, "covers": mid, "by": by,
+                            "what": f"{who}'s `[state] {word}` #{mid}"})
+            elif word in CANCELLED_WORDS:
+                down.append({"kind": "cancelled", "id": mid, "covers": mid, "by": by,
+                             "what": f"`{word}` #{mid}"})
+            continue
+        value = parse_note(content, "change")
+        if value is not None and value.split()[:1] == ["accepted"]:
+            shown = _SHOWN.search(value)
+            if shown:
+                own.append({"kind": "accepted", "id": mid, "covers": int(shown.group(1)), "by": by,
+                            "what": f"the acceptance recorded at #{mid} (shown #{shown.group(1)})"})
+            continue
+        value = parse_note(content, "acceptance")
+        match = _ACCEPTANCE_RECORD.match(value.strip()) if value is not None else None
+        if match is not None:
+            bound = int(match.group("after") or 0) or int(match.group("evidence"))
+            record = {"kind": "accepted", "id": mid, "covers": bound, "by": by,
+                      "what": f"the acceptance #{match.group('evidence')} by "
+                              f"{match.group('name') or match.group('by')} recorded at #{mid}"}
+            own.append(record)
+            down.append(record)
+    return own, down
+
+
+def _receipt_facts(answer: dict, requester: str, home: tuple[str, str], settled: dict | None) -> dict:
+    return {"answer": int(answer.get("id") or 0), "at": int(answer.get("timestamp") or 0), "to": requester,
+            "home": f"{home[0]}/{home[1]}", "state": "settled" if settled else "missing",
+            "settled_by": dict(settled) if settled else None}
+
+
+def _settlement(answer_id: int, found: Iterable[dict]) -> dict | None:
+    """The first decision covering this answer, or None."""
+    covering = [d for d in found if int(d["covers"]) >= int(answer_id)]
+    return min(covering, key=lambda d: d["id"]) if covering else None
 
 
 def _age(now: int, timestamp: int) -> str:
@@ -621,8 +728,9 @@ def classify(
     home_messages: dict[int, list[dict] | None] | None = None,
     homes: dict[int, tuple[str, str]] | None = None,
     here: tuple[str, str] = ("", ""),
-    receipts_from: int = 0,
     requester_names: dict[int, str] | None = None,
+    inherited: Iterable[dict] = (),
+    facts: dict | None = None,
 ) -> tuple[str, str, str, str, list[int], int]:
     """`(state, detail, identity, owner name, evidence ids, last activity)`
     for one conversation's messages (oldest first).
@@ -632,6 +740,12 @@ def classify(
     human is the one to act. `home_messages` / `homes` (requester id → its
     home's messages / its home) let an answer addressed to a requester be
     checked against that requester's `[served]` marks.
+
+    An answer without a receipt is owed (`awaiting_delivery`) unless a
+    decision recorded after it covers it (`decisions`: this conversation's
+    own, plus `inherited` from the units above) — then the unit reads as its
+    record does, and `facts["receipt"]` says which answer lacks a receipt and
+    what settled it (failsafe p6).
     """
     now = int(now if now is not None else time.time())
     if messages is None:
@@ -650,10 +764,24 @@ def classify(
         # forge writes `delivered` the moment it posts, and when the asker's
         # listener is down that answer is owed all the same (robust_workflow
         # p1 step 5, trial N2 — missed until this).
-        owed = _unserved_answer(messages, owner, homes, home_messages, here, here_ids, complete, receipts_from,
-                                requester_names)
+        owed = _unserved_answer(messages, owner, homes, home_messages, here, here_ids, complete, requester_names)
         if owed is not None:
             answer, requester, home = owed
+            settled = _settlement(int(answer["id"]), [*decisions(messages, owner)[0], *inherited])
+            receipt = _receipt_facts(answer, requester, home, settled)
+            if facts is not None:
+                facts["receipt"] = receipt
+            if settled is not None:
+                # The requester decided about this result after it existed —
+                # accepted it, or had the work cancelled: nothing is owed
+                # but the bookkeeping (failsafe p6: m8519's #8557, accepted
+                # four days after its receipt was lost to the ✔ race).
+                return (
+                    "done",
+                    f"{word}; #{answer['id']} to {requester} has no receipt in {home[0]}/{home[1]} — "
+                    f"settled by {settled['what']}",
+                    identity, owner_name, [word_id] if word_id else [], last_activity,
+                )
             return (
                 "awaiting_delivery",
                 f"{word}; {owner_name} answered #{answer['id']} naming {requester}; not marked served in "
@@ -791,11 +919,21 @@ def classify(
         if not names_here or not (names_here & named):
             continue
         served = _served_marks((home_messages or {}).get(requester_id), here, here_ids, complete)
-        if _taken_up((home_messages or {}).get(requester_id), requester_id, mid(last_answer), here, here_ids, complete,
-                     receipts_from):
+        if _taken_up((home_messages or {}).get(requester_id), requester_id, mid(last_answer), here, here_ids, complete):
             return (
                 "awaiting_requester",
-                f"{owner_name} answered #{mid(last_answer)}; {', '.join(sorted(names_here))} has taken it up (served up to {served})",
+                f"{owner_name} answered #{mid(last_answer)}; {', '.join(sorted(names_here))} has taken it up "
+                + (f"(served up to {served})" if served >= mid(last_answer) else "(receipt reconciled)"),
+                identity, owner_name, [mid(last_answer)], last_activity,
+            )
+        settled = _settlement(mid(last_answer), [*decisions(messages, owner)[0], *inherited])
+        if facts is not None:
+            facts["receipt"] = _receipt_facts(last_answer, ", ".join(sorted(names_here)), home, settled)
+        if settled is not None:
+            return (
+                "awaiting_requester",
+                f"{owner_name} answered #{mid(last_answer)}; no receipt by {', '.join(sorted(names_here))} in "
+                f"{home[0]}/{home[1]} — settled by {settled['what']}",
                 identity, owner_name, [mid(last_answer)], last_activity,
             )
         return (
@@ -953,11 +1091,11 @@ def _records(messages: list[dict] | None, owner: int | None) -> list[dict]:
     return found
 
 
-def _owed_names(messages, owner, homes, home_messages, here, receipts_from, names) -> list[str]:
+def _owed_names(messages, owner, homes, home_messages, here, names) -> list[str]:
     if not messages:
         return []
     owed = _unserved_answer(messages, owner, homes, home_messages, here, frozenset(int(m.get("id") or 0) for m in messages),
-                            len(messages) < HISTORY, receipts_from, names)
+                            len(messages) < HISTORY, names)
     return owed[1].split(", ") if owed else []
 
 
@@ -979,13 +1117,32 @@ def _identity_id(messages: list[dict]) -> int:
     return 0
 
 
-def trace(client, message_id: int, *, now: int | None = None, max_depth: int = MAX_DEPTH,
-          receipts_from: int = 0) -> Trace:
+def _reference(link: "_Link", messages: list[dict] | None) -> bool:
+    """Whether a root note was written into a conversation that began as
+    somebody else's request — its first post is speech by another sender,
+    and it carries no identity note — rather than one opened for the work
+    (whose first post is a note: `[task]`, `[mission]`, a root note) or one
+    its author began. Such a note cites the conversation: the author posted
+    there while serving its own home (cleanup, a relay), and it does not make
+    that request, or its work, the author's (failsafe p6, #15357). A
+    deliberate move (`[rootchat-moved]`, `agrun adopt`) always adopts. A
+    history that did not reach the conversation's beginning decides
+    nothing."""
+    if not messages or len(messages) >= HISTORY or parse_rootchat_moved(link.message.get("content")) is not None:
+        return False
+    first = min(messages, key=lambda m: int(m.get("id") or 0))
+    if not is_speech(first) or int(first.get("sender_id") or 0) == link.author:
+        return False
+    return not any(parse_note(m.get("content"), tag) is not None for m in messages for tag in IDENTITY_TAGS)
+
+
+def trace(client, message_id: int, *, now: int | None = None, max_depth: int = MAX_DEPTH) -> Trace:
     """The progress tree below the conversation holding `message_id`.
 
-    `receipts_from`: answers older than this id are taken up as p1 read them
-    (a served mark, or the requester speaking at home since); newer ones
-    only by a served mark. 0, the default, is the strict rule throughout."""
+    Whatever message it starts from, a unit's requesters are every author of
+    a root note in it — a task traced from its mission still owes its answer
+    to the requester whose home is outside the tree (failsafe p6: `trace
+    8519` said DONE while `trace 8512` said AWAITING_DELIVERY)."""
     now = int(now if now is not None else time.time())
     reader = _Reader(client)
     result = Trace(root=None, origin=int(message_id), observed_at=now)
@@ -1088,26 +1245,46 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
         if not changed:
             break
 
-    children_of = {}
+    below: dict[tuple[str, str], list[_Link]] = {}
     for link in links:
         home = home_of[link.note_id]
         if home is not None and _key(link.child_channel, link.child_topic) != home:
-            children_of.setdefault(home, []).append(link)
+            below.setdefault(home, []).append(link)
 
-    # Where each anchored conversation is shown: under the **most specific**
-    # conversation anchoring it that the tree reaches — a task Front started
-    # and autolab's planner opened sits under the mission, not beside it.
+    # The tree, from the root down. A root note written into a conversation
+    # that is a request of its own, while *citing* it, adopts nothing
+    # (`_reference`, failsafe p6: Front cleaning up o11711 posted into
+    # m8519's request, and the note hung that request and its wait under
+    # o11711). Only conversations the tree reaches are read for it.
+    children_of: dict[tuple[str, str], list[_Link]] = {}
     depth_of: dict[tuple[str, str], int] = {root_key: 0}
     frontier = [root_key]
     while frontier:
         following = []
         for home in frontier:
-            for link in children_of.get(home, []):
+            for link in below.get(home, []):
                 key = _key(link.child_channel, link.child_topic)
+                if _reference(link, read(key)):
+                    continue
+                children_of.setdefault(home, []).append(link)
+                # Where each anchored conversation is shown: under the **most
+                # specific** conversation anchoring it that the tree reaches —
+                # a task Front started and autolab's planner opened sits under
+                # the mission, not beside it (`placement`, below).
                 if key not in depth_of:
                     depth_of[key] = depth_of[home] + 1
                     following.append(key)
         frontier = following
+    #: Every root note in a conversation of the tree, whatever home it names:
+    #: who asked for the work there, wherever the trace started (failsafe p6:
+    #: `trace 8519` said DONE and `trace 8512` AWAITING_DELIVERY, because
+    #: Front's note in m8519's task names a home outside the mission's tree).
+    notes_of: dict[tuple[str, str], list[_Link]] = {}
+    for link in links:
+        key = _key(link.child_channel, link.child_topic)
+        home = home_of[link.note_id]
+        if key in depth_of and home is not None and key != home and not _reference(link, read(key)):
+            notes_of.setdefault(key, []).append(link)
     placement: dict[tuple[str, str], tuple[str, str]] = {}
     anchors_of: dict[tuple[str, str], list[_Link]] = {}
     for home, rows in children_of.items():
@@ -1121,7 +1298,7 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
                 placement[key] = home
 
     def build(key: tuple[str, str], depth: int, seen: set, human: bool,
-              requested: list[tuple[int, str, tuple[str, str]]]) -> Node:
+              requested: list[tuple[int, str, tuple[str, str]]], inherited: list[dict]) -> Node:
         messages = read(key)
         if not messages and anchors_of.get(key):
             # Its own root notes are in it — that is how it was found — so a
@@ -1132,9 +1309,11 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
         homes = {requester: home for requester, _, home in requested}
         home_messages = {requester: _with_receipts(read(home), receipts.get(requester))
                          for requester, _, home in requested}
+        found: dict = {}
         state, detail, identity, owner, evidence, last = classify(
             messages, human=human, now=now, home_messages=home_messages, homes=homes, here=key,
-            receipts_from=receipts_from, requester_names={requester: name for requester, name, _ in requested},
+            requester_names={requester: name for requester, name, _ in requested},
+            inherited=inherited, facts=found,
         )
         live = names.get(key, key[1])
         if messages:
@@ -1168,11 +1347,13 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
                 if (value := parse_note(m.get("content"), OPFAIL_TAG)) is not None
             ],
             records=_records(messages, owner_id),
-            owed_to=_owed_names(messages, owner_id, homes, home_messages, key, receipts_from,
+            owed_to=_owed_names(messages, owner_id, homes, home_messages, key,
                                 {requester: name for requester, name, _ in requested}) if state == "awaiting_delivery" else [],
-            taken_up=state == "awaiting_requester" and _answer_taken_up(
-                messages, owner_id, homes, home_messages, key, receipts_from,
-                {requester: name for requester, name, _ in requested}),
+            taken_up=state == "awaiting_requester" and (
+                (found.get("receipt") or {}).get("state") == "settled" or _answer_taken_up(
+                    messages, owner_id, homes, home_messages, key,
+                    {requester: name for requester, name, _ in requested})),
+            receipt=found.get("receipt") or {},
             **facts,
         )
         if depth >= max_depth:
@@ -1185,8 +1366,11 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
             if child in seen or placement.get(child) != key or child in order:
                 continue
             order.append(child)
+        # Decisions recorded here that settle answers below it: a mission's
+        # acceptance, a cancellation (`decisions`).
+        handed = [*inherited, *decisions(messages, owner_id)[1]]
         for child in order:
-            notes_for = anchors_of.get(child, [])
+            notes_for = notes_of.get(child, [])
             requesters = []
             for link in notes_for:
                 home = home_of[link.note_id]
@@ -1201,7 +1385,7 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
             # invisible to it (p2 step 5, trial B).
             known = {requester for requester, _, _ in requesters}
             requesters += [row for row in requested if row[0] not in known]
-            built = build(child, depth + 1, seen, False, requesters)
+            built = build(child, depth + 1, seen, False, requesters, handed)
             built.requested_by = [f"{link.author_name} #{link.note_id}" for link in notes_for]
             node.children.append(built)
         _order_tasks(node)
@@ -1219,10 +1403,11 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
     receipts: dict[int, list[dict]] = {}
     for messages in histories.values():
         for message in messages or ():
-            if parse_served(message.get("content")) is not None:
+            content = message.get("content")
+            if parse_served(content) is not None or parse_receipt(content) is not None:
                 receipts.setdefault(int(message.get("sender_id") or 0), []).append(message)
 
-    result.root = build(root_key, 0, set(), True, [])
+    result.root = build(root_key, 0, set(), True, [], [])
     result.calls = reader.calls
     result.problem = index_problem
     return result

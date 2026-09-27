@@ -219,15 +219,23 @@ def test_only_a_served_mark_takes_up_an_answer_not_later_speech_at_home(world):
     assert node.state == "awaiting_requester"
 
 
-def test_an_answer_older_than_the_receipt_boundary_is_read_as_p1_read_it(world):
+def test_an_old_answer_is_settled_by_the_requester_s_decision_not_by_speech_at_home(world):
+    """failsafe p6 retired `receipts_from`: speech at home settles nothing,
+    for any reader; the requester's acceptance recorded after the answer
+    does, and the missing receipt stays visible as bookkeeping."""
     realm, mirror, ask, mission, task, answer = world
     later = realm.messages[answer]["timestamp"] + 3600
     reply = post(realm, "front", "front-a", "@**Developer** task 1 is done.", FRONT)
+    post(realm, "work-m1", task, "[selfnote][state] completed", AUTOLAB)
     settle(mirror, lambda: mirror.message(reply) is not None)
-    strict = next(n for n in tree(mirror, ask, now=later).nodes() if n.topic == task)
-    old = next(n for n in trace(MirrorReader(mirror), ask, now=later, receipts_from=answer + 1).nodes()
-               if n.topic == task)
-    assert strict.state == "awaiting_delivery" and old.state == "awaiting_requester"
+    node = next(n for n in tree(mirror, ask, now=later).nodes() if n.topic == task)
+    assert node.state == "awaiting_delivery" and node.receipt["state"] == "missing"
+    accepted = post(realm, "work-m1", task, "[selfnote][state] accepted", FRONT)
+    settle(mirror, lambda: mirror.message(accepted) is not None)
+    node = next(n for n in tree(mirror, ask, now=later).nodes() if n.topic == task)
+    assert node.state == "done"
+    assert node.receipt["state"] == "settled" and node.receipt["answer"] == answer
+    assert node.receipt["settled_by"]["id"] == accepted
 
 
 def test_an_answer_in_a_task_its_owner_started_is_owed_to_the_parent_s_requester(world):

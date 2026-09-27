@@ -598,6 +598,22 @@ def build_parser() -> argparse.ArgumentParser:
             "default because they are not part of the conversation"
         ),
     )
+    recheck = subcommands.add_parser(
+        "recheck",
+        help="whether stopped work has resumed: one conversation, re-read now",
+        description=(
+            "Re-read the conversation that holds MESSAGE_ID (the stopped work's anchor, as a stop report names "
+            "it) and say whether its owner resumed the work after the serving acknowledged at --after (the one "
+            "reported stopped): FINISHED (its record says it is closed), RESUMED (a later serving worked or "
+            "answered), RESUMING (a later serving started, no work yet), ASKED (a post there waits for its "
+            "owner), STOPPED (nothing since), or UNREADABLE. Only the owner's posts in that conversation count: "
+            "your own acknowledgement, activity in another conversation or a promise is not the work moving. "
+            "Run it right before acting on a stop report: the report is evidence as of when it was written."
+        ),
+    )
+    recheck.add_argument("message_id", type=int, help="the stopped work's anchor, or any post in its conversation")
+    recheck.add_argument("--after", type=int, required=True, help="the acknowledgement of the serving reported stopped")
+    recheck.add_argument("--json", action="store_true", help="the result as JSON (agag.recheck.v1)")
     trace = subcommands.add_parser(
         "trace",
         help="where a request stands: every conversation opened for it, and its state",
@@ -907,6 +923,17 @@ def _run(args, client: ZulipClient, out) -> int:
                 return 0
         print(format_messages(messages), file=out)
         return 0
+    if args.command == "recheck":
+        from .trace import recheck as recheck_work, recheck_lines
+
+        checked = recheck_work(client, int(args.message_id), int(args.after))
+        if args.json:
+            import json
+
+            print(json.dumps(checked.as_dict(), ensure_ascii=False, indent=1), file=out)
+        else:
+            print("\n".join(recheck_lines(checked)), file=out)
+        return 0 if checked.verdict != "unreadable" else 1
     if args.command == "trace":
         origin = args.message_id
         if origin is None:

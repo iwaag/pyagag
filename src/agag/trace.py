@@ -1371,3 +1371,118 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
 
 def _asker(node: Node) -> str:
     return node.requested_by[0].split(" #")[0] if node.requested_by else "whoever asked for it"
+
+
+# --- re-checking one stopped unit of work (failsafe p4) ----------------------
+
+
+@dataclass
+class Recheck:
+    """Whether the work a stop was reported on has resumed, read from that
+    one conversation now.
+
+    Only its owner's posts there after the stopped serving count as the
+    work moving: an acknowledgement elsewhere, the requester's own reply in
+    their conversation, or a promise, is not (failsafe p3 trial A read
+    Front's own ack as the task resuming). `verdict` is one of:
+
+    - `finished`: its record says it is closed (`completed`, `done`,
+      `accepted`, `cancelled`) — nothing to resume;
+    - `resumed`: a serving acknowledged after the stopped one has worked
+      (posted progress, a result or a change note) or ended with a reply;
+    - `resuming`: a serving acknowledged after the stopped one has not
+      shown work yet — it is starting; look again, do not ask again;
+    - `asked`: somebody posted there after the stop and the owner has not
+      acknowledged it yet — the resume is already asked for;
+    - `stopped`: nothing has happened there since the stopped serving —
+      the work has not resumed;
+    - `unreadable`: the conversation could not be read; nothing follows.
+    """
+
+    verdict: str
+    channel: str = ""
+    topic: str = ""
+    owner: str = ""
+    after: int = 0
+    ack: int = 0
+    ack_at: int = 0
+    work: int = 0
+    work_at: int = 0
+    execution: str = "unknown"
+    state: str = ""
+    pending: list[int] = field(default_factory=list)
+    observed_at: int = 0
+    detail: str = ""
+
+    def as_dict(self) -> dict:
+        return {"schema": "agag.recheck.v1", **asdict(self)}
+
+
+def recheck(client, message_id: int, after: int, *, now: int | None = None) -> Recheck:
+    """Re-read the conversation that holds `message_id` (the stalled work's
+    anchor, or any post in it) and say whether its owner resumed the work
+    after the serving acknowledged at `after` (the one reported stopped)."""
+    now = int(now if now is not None else time.time())
+    reader = _Reader(client)
+    found = reader.message(int(message_id))
+    if not found:
+        return Recheck("unreadable", after=int(after), observed_at=now,
+                       detail=f"message {message_id} " + ("is gone" if found is None else "could not be read"))
+    channel = channel_name(found)
+    topic = str(found.get("subject") or "")
+    messages = reader.history(channel, topic)
+    if messages is None:
+        return Recheck("unreadable", channel, topic, after=int(after), observed_at=now,
+                       detail="its history could not be read")
+    owner = _owner_by_ack(messages)
+    owner_name = next((_sender(m) for m in messages if m.get("sender_id") == owner), "") if owner else ""
+    facts = _serving(messages, owner)
+    state, _ = _note_state(messages, owner)
+    result = Recheck("stopped", channel, topic, owner_name, int(after), facts["ack"], facts["ack_at"],
+                     facts["work"], facts["work_at"], facts["execution"], state, observed_at=now)
+    if state in ("completed", "done", "accepted", "cancelled"):
+        result.verdict, result.detail = "finished", f"its record says `{state}`"
+        return result
+    since = int(after)
+    newer_ack = facts["ack"] > since
+    result.pending = [int(m.get("id") or 0) for m in messages
+                      if m.get("sender_id") != owner and is_speech(m) and int(m.get("id") or 0) > max(since, facts["ack"])]
+    if newer_ack and (facts["work"] > facts["ack"] or facts["execution"] == "ended"):
+        result.verdict = "resumed"
+        result.detail = (f"a serving acknowledged at #{facts['ack']} after the stopped #{since} has "
+                         + (f"worked (#{facts['work']})" if facts["work"] > facts["ack"] else f"ended (#{facts['ended_by']})"))
+    elif newer_ack:
+        result.verdict = "resuming"
+        result.detail = f"a serving was acknowledged at #{facts['ack']} after the stopped #{since}; no work from it yet"
+    elif result.pending:
+        result.verdict = "asked"
+        result.detail = (f"#{result.pending[0]} was posted there after the stop and {owner_name or 'its owner'} "
+                         "has not acknowledged it yet")
+    else:
+        result.detail = f"nothing from {owner_name or 'its owner'} there since the serving acknowledged at #{since}"
+    return result
+
+
+#: What each verdict asks of whoever re-checked.
+RECHECK_NEXT = {
+    "finished": "nothing to resume",
+    "resumed": "it is moving again: do not post there, and say so",
+    "resuming": "a new serving is starting: do not post there; look again in a minute",
+    "asked": "a resume is already waiting for its owner: do not ask again",
+    "stopped": "not resumed: post in that conversation to resume it (once)",
+    "unreadable": "nothing can be concluded; ask the developer if it stays so",
+}
+
+
+def recheck_lines(result: Recheck) -> list[str]:
+    where = f"{result.channel}/{result.topic}" if result.channel else "?"
+    lines = [f"recheck of {where} after #{result.after}, observed "
+             f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(result.observed_at))}: {result.verdict.upper()}",
+             f"  {result.detail}"]
+    if result.channel:
+        lines.append(f"  owner {result.owner or '?'}; newest ack #{result.ack or '-'}; newest work #{result.work or '-'}; "
+                     f"execution {result.execution}; record {result.state or '-'}"
+                     + (f"; posts not yet acknowledged: {', '.join(f'#{i}' for i in result.pending)}"
+                        if result.pending else ""))
+    lines.append(f"  next: {RECHECK_NEXT[result.verdict]}")
+    return lines

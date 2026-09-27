@@ -223,6 +223,8 @@ What you say, exactly as it should appear.
 
 Everything outside such blocks — notes to yourself, reasoning, a draft you discard — is yours: it stays in the run record and is not posted, and nothing forbids it. Several `{OPEN_TAG}` blocks are posted as one message, in order, so you may write the reply in pieces as you work. Inside the block write ordinary Markdown: code blocks, test output and quoted files keep their own ``` fences, and the text after them is posted too. Any machine block a guide asks for (`ag-argue`, `ag-routinerun`, …) is a fenced block outside the reply, read wherever it is in your output and never posted.
 
+One post holds about 9 000 characters. A longer reply is cut at that point, with a visible note, and what came after — a second code block, your summary — is lost. Quote the part of long output that matters (the tail of a test run with its `Ran … OK` line, the lines that failed, the diff of the files you changed), not all of it; say where the rest is kept.
+
 An output with no `{OPEN_TAG}` block, an empty one, or one never closed with `{CLOSE_TAG}` is a failed reply: you are asked once more for the reply alone, and if that fails too the conversation is told that this run produced no reply.
 
 ## Say what the reply is for

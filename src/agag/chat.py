@@ -155,6 +155,15 @@ Examples
   agentchat receipt <answer message id> --repair
   agentchat receipt <answer message id> --repair --because <your post that took it up>
 
+  # A person keeps a decision about some work for themselves: see the holds
+  # on a request, place one on their words, or release one on their words.
+  # A hold on acceptance ends with the acceptance, one on a resume when the
+  # work is served again or finished — nobody has to release those.
+  agentchat hold [<message id in the request's conversation>]
+  agentchat hold <message id> --for acceptance|resume|decision|indefinite \
+      --unit <the work's anchor> --evidence <their post> "what they keep for themselves"
+  agentchat release <hold id> --evidence <their post saying so> "why"
+
   # Mark a conversation finished, once you have read it and it is finished.
   agentchat resolve <their-channel> <topic>
 
@@ -678,6 +687,39 @@ def build_parser() -> argparse.ArgumentParser:
     recheck.add_argument("message_id", type=int, help="the stopped work's anchor, or any post in its conversation")
     recheck.add_argument("--after", type=int, required=True, help="the acknowledgement of the serving reported stopped")
     recheck.add_argument("--json", action="store_true", help="the result as JSON (agag.recheck.v1)")
+    hold = subcommands.add_parser(
+        "hold",
+        help="a person's holds on a request: list them, or place one on their words",
+        description=(
+            "A hold says a decision about some work is a person's own: nobody acts on that work until it is "
+            "made. It is a record in the request's own conversation, so everybody reads the same hold — you, "
+            "Observer, the progress panel. Without --for, lists the holds on the request holding MESSAGE_ID "
+            "(default: the conversation you are serving): HELD with what it waits for, SETTLED (the path its "
+            "purpose names happened: an acceptance, a cancellation, the work served again or finished) or "
+            "RELEASED (on the holder's words), with its history. With --for, records a hold on --unit (a "
+            "conversation's anchor, as `agentchat trace` prints it; the request's own covers all of it) on "
+            "--evidence, the holder's own post; the holder is whoever wrote it."
+        ),
+    )
+    hold.add_argument("message_id", nargs="?", type=int, default=None, help="any message of the request's conversation")
+    hold.add_argument("--for", dest="purpose", choices=("acceptance", "resume", "decision", "indefinite"), default=None,
+                      help="what the hold protects")
+    hold.add_argument("--unit", type=int, default=0, help="the anchor of the work it covers (default: the request)")
+    hold.add_argument("--evidence", type=int, default=0, help="the holder's own post asking for the hold")
+    hold.add_argument("why", nargs="*", help="what the person keeps for themselves, in a few words")
+    hold.add_argument("--json", action="store_true", help="the holds as JSON")
+    release = subcommands.add_parser(
+        "release",
+        help="release a person's hold, on their words",
+        description=(
+            "Record that the person holding HOLD_ID let it go, on --evidence, their own post. A hold whose "
+            "purpose is settled on record (accepted, cancelled, resumed, finished) needs no release; one that is "
+            "already settled or released writes nothing."
+        ),
+    )
+    release.add_argument("hold_id", type=int, help="the hold's id, as `agentchat hold` lists it")
+    release.add_argument("--evidence", type=int, required=True, help="the holder's own post releasing it")
+    release.add_argument("why", nargs="*", help="why, in a few words")
     receipt = subcommands.add_parser(
         "receipt",
         help="whether you received an answer that named you, and repair its receipt from evidence",
@@ -1057,6 +1099,12 @@ def _run(args, client: ZulipClient, out) -> int:
         else:
             print("\n".join(recheck_lines(checked)), file=out)
         return 0 if checked.verdict != "unreadable" else 1
+    if args.command in ("hold", "release"):
+        from .holds import holds_command, release_command
+
+        if args.command == "hold":
+            return holds_command(client, args, out, home=home_from_environment())
+        return release_command(client, args, out)
     if args.command == "receipt":
         from .receipt import inspect as inspect_receipt, receipt_lines, repair as repair_receipt
 

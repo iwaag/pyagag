@@ -168,8 +168,9 @@ _FINISH_BLOCK = re.compile(r"```" + FINISH_FENCE + r"[ \t]*\n(?P<body>.*?)\n```"
 #: Notes a reader of progress needs besides the state (progress_panel p1):
 #: plan revisions (`doc`), acceptance, the change record, a routine report
 #: delivered home, a sage refreshed from its study (`sagesync`, archsage),
-#: and every `[state]` word in order.
-RECORD_TAGS = ("doc", "acceptance", "change", "delivered", "sagesync", "state")
+#: every `[state]` word in order, and a person's holds and their releases
+#: (`agag.holds`, failsafe p6).
+RECORD_TAGS = ("doc", "acceptance", "change", "delivered", "sagesync", "state", "hold", "hold-release")
 #: A post by the owner whose text begins with one of these is a failure
 #: notice rather than an answer. Each is what a listener already posts:
 #: `agag.reply.no_reply_notice`, autolab's previous-work gate, the send refusal.

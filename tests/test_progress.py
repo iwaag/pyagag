@@ -243,12 +243,22 @@ def test_a_recorded_sage_refresh_after_the_acceptance_satisfies_the_stage():
 
 
 def test_a_held_request_waits_for_a_person_whatever_its_conversations_claim():
-    result = traced(11711, 11770)
-    found = progress.card(result, now=at(11770) + 3600, viewer_id=DEVELOPER,
-                          recovery={result.root.anchor: {"held": True, "held_why": "the Developer decides"}})
+    """failsafe p6: the hold is a record in the request's conversation, and
+    the card says what it waits for (m11741's hold: how it resumes)."""
+    from agag.holds import hold_note
+
+    origin = next(m for m in FIXTURE["messages"] if m["id"] == 11711)
+    task = node(traced(11711, 11770), "workrun-task1-m11741")
+    row = {**origin, "id": 11771, "timestamp": at(11770) + 1, "sender_id": 9, "sender_full_name": "Omni Agent",
+           "sender_realm_str": "", "content": hold_note("resume", task.anchor, DEVELOPER, "Developer", 0,
+                                                        "how m11741 resumes is the Developer's question")}
+    result = tracing.trace(Realm(11771, FIXTURE["messages"] + [row]), 11711, now=at(11770) + 3600)
+    found = progress.card(result, now=at(11770) + 3600, viewer_id=DEVELOPER)
     assert found["state"] == "awaiting_you" and found["next"] == "you"
-    task = unit(found, "task", "11741#1")
-    assert task["display"]["state"] == "unknown"
+    held = unit(found, "task", "11741#1")
+    assert held["display"]["state"] == "awaiting_you"
+    assert "held by Developer for resume" in held["display"]["reason"] and "goes on" in held["display"]["reason"]
+    assert [h["state"] for h in found["holds"]] == ["held"]
 
 
 def test_an_unreadable_origin_is_unknown():

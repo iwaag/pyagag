@@ -211,7 +211,7 @@ def _run_meter(node: Node, execution: dict, now: int) -> dict[str, Any] | None:
 
 def _display(node: Node, kind: str, execution: dict, recovery: dict | None, *, now: int, viewer_id: int | None,
              pending: list[dict], turn_blocked_by: int, awaiting_agreement: bool,
-             child_states: list[str], asked: list[dict] = ()) -> tuple[str, str, str]:
+             child_states: list[str], asked: list[dict] = (), hold=None) -> tuple[str, str, str]:
     """`(state, reason, next actor)` for one unit (module table)."""
     state = node.state
     word = node.note_state or ""
@@ -224,14 +224,20 @@ def _display(node: Node, kind: str, execution: dict, recovery: dict | None, *, n
     askers = [entry.split(" #")[0] for entry in node.requested_by]
     requester = next((name for name in askers if name != node.owner), askers[0] if askers else "whoever asked")
 
+    if hold is not None:
+        # A person's hold in force (`agag.holds`): what it protects and what
+        # settles it — even on finished work, since a person
+        # still has it to decide — never an unexplained "needs you" (failsafe p6).
+        who = hold.name or str(hold.by)
+        why = f" ({hold.why})" if hold.why and hold.purpose != "decision" else ""
+        return ("awaiting_you", f"held by {who} for {hold.purpose}{why}: waits for {hold.waits_for}",
+                "you" if viewer_id is not None and int(viewer_id) == int(hold.by) else who)
     if state == "done":
         reason = {"finished": "the run finished and reached its goal",
                   "ended": "the run ended without reaching its goal"}.get(word, f"its record says {word or 'done'}")
         return "completed", reason, ""
     if state == "cancelled":
         return "cancelled", f"its record says {word or 'cancelled'}", ""
-    if recovery and recovery.get("held"):
-        return "awaiting_you", f"held by a person: {recovery.get('held_why') or 'taken over'}", "you"
     if state == "unobservable":
         return "unknown", node.detail or "the conversation could not be read", ""
     if kind == "routine_run" and node.topic.startswith(RESOLVED_TOPIC_PREFIX) and node.execution != "open":
@@ -386,7 +392,7 @@ def _meter(plan: Node, tasks: list[dict]) -> dict[str, Any] | None:
 
 def _unit(node: Node, *, root: bool, now: int, health: dict[int, dict], recovery: dict[int, dict],
           viewer_id: int | None, pending: list[dict], turn_blocked_by: int = 0,
-          asked: list[dict] | None = None) -> dict[str, Any]:
+          asked: list[dict] | None = None, held: dict[int, Any] | None = None) -> dict[str, Any]:
     kind = unit_kind(node, root=root)
     execution = _execution(node, health.get(int(node.anchor)), now)
     # Children first: a plan's display depends on whether any task exists.
@@ -406,13 +412,14 @@ def _unit(node: Node, *, root: bool, now: int, health: dict[int, dict], recovery
                     tasks_open = _serial(child)
                 finished_before = False
         children.append(_unit(child, root=False, now=now, health=health, recovery=recovery, viewer_id=viewer_id,
-                              pending=[], turn_blocked_by=blocked, asked=asked))
+                              pending=[], turn_blocked_by=blocked, asked=asked, held=held))
     rec = recovery.get(int(node.anchor))
     awaiting = _awaiting_agreement(node)
     state, reason, next_actor = _display(
         node, kind, execution, rec, now=now, viewer_id=viewer_id, pending=pending if root else [],
         turn_blocked_by=turn_blocked_by, awaiting_agreement=awaiting,
-        child_states=[c["display"]["state"] for c in children if c["kind"] == "task"], asked=asked or [])
+        child_states=[c["display"]["state"] for c in children if c["kind"] == "task"], asked=asked or [],
+        hold=(held or {}).get(int(node.anchor)))
     cancelled_at = next((r["id"] for r in reversed(_records(node, "state"))
                          if (r.get("value") or "").split()[:1] == ["cancelled"]), None)
     unit = {
@@ -628,8 +635,17 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
         return {"schema": SCHEMA, "origin": result.origin, "observed_at": result.observed_at,
                 "state": "unknown", "reason": result.problem or "nothing could be traced", "root": None,
                 "stages": [], "stale": not source_live}
+    from .holds import active, holds_of
+
+    holds = holds_of(result)
+    # A hold in force shows on the unit it names — the request's root when
+    # that unit is not in the trace (said so in its `waits_for`).
+    anchors = {int(n.anchor) for n in result.nodes()}
+    held = {}
+    for hold in active(holds):
+        held.setdefault(int(hold.unit) if int(hold.unit) in anchors else int(result.root.anchor), hold)
     root = _unit(result.root, root=True, now=now, health=health or {}, recovery=recovery or {},
-                 viewer_id=viewer_id, pending=list(pending or []))
+                 viewer_id=viewer_id, pending=list(pending or []), held=held)
     units = list(_walk(root))
     stages = _stages(root, now, syncs)
     deciding = [u for u in units if not u.get("passthrough")] or units
@@ -674,6 +690,7 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
         "focus": focus["anchor"] if focus else None,
         "latest_work_at": latest, "stale": not source_live, "problem": result.problem,
         "stages": stages, "root": root, "settled_receipts": settled,
+        "holds": [h.as_dict() for h in holds],
         "counts": {s: sum(1 for u in units if u["display"]["state"] == s) for s in STATES},
     }
 

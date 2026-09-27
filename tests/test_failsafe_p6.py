@@ -366,3 +366,114 @@ def test_agentchat_receipt_prints_and_repairs(monkeypatch, tmp_path, capsys):
     assert "MISSING" in printed and "decision:" in printed and "--repair writes a reconciled receipt" in printed
     assert chat.main(["receipt", str(m.closeout), "--repair"]) == 0
     assert "RECONCILED" in capsys.readouterr().out
+
+
+# --- step 4: a person's hold, from placing to settling ---------------------------------------
+
+from types import SimpleNamespace
+
+from agag import holds as holding
+
+
+def _hold(realm, m, purpose, unit, evidence, why="theirs to decide"):
+    args = SimpleNamespace(message_id=m.origin, purpose=purpose, unit=unit, evidence=evidence, why=why.split(),
+                           json=False)
+    import io
+    out = io.StringIO()
+    code = holding.holds_command(realm, args, out)
+    return code, out.getvalue()
+
+
+def test_a_hold_on_acceptance_says_what_it_waits_for_and_settles_with_the_acceptance():
+    realm = Realm()
+    m = Mission(realm)
+    m.front_agrees()
+    m.autolab_closes()
+    m.front_serves(m.closeout)
+    ask = realm.post("front", m.desk, "I will accept this one myself after I try it.", DEV)
+    code, printed = _hold(realm, m, "acceptance", m.mission, ask)
+    assert code == 0 and "held: #" in printed
+    card = progress.card(tracing.trace(realm, m.origin, now=realm.clock + 60), now=realm.clock + 60, viewer_id=DEV)
+    assert card["state"] == "awaiting_you" and card["next"] == "you"
+    plan = next(u for u in card["root"]["children"] if u["kind"] == "plan")
+    assert "held by Developer for acceptance" in plan["display"]["reason"]
+    assert "Developer's acceptance of mission" in plan["display"]["reason"]
+    assert _hold(realm, m, "acceptance", m.mission, ask)[1] == printed, "placing it again writes nothing new"
+    m.mission_accepted()
+    result = tracing.trace(realm, m.origin, now=realm.clock + 60)
+    (hold,) = holding.holds_of(result)
+    assert hold.state == "settled" and hold.ended_by["how"] == "accepted"
+    assert [e["event"] for e in hold.history] == ["held", "settled"]
+    assert progress.card(result, now=realm.clock + 60, viewer_id=DEV)["state"] == "completed"
+
+
+def test_a_hold_on_a_resume_settles_when_the_work_is_served_again_not_on_unrelated_activity():
+    realm = Realm()
+    m = Mission(realm)  # the task has shown a result and waits
+    ask = realm.post("front", m.desk, "Stop there; I decide how it goes on.", DEV)
+    _hold(realm, m, "resume", m.task, ask)
+    realm.post("front", m.desk, "Unrelated: what time is it?", DEV)
+    realm.post("front", m.desk, ACK, FRONT)
+    realm.post(m.channel, m.task_topic, "[selfnote][state] started", AUTOLAB)
+    realm.resolve(m.channel, m.task_topic, AUTOLAB)
+    (hold,) = holding.holds_of(tracing.trace(realm, m.origin, now=realm.clock + 60))
+    assert hold.state == "held", "a post, a ✔ or a state word is not the work served again"
+    m.front_agrees()  # Front serves the task again on the Developer's word, autolab acks and works
+    realm.post(m.channel, m.task_topic, "🔧 Bash: git commit", AUTOLAB)
+    (hold,) = holding.holds_of(tracing.trace(realm, m.origin, now=realm.clock + 60))
+    assert hold.state == "settled" and hold.ended_by["how"] == "resumed"
+
+
+def test_an_intentional_hold_stays_until_its_holder_releases_it_and_only_on_their_words():
+    realm, m = closed()
+    m.mission_accepted()
+    ask = realm.post("front", m.desk, "Keep this request with me until I say otherwise.", DEV)
+    _hold(realm, m, "indefinite", m.origin, ask, "kept on purpose")
+    result = tracing.trace(realm, m.origin, now=realm.clock + 60)
+    (hold,) = holding.holds_of(result)
+    assert hold.state == "held" and "keeps it on purpose" in hold.waits_for
+    assert progress.card(result, now=realm.clock + 60, viewer_id=DEV)["state"] == "awaiting_you", \
+        "an intentional hold stays visible on finished work"
+    other = realm.post("front", m.desk, "Release it.", OMNI)
+    try:
+        holding.release(realm, hold.id, other)
+        raise AssertionError("released on somebody else's words")
+    except holding.HoldRefused as refused:
+        assert "Developer" in str(refused)
+    words = realm.post("front", m.desk, "You can let it go now.", DEV)
+    written, _ = holding.release(realm, hold.id, words, "done with it")
+    assert written
+    assert holding.release(realm, hold.id, words)[0] == 0, "a repeat writes nothing"
+    (hold,) = holding.holds_of(tracing.trace(realm, m.origin, now=realm.clock + 60))
+    assert hold.state == "released" and hold.history[-1]["event"] == "released"
+
+
+def test_a_hold_covers_only_its_work_and_new_obligations_stay_visible():
+    realm = Realm()
+    m = Mission(realm)
+    ask = realm.post("front", m.desk, "I accept m1 myself.", DEV)
+    _hold(realm, m, "acceptance", m.mission, ask)
+    # New work in the same request: a second plan whose answer is owed.
+    realm.post("pj-x", "workplan-second", f"[selfnote][rootchat] front/{m.desk} #{m.origin}", FRONT)
+    realm.post("pj-x", "workplan-second", "@**autolab-agstudio1** and a second thing.", FRONT)
+    realm.post("pj-x", "workplan-second", ACK, AUTOLAB)
+    second = realm.post("pj-x", "workplan-second", "[selfnote][mission] second", AUTOLAB)
+    owed = realm.post("pj-x", "workplan-second", "@**Front** planned the second.", AUTOLAB)
+    now = realm.clock + 900
+    result = tracing.trace(realm, m.origin, now=now)
+    (hold,) = holding.active(holding.holds_of(result))
+    plan, task, other = (node(result, t).anchor for t in (m.plan_topic, m.task_topic, "workplan-second"))
+    assert holding.covers(hold, result, task) and holding.covers(hold, result, plan)
+    assert not holding.covers(hold, result, other)
+    found = [c for c in tracing.stall_candidates(result, now=now) if c.anchor == other]
+    assert [c.kind for c in found] == ["undelivered"] and found[0].evidence[0] == owed
+
+
+def test_a_hold_on_work_outside_the_request_or_on_an_agent_s_own_words_is_refused():
+    realm, m = closed()
+    other = Mission(realm, "y")
+    ask = realm.post("front", m.desk, "Mine to accept.", DEV)
+    code, printed = _hold(realm, m, "acceptance", other.mission, ask)
+    assert code == 1 and "not in this request" in printed
+    code, printed = _hold(realm, m, "acceptance", m.mission, m.shown)
+    assert code == 1 and "doing that work" in printed

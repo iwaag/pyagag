@@ -1390,7 +1390,13 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
                 f"`agentchat unresolve {node.channel} {_bare(node.topic)}` if the ✔ was a mistake; nothing if it was a deliberate close",
                 node.last_activity, tuple(node.evidence) or (0,), judgment=True, anchor=node.anchor,
             ))
-        if node.state == "executing" and overdue("silent", node.last_activity):
+        if node.state == "executing" and overdue("silent", node.last_activity) and not _open_unit_below(node):
+            # A conversation whose own serving is open while a unit of work
+            # opened from it is unfinished is waiting on that unit: the
+            # deeper one is the one to ask about, once (progress_panel p1:
+            # Front's routine runs read `executing` since they are served
+            # as themselves, and a healthy long task below one must not make
+            # the run a stall).
             found.append(Candidate(
                 "silent", node.channel, node.topic, node.identity, node.detail,
                 node.owner or "the owner",
@@ -1448,6 +1454,18 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
 
 def _asker(node: Node) -> str:
     return node.requested_by[0].split(" #")[0] if node.requested_by else "whoever asked for it"
+
+
+def _open_unit_below(node: Node) -> bool:
+    """Whether any conversation below `node` is a unit of work (an identity
+    note) that its record does not call finished."""
+    stack = list(node.children)
+    while stack:
+        child = stack.pop()
+        if child.identity and child.state not in ("done", "cancelled"):
+            return True
+        stack.extend(child.children)
+    return False
 
 
 # --- re-checking one stopped unit of work (failsafe p4) ----------------------

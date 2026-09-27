@@ -411,3 +411,15 @@ def _all(found):
         u = stack.pop()
         yield u
         stack.extend(u["children"])
+
+
+def test_a_run_waiting_on_an_unfinished_unit_below_is_not_itself_silent():
+    """Front's routine run reads `executing` (its own serving is open), and
+    the task below it is the unit that is quiet: only the task is a `silent`
+    candidate (Observer's reproduction suite caught the run being asked
+    about beside a healthy task)."""
+    result = traced(11711, 11770)
+    later = at(11770) + tracing.THRESHOLDS["silent"] + 60
+    kinds = {(c.kind, c.topic) for c in tracing.stall_candidates(result, now=later)}
+    assert ("silent", "routinerun-20260926-2225") not in kinds
+    assert ("silent", "workrun-task1-m11741") in kinds

@@ -44,7 +44,9 @@ The recorder — the holder itself, autolab's close-out, the completion
 door, anybody — changes nothing: the same post gives the same record. The
 evidence must be a holder's post (never the mission's own agent: a
 worker's completion claim is not acceptance), in the mission's own
-conversations or the requester's chain, and **later than the last result
+conversations or the requester's chain when an agent acting for somebody
+said it (a person's own words count wherever they said them), and
+**later than the last result
 shown** for review (each task's `[change] accepted … +shown=<id>`, else its
 newest report): the initial request, or an agreement given before the
 result existed, accepts nothing. The note says whose decision it was, on
@@ -145,6 +147,10 @@ class Decision:
     #: `(channel, bare topic)` of every conversation the decision may be
     #: given in: the mission's, its tasks', and the requester chain's.
     conversations: set[tuple[str, str]] = field(default_factory=set)
+    #: Holders that act for somebody else (reached through their root
+    #: note): an agent carries many requests at once, so its words count only
+    #: in `conversations`. A person's own decision counts wherever they said it.
+    delegated: set[int] = field(default_factory=set)
 
     def may_decide(self, user_id: int) -> bool:
         if self.reserved is not None:
@@ -182,6 +188,8 @@ def decision(client, history: list[dict], owner: int | None, channel: str, topic
         return found
     names = {int(m.get("sender_id") or 0): str(m.get("sender_full_name") or "") for m in history}
     found.holders.append((requester, names.get(requester, "")))
+    if notes:
+        found.delegated.add(requester)
     reservations = [r for m in history if (r := parse_reservation(m.get("content")))]
     asker, messages, depth = requester, history, 0
     while depth < CHAIN_DEPTH:
@@ -380,7 +388,7 @@ def accept_mission(
                     f"#{evidence} was written by {said.get('sender_full_name') or speaker}, who does not hold "
                     f"m{mission_id}'s acceptance; it is {held.describe()}'s to give")
             where = (str(said.get("display_recipient") or ""), _bare(str(said.get("subject") or "")))
-            if where not in held.conversations:
+            if speaker in held.delegated and where not in held.conversations:
                 raise AcceptanceRefused(
                     f"#{evidence} is in #{where[0]} > {where[1]}, which is not m{mission_id}'s conversation, one of "
                     "its tasks', or a conversation it was requested from")

@@ -124,8 +124,21 @@ STATE_TAG = "state"
 OPFAIL_TAG = "opfail"
 #: A task its owner will not start by itself: the requester asked it to wait.
 HELD_WORD = "held"
-DONE_WORDS = frozenset({"completed", "accepted", "done", "delivered"})
+DONE_WORDS = frozenset({"completed", "accepted", "done", "delivered", "finished", "ended"})
 CANCELLED_WORDS = frozenset({"cancelled", "replaced", "retired"})
+#: A routine run's end is its owner's `ag-routinerun` block
+#: (`ag.routinerun-finish.v1`, agfront `routine.record_text`), echoed into the
+#: run topic before the ✔: `finished` when the routine's goal was reached,
+#: `ended` when the run stopped without it (progress_panel p1). Until then a
+#: ✔'d run read as "resolved without a finished state".
+FINISH_FENCE = "ag-routinerun"
+FINISH_SCHEMA = "ag.routinerun-finish.v1"
+_FINISH_BLOCK = re.compile(r"```" + FINISH_FENCE + r"[ \t]*\n(?P<body>.*?)\n```", re.S)
+#: Notes a reader of progress needs besides the state (progress_panel p1):
+#: plan revisions (`doc`), acceptance, the change record, a routine report
+#: delivered home, a sage refreshed from its study (`sagesync`, archsage),
+#: and every `[state]` word in order.
+RECORD_TAGS = ("doc", "acceptance", "change", "delivered", "sagesync", "state")
 #: A post by the owner whose text begins with one of these is a failure
 #: notice rather than an answer. Each is what a listener already posts:
 #: `agag.reply.no_reply_notice`, autolab's previous-work gate, the send refusal.
@@ -193,6 +206,9 @@ class Node:
     ending_intent: str = ""
     ending_to: int = 0
     ack_at: int = 0
+    #: The record notes in this conversation, oldest first (`RECORD_TAGS`,
+    #: plus `finish` for a routine run's end): `{tag, value, id, at, by}`.
+    records: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -301,12 +317,31 @@ def _task_serial(identity: str) -> tuple[int, int] | None:
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
+def finish_record(content) -> dict | None:
+    """The `ag.routinerun-finish.v1` block in a post, or None."""
+    import json
+
+    for match in reversed(list(_FINISH_BLOCK.finditer(str(content or "")))):
+        try:
+            data = json.loads(match.group("body"))
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get("schema") == FINISH_SCHEMA and isinstance(data.get("achieved"), bool):
+            return data
+    return None
+
+
 def _note_state(messages: list[dict], owner: int | None) -> tuple[str, int | None]:
     """The newest `[state]` word by the owner — or `accepted`/`done`, which a
-    requester writes (`EXTERNAL_STATES` in autolab and forge)."""
+    requester writes (`EXTERNAL_STATES` in autolab and forge) — or the
+    owner's routine-run finish block (`finished`/`ended`)."""
     for message in reversed(messages):
         value = parse_note(message.get("content"), STATE_TAG)
         if value is None:
+            if owner is not None and message.get("sender_id") == owner and is_speech(message):
+                finish = finish_record(message.get("content"))
+                if finish is not None:
+                    return ("finished" if finish["achieved"] else "ended"), int(message.get("id") or 0)
             continue
         word = value.split()[0].lower() if value.split() else ""
         if owner is None or message.get("sender_id") == owner or word in ("accepted", "done"):
@@ -668,6 +703,27 @@ def classify(
                 "held: the requester asked for this task to wait; a post here starts it",
                 identity, owner_name, [word_id] if word_id else [], last_activity,
             )
+        if acks:
+            # Its owner opened it and serves it itself — Front's `routinerun-`
+            # topics, started by its listener right after the serving that
+            # opened them. Nobody else ever speaks there, so "nobody has posted
+            # since it was opened" was true and meant nothing (progress_panel
+            # p1, G1: every routine run read `not_started` while it worked).
+            facts = _serving(messages, owner)
+            if facts["execution"] == "open":
+                newest = max([last_ack, *progress[-1:]], key=mid)
+                return (
+                    "executing",
+                    f"served by its owner itself since ack #{mid(last_ack)}; last sign of work "
+                    f"{_age(now, int(newest.get('timestamp') or 0))} ago",
+                    identity, owner_name, [mid(last_ack)], int(newest.get("timestamp") or 0),
+                )
+            return (
+                "awaiting_requester",
+                f"served by its owner itself; its last serving ended at #{facts['ended_by']} "
+                f"{_age(now, int(facts['ended_at'] or 0))} ago",
+                identity, owner_name, [facts["ended_by"]], last_activity,
+            )
         where = f" (opened by {owner_name})" if owner_name else ""
         return (
             "not_started",
@@ -843,6 +899,26 @@ def _settle(link: _Link, named: tuple[str, str], messages: list[dict] | None, lo
         if where is not None:
             return _key(*where)
     return None
+
+
+def _records(messages: list[dict] | None, owner: int | None) -> list[dict]:
+    found = []
+    for message in messages or ():
+        content = message.get("content")
+        base = {"id": int(message.get("id") or 0), "at": int(message.get("timestamp") or 0),
+                "by": int(message.get("sender_id") or 0)}
+        for tag in RECORD_TAGS:
+            value = parse_note(content, tag)
+            if value is not None:
+                found.append({"tag": tag, "value": value, **base})
+                break
+        else:
+            if owner is not None and message.get("sender_id") == owner and is_speech(message):
+                finish = finish_record(content)
+                if finish is not None:
+                    found.append({"tag": "finish", "value": "achieved" if finish["achieved"] else "not achieved",
+                                  **base})
+    return found
 
 
 def _identity_id(messages: list[dict]) -> int:
@@ -1034,6 +1110,7 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
                 for m in messages or ()
                 if (value := parse_note(m.get("content"), OPFAIL_TAG)) is not None
             ],
+            records=_records(messages, owner_id),
             taken_up=state == "awaiting_requester" and _answer_taken_up(
                 messages, owner_id, homes, home_messages, key, receipts_from,
                 {requester: name for requester, name, _ in requested}),
@@ -1440,7 +1517,7 @@ def recheck(client, message_id: int, after: int, *, now: int | None = None) -> R
     state, _ = _note_state(messages, owner)
     result = Recheck("stopped", channel, topic, owner_name, int(after), facts["ack"], facts["ack_at"],
                      facts["work"], facts["work_at"], facts["execution"], state, observed_at=now)
-    if state in ("completed", "done", "accepted", "cancelled"):
+    if state in ("completed", "done", "accepted", "cancelled", "finished", "ended"):
         result.verdict, result.detail = "finished", f"its record says `{state}`"
         return result
     since = int(after)

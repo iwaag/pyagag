@@ -66,7 +66,10 @@ def test_baseline_a_workplan_opened_beside_the_run_leaves_the_run_unheld():
     run, plan = node(result, study.run_topic), node(result, study.plan_topic)
     assert plan not in run.children and plan in result.root.children
     assert run.holder == "none"
-    assert "unheld" in {c.kind for c in tracing.stall_candidates(result, now=now)}
+    (unheld,) = [c for c in tracing.stall_candidates(result, now=now) if c.kind == "unheld"]
+    # Step 4: the run is Front's own, so the way to resume it is a start of
+    # its own, not a post (which serves nothing).
+    assert "agrun continue" in unheld.next_action and "its own post there serves nothing" in unheld.next_action
     # Front's own "Resuming" post in its own run is its own speech: the run's
     # serving stays ended and nothing is owed to Front there.
     realm.post(study.run_channel, study.run_topic, "Resuming: waiting for autolab's task.\n\n"

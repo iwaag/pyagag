@@ -1481,6 +1481,10 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
                 f"the last serving ended at #{node.ended_by} saying the work goes on, and nothing holds it: no "
                 f"serving is open, nothing opened from it is unfinished, nobody was asked anything",
                 _asker(node),
+                (f"its owner, {node.owner}, decides: have it served again with a start of its own (its own post "
+                 f"there serves nothing; Front: `agrun continue {node.channel} {_bare(node.topic)} --because <post>`), "
+                 f"end it on the record, or ask the Developer")
+                if node.owner and _asker(node) == node.owner else
                 f"whoever asked for it decides: resume it (a post in {node.channel}/{_bare(node.topic)} starts a "
                 f"new serving of the same work), report what blocks it, or ask the Developer",
                 node.ended_at, (node.ended_by,), anchor=node.anchor,

@@ -553,8 +553,10 @@ def queue_behind(cards: list[dict]) -> list[dict]:
         if not found.get("root"):
             continue
         for unit in _walk(found["root"]):
+            # Only a serving with evidence of being served: a stale or dead
+            # open serving (`unknown`) is not what the agent is doing now.
             if unit["execution"]["serving"] == "open" and unit["owner"] and unit["display"]["state"] in (
-                    "working", "waiting", "unknown", "planning"):
+                    "working", "waiting", "planning"):
                 open_by_owner.setdefault(unit["owner"], []).append({
                     "anchor": unit["anchor"], "label": unit["label"], "origin": found["origin"],
                     "topic": found.get("topic") or "", "since": unit["execution"].get("ack_at"),
@@ -566,7 +568,8 @@ def queue_behind(cards: list[dict]) -> list[dict]:
             if unit["display"]["state"] != "queued" or unit["work"]["state"] not in ("queued", "not_started") \
                     or "queue" in unit:
                 continue
-            ahead = [row for row in open_by_owner.get(unit["owner"], []) if row["anchor"] != unit["anchor"]]
+            ahead = sorted((row for row in open_by_owner.get(unit["owner"], []) if row["anchor"] != unit["anchor"]),
+                           key=lambda row: row["evidence"] != "confirmed")
             if not ahead:
                 continue
             unit["queue"] = ahead

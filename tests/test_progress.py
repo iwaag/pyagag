@@ -438,7 +438,8 @@ def test_a_post_waiting_for_a_busy_agent_says_what_it_waits_behind():
     plan = unit(mine, "plan", "m13123")
     assert plan["display"]["state"] == "queued"
     ahead = {row["label"] for row in plan["queue"]}
-    assert "task 13123#1" in ahead and "task 11741#1" in ahead
+    # m11741's task is open but dead (unknown): not what autolab is serving.
+    assert ahead == {"task 13123#1"}
     assert "serves one conversation at a time" in plan["display"]["reason"]
 
 

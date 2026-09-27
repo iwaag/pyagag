@@ -219,7 +219,10 @@ def _display(node: Node, kind: str, execution: dict, recovery: dict | None, *, n
     health = execution.get("health") or {}
     fresh = execution.get("evidence") == "confirmed"
     verdict = health.get("verdict") if fresh else None
-    requester = node.requested_by[0].split(" #")[0] if node.requested_by else "whoever asked"
+    # Whoever asked for it: a task's owner writes a root note of its own (the
+    # parent hop), which names itself, never its requester.
+    askers = [entry.split(" #")[0] for entry in node.requested_by]
+    requester = next((name for name in askers if name != node.owner), askers[0] if askers else "whoever asked")
 
     if state == "done":
         reason = {"finished": "the run finished and reached its goal",

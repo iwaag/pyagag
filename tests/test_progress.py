@@ -323,7 +323,8 @@ def test_a_result_not_yet_taken_up_is_a_delivery_wait_and_owed():
     assert any("workrun-task1-m13123" in line for line in tracing.next_actions(result))
     # Once served, the same result waits for its agreement instead.
     task = unit(card(13116, 13164), "task", "13123#1")
-    assert task["awaiting_agreement"] and "agreement" in task["display"]["reason"]
+    assert task["awaiting_agreement"] and "waiting for Front's agreement" in task["display"]["reason"]
+    assert task["display"]["next"] == "Front"
 
 
 def test_a_completed_card_owes_nothing_by_the_existing_readers():

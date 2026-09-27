@@ -254,3 +254,4 @@ def test_the_last_reply_failure_leaves_the_requester_unanswered():
     assert not [c for c in tracing.stall_candidates(result, now=200) if c.kind == "unanswered"], "not before 60 s"
     found = [c for c in tracing.stall_candidates(result, now=230) if c.kind == "unanswered"]
     assert len(found) == 1 and found[0].anchor == result.root.anchor and "unanswered" in tracing.FAILSAFE_KINDS
+    assert found[0].fact.startswith("(this run produced no reply"), "the notice, not the mention before it"

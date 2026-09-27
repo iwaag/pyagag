@@ -624,7 +624,11 @@ def classify(
         return "queued", "no agent has acknowledged it", identity, "", [mid(last_other)], last_activity
 
     if last_answer is not None and mid(last_answer) > mid(last_other) and _is_failure(last_answer.get("content")):
-        text = str(last_answer.get("content") or "").strip().splitlines()[0][:80]
+        # The notice's own line, not the mention that opens the post (p3
+        # trial B's incident said only "@**Omni Agent**").
+        lines = [line.strip() for line in str(last_answer.get("content") or "").splitlines() if line.strip()]
+        text = next((line for line in lines if any(line.startswith(p) for p in FAILURE_PREFIXES)),
+                    lines[0] if lines else "")[:160]
         return "failed", text, identity, owner_name, [mid(last_answer)], last_activity
 
     if last_other is None:

@@ -615,6 +615,7 @@ def _run_streaming(
     timeout: float,
     env: dict[str, str],
     on_event: Callable[[dict], None],
+    live=None,
 ) -> tuple[int, str, str]:
     """Launch one harness process and forward its stdout JSON lines as events.
 
@@ -636,19 +637,29 @@ def _run_streaming(
         cwd=cwd,
         env=env,
     )
+    if live is not None:
+        live.begin(harness=live.doc.get("harness") or "", pid=proc.pid, timeout=timeout)
     out_lines: list[str] = []
     err_chunks: list[str] = []
     consumer_errors: list[str] = []
 
     def pump_stdout() -> None:
         for line in proc.stdout:
-            out_lines.append(line)
             stripped = ANSI_RE.sub("", line).strip()
+            if '"stream_event"' not in stripped[:40]:
+                # Partial-message chunks (`--include-partial-messages`, asked
+                # for only when a live record is kept) are liveness, not
+                # output: they reach the record and nothing else.
+                out_lines.append(line)
             if not stripped:
                 continue
             try:
                 event = json.loads(stripped)
             except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "stream_event":
+                if live is not None:
+                    live.event(event)
                 continue
             if isinstance(event, dict):
                 try:
@@ -679,9 +690,13 @@ def _run_streaming(
         proc.wait()
         for thread in threads:
             thread.join(timeout=5)
+        if live is not None:
+            live.end(exit_code=proc.returncode, outcome="aborted")
         raise subprocess.TimeoutExpired(argv, timeout, output="".join(out_lines)) from None
     for thread in threads:
         thread.join(timeout=5)
+    if live is not None:
+        live.end(exit_code=proc.returncode, outcome="done" if proc.returncode == 0 else "failed")
     return proc.returncode, "".join(out_lines), "".join(err_chunks), consumer_errors
 
 
@@ -699,6 +714,7 @@ def run_harness(
     stream: bool = False,
     transcript_path: Path | None = None,
     output_tail_chars: int = DEFAULT_OUTPUT_TAIL_CHARS,
+    live=None,
 ) -> HarnessResult:
     """Launch, extract, and normalize one harness process without fallback.
 
@@ -714,6 +730,12 @@ def run_harness(
     rather than a run. `agent_standardize` p10 found that out the hard way —
     an entrance answered without looking at a whole project, and the
     transcript kept for exactly that question could not say so.
+
+    ``live`` (an `agag.execution.LiveExecution`) keeps a record of the run
+    while it lasts — its process id, each event, the tool calls not yet
+    returned, its end — for a health probe in another process (failsafe p2).
+    It asks for the streaming mode, and for claude_code its partial
+    messages, so a long generation is progress too.
     """
     meta = identity(agent)
     # Wall clock, for the record: `duration_ms` alone cannot say *when* a run
@@ -724,7 +746,11 @@ def run_harness(
             "agent run timed out (no budget left)", -1,
             {**meta, "outcome": "aborted", "failure": "timeout"},
         )
-    stream = (on_event is not None or stream) and agent.harness in STREAMING_HARNESSES
+    stream = (on_event is not None or stream or live is not None) and agent.harness in STREAMING_HARNESSES
+    if live is not None:
+        live.doc["harness"] = agent.harness
+        if agent.harness == "claude_code" and stream:
+            extra_args = [*(extra_args or []), "--include-partial-messages"]
     try:
         argv = build_argv(
             agent,
@@ -749,15 +775,22 @@ def run_harness(
     started = time.monotonic()
     consumer_errors: list[str] = []
     stdin_payload = _agy_stdin(prompt) if agent.harness == "agy" else prompt
-    consumer = on_event if on_event is not None else (lambda event: None)
-    if agent.harness == "agy" and on_event is not None:
-        consumer = _agy_events(on_event)
-    elif agent.harness == "codex" and on_event is not None:
-        consumer = _codex_events(on_event)
+    watcher = on_event
+    if live is not None:
+        def watcher(event: dict, _show=on_event) -> None:
+            live.event(event)
+            if _show is not None:
+                _show(event)
+    consumer = watcher if watcher is not None else (lambda event: None)
+    if agent.harness == "agy" and watcher is not None:
+        consumer = _agy_events(watcher)
+    elif agent.harness == "codex" and watcher is not None:
+        consumer = _codex_events(watcher)
     try:
         if stream:
             returncode, stdout, stderr, consumer_errors = _run_streaming(
                 argv, stdin_payload, cwd=cwd, timeout=timeout, env=env, on_event=consumer,
+                **({"live": live} if live is not None else {}),
             )
         else:
             proc = subprocess.run(
@@ -793,6 +826,8 @@ def run_harness(
             raw,
         )
     except OSError as error:
+        if live is not None:
+            live.end(exit_code=None, outcome="failed")
         failure = f"could not launch {agent.harness} ({argv[0]}): {error}"
         return HarnessResult(
             failure,

@@ -186,6 +186,13 @@ class Node:
     #: and who has not spoken here since — `@**Comfy Notifier** watch …` is
     #: acked with a reaction and answered by a mention later. They hold it.
     waiting_on: list[str] = field(default_factory=list)
+    #: What the post that ended the newest serving declared (`ag.post.v1`):
+    #: its intent, and whom a response request asked (failsafe p2). A
+    #: request to a person or an agent is an explained wait; a report or
+    #: nothing at all hands the move to nobody in particular.
+    ending_intent: str = ""
+    ending_to: int = 0
+    ack_at: int = 0
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -338,8 +345,8 @@ def _serving(messages: list[dict] | None, owner: int | None, served: set[str] = 
     ack and its reply — an answer after the ack. Progress after the ack
     ends nothing: it is what a live serving posts, and what m11741's last
     serving said before nothing was running."""
-    facts = {"execution": "unknown", "ack": 0, "ended_by": 0, "ended_at": 0, "work": 0, "work_at": 0,
-             "ending": None, "waiting_on": []}
+    facts = {"execution": "unknown", "ack": 0, "ack_at": 0, "ended_by": 0, "ended_at": 0, "work": 0, "work_at": 0,
+             "ending": None, "waiting_on": [], "ending_intent": "", "ending_to": 0}
     if not messages or owner is None:
         return facts
     for message in messages:
@@ -354,6 +361,7 @@ def _serving(messages: list[dict] | None, owner: int | None, served: set[str] = 
         return facts
     ack = acks[-1]
     facts["ack"] = int(ack.get("id") or 0)
+    facts["ack_at"] = int(ack.get("timestamp") or 0)
     # Whoever spoke here before this serving began is who it serves.
     served = set(served) | {_sender(m) for m in messages
                             if m.get("sender_id") != owner and int(m.get("id") or 0) < facts["ack"]}
@@ -368,8 +376,11 @@ def _serving(messages: list[dict] | None, owner: int | None, served: set[str] = 
     if ending is None:
         facts["execution"] = "open"
         return facts
+    meta = parse_post(ending.get("content")).meta
     facts.update(execution="ended", ended_by=int(ending.get("id") or 0),
-                 ended_at=int(ending.get("timestamp") or 0), ending=ending)
+                 ended_at=int(ending.get("timestamp") or 0), ending=ending,
+                 ending_intent=(meta.intent or "") if meta is not None else "",
+                 ending_to=int(meta.to or 0) if meta is not None and meta.to is not None else 0)
     return facts
 
 
@@ -1223,8 +1234,9 @@ THRESHOLDS = {
     "silent": 2700,
     # failsafe p1: the last serving ended saying work goes on, and nobody
     # holds it. A listener re-serves input that arrived during a run within
-    # seconds; five minutes is the grace for anything else in flight.
-    "unheld": 300,
+    # seconds; failsafe p2 cut p1's five-minute grace to one look interval:
+    # a confirmed end with unfinished work enters recovery on the next cycle.
+    "unheld": 60,
     # Unfinished work whose holder cannot be established (or is an agent
     # that took it up), with nothing new in the request for this long.
     "quiet": 1800,

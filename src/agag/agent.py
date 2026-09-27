@@ -368,6 +368,24 @@ def resolve_spec_role(
     return replace(agent, environment=environment)
 
 
+def _live_record(path: Path, role: str, extra_meta: Mapping[str, object] | None):
+    """A live execution record for one run, naming the serving it is part of."""
+    from .execution import LiveExecution
+    from .serving import current
+
+    serving: dict[str, object] = {"role": role}
+    journal = current()
+    record = journal.serving() if journal is not None else None
+    if record is not None:
+        serving.update(id=record.id, ack=record.ack_id, channel=record.home_channel or record.channel,
+                       topic=record.home_topic or record.topic, route=record.route,
+                       home_anchor=int(getattr(journal, "home_anchor", 0) or 0))
+    for key in ("channel", "topic"):
+        if extra_meta and extra_meta.get(key) and not serving.get(key):
+            serving[key] = extra_meta[key]
+    return LiveExecution(path, serving=serving)
+
+
 def run_role(
     spec: AgentSpec,
     role: str,
@@ -386,8 +404,14 @@ def run_role(
     extra_meta: Mapping[str, object] | None = None,
     agent: ResolvedAgent | None = None,
     selection: Selection | None = None,
+    live: Path | None = None,
 ) -> tuple[str, dict, int]:
     """Resolve `role`, run it once, and return output, record, and exit code.
+
+    `live` is a path for the run's live execution record (`agag.execution`):
+    what a health probe in another process reads while the run lasts. The
+    serving it belongs to is taken from this thread's journal
+    (`agag.serving.current()`) — its id, its ack and its conversation.
 
     `agent` is an already-resolved role for a caller that had to look at the
     resolution before the run (autolab decides agcode's budget and
@@ -422,6 +446,7 @@ def run_role(
         skip_permissions=skip_permissions,
         extra_args=extra_args,
         on_event=on_event,
+        live=_live_record(live, role, extra_meta) if live is not None else None,
     )
     # Which conversation the run was for, read from where it ran; an explicit
     # `extra_meta` wins over it.

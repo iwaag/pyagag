@@ -239,7 +239,7 @@ def _display(node: Node, kind: str, execution: dict, recovery: dict | None, *, n
         # hands its report home (step 5: Front resolved the growbox run by
         # hand, `agentchat resolve --anyway`, after writing "Run complete.").
         return "unknown", ("closed with ✔ but without its end record, so whether its report reached the "
-                           "request is not on record (`agrunfinish` records the end)"), owner
+                           "request is not on record (`agrun finish` records the end)"), owner
     if state == "failed":
         return "stopped", node.detail or "the newest word is a failure notice", requester
     if verdict == "stopped":

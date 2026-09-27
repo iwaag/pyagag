@@ -197,12 +197,12 @@ class Study:
 
     def task_shows(self) -> int:
         r = self.realm
-        r.post(self.task_channel, self.task_topic, "[selfnote][change] checkpoint main=abc123:def456", AUTOLAB)
+        r.post(self.task_channel, self.task_topic, "[selfnote][change] checkpoint main=abc1234def5678:def456", AUTOLAB)
         self.shown = r.post(self.task_channel, self.task_topic, "@**Front** Done: the report is committed.\n\n"
                             + line("response_request", to=FRONT, ask="confirmation", end=self.task_ack), AUTOLAB)
         return self.shown
 
-    def task_closes(self, agreement_from: int = FRONT) -> int:
+    def task_closes(self, agreement_from: int = FRONT, sha: str = "abc1234def5678") -> int:
         r = self.realm
         home = self.desk_topic if self.beside else self.run_topic
         where = "front" if self.beside else self.run_channel
@@ -212,7 +212,7 @@ class Study:
                              + line("report"), agreement_from)
         close_ack = r.post(self.task_channel, self.task_topic, ACK, AUTOLAB)
         r.post(self.task_channel, self.task_topic,
-               f"[selfnote][change] accepted main=abc123 #{self.agreed} +shown={self.shown}", AUTOLAB)
+               f"[selfnote][change] accepted main={sha} #{self.agreed} +shown={self.shown}", AUTOLAB)
         r.post(self.task_channel, self.task_topic, "[selfnote][state] completed", AUTOLAB)
         self.closed = r.post(self.task_channel, self.task_topic,
                              "@**Front** closed; integrated on main.\n\n" + line("report", end=close_ack), AUTOLAB)

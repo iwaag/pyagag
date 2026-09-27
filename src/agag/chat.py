@@ -49,6 +49,7 @@ from .selfnote import (
     is_selfnote,
     is_speech,
     note,
+    effective_rootchat,
     own_rootchat,
     parse_conversation,
     rootchat_moved_note,
@@ -490,12 +491,47 @@ def ensure_rootchat(client: ZulipClient, channel: str, topic: str, out) -> None:
     try:
         self_id = int(client.whoami()["user_id"])
         history = client.topic_history(channel, topic, num_before=ROOTCHAT_LOOKBACK)
-        if own_rootchat(history, self_id) is None:
+        existing = effective_rootchat(history, self_id)
+        if existing is None:
             client.send_to_channel(channel, topic, rootchat_note(home))
+        elif not _same_request(client, existing, home, self_id):
+            # failsafe p5: a root note is written once per topic and the
+            # earliest wins, so a second request posting here would have its
+            # answers returned to the first (study-growbox: every refresh
+            # answer went to the request that set the study up).
+            raise AgentChatError(
+                f"#{channel} > {topic} already returns its answers to {existing.channel}/{existing.topic}, "
+                f"which belongs to another request than {home.channel}/{home.topic}: an answer to this post "
+                "would go there. Open a topic of your own for this request (a name that does not exist yet, "
+                "e.g. with this run's or request's id), or, if this conversation now belongs to your current "
+                f"one, move it first: `agentchat anchor {channel} {topic}`")
     except (ZulipError, KeyError, TypeError, ValueError) as error:
         print(f"agentchat: could not anchor this topic to {home}: {error}", file=out)
         return
     _ANCHORED.add((channel, topic))
+
+
+def _request_origin(client: ZulipClient, conversation: Conversation, self_id: int, depth: int = 4) -> tuple[str, str]:
+    """The conversation a chain of this agent's own root notes starts from:
+    the request a conversation of ours was opened for."""
+    current = conversation
+    for _ in range(depth):
+        found = locate(client, current) or current
+        try:
+            history = client.topic_history(found.channel, found.topic, num_before=ROOTCHAT_LOOKBACK)
+        except ZulipError:
+            break
+        above = effective_rootchat(history, self_id)
+        if above is None or (above.channel, _bare_topic(above.topic)) == (found.channel, _bare_topic(found.topic)):
+            break
+        current = above
+    return current.channel, _bare_topic(current.topic)
+
+
+def _same_request(client: ZulipClient, existing: Conversation, home: Conversation, self_id: int) -> bool:
+    if (existing.channel, _bare_topic(existing.topic)) == (home.channel, _bare_topic(home.topic)):
+        return True
+    return _request_origin(client, existing, self_id) == _request_origin(client, home, self_id)
 
 
 def intro_lines(entries) -> list[str]:

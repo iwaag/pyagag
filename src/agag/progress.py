@@ -477,9 +477,59 @@ def card_state(units: Iterable[dict]) -> str:
     return "unknown"
 
 
-def _project_of(value: str) -> str:
-    match = re.search(r"(?:^|\s)project=(\S+)", value or "")
+def _field(value: str, name: str) -> str:
+    match = re.search(rf"(?:^|\s){name}=(\S+)", value or "")
     return match.group(1) if match else ""
+
+
+_ACCEPTED_MAIN = re.compile(r"^accepted\b.*?\bmain=([0-9a-f]{7,40})")
+
+
+def _integrated(plans: list[dict]) -> set[str]:
+    """The `main` commits the plans' tasks integrated (each close-out's
+    `[change] accepted main=<commit>`): the result a refresh must hold."""
+    found: set[str] = set()
+    for plan in plans:
+        for task in _walk(plan):
+            for record in task["records"]:
+                match = _ACCEPTED_MAIN.match(str(record.get("value") or "")) if record.get("tag") == "change" else None
+                if match:
+                    found.add(match.group(1))
+    return found
+
+
+def _same_commit(a: str, b: str) -> bool:
+    return bool(a) and bool(b) and (a.startswith(b) or b.startswith(a)) and min(len(a), len(b)) >= 7
+
+
+def _refresh_holds(sync: dict, required: set[str], mine: set[tuple[str, str]], here: bool) -> bool:
+    """Whether a `sagesync` record establishes this request's refresh:
+
+    - `missing=` one of the required commits: no;
+    - `for=` one of this request's conversations: yes if it `includes=` the
+      required commit (or is that revision), or when no commit is known;
+    - elsewhere (another request's refresh): only if its `includes=` or its
+      revision *is* a required commit — the recorded revision establishes
+      the fact, the time does not;
+    - an older record with neither relation: its revision being a required
+      commit, or — when no commit is known — being recorded in this
+      request's own conversations."""
+    value = str(sync.get("value") or "")
+    parts = value.split()
+    revision = parts[1] if len(parts) > 1 else ""
+    included, missing = _field(value, "includes"), _field(value, "missing")
+    if missing and any(_same_commit(missing, c) for c in required):
+        return False
+    holds = any(_same_commit(included, c) or _same_commit(revision, c) for c in required)
+    target = _field(value, "for")
+    if target:
+        channel, _, rest = target.partition("/")
+        topic = rest.split("#", 1)[0]
+        if (channel, _bare(topic)) in mine:
+            return holds or not required
+    if included or target:
+        return holds
+    return holds if required else here
 
 
 def _stages(root: dict, now: int, syncs_elsewhere: list[dict] | None = None) -> list[dict]:
@@ -534,20 +584,24 @@ def _stages(root: dict, now: int, syncs_elsewhere: list[dict] | None = None) -> 
                     or [u for u in units if u["kind"] == "plan"]
                 research_done = max((r["at"] for u in plans for r in u["records"] if r["tag"] == "acceptance"),
                                     default=0)
-                projects = {u["channel"][len("pj-"):] for u in plans if u["channel"].startswith("pj-")}
-                projects.add(unit["channel"][len(STUDY_ROUTINE_PREFIX):])
+                required = _integrated(plans)
+                mine = {(u["channel"], _bare(u["topic"])) for u in units}
                 in_tree = {r["id"] for u in units for r in u["records"] if r["tag"] == "sagesync"}
-                # Only a refresh after this run's research was accepted: an
-                # earlier refresh of the same sage is not this run's (step 5's
-                # repeat read the first trial's refresh as done at once).
+                # failsafe p5: a refresh counts by what it records — whom it was
+                # for and which result it holds — never by the study's project
+                # and a time alone, which let another run's refresh complete
+                # this one (and the first trial's refresh the second's).
                 after = [s for s in syncs if research_done and s["at"] >= research_done
-                         and (s["id"] in in_tree or _project_of(s.get("value", "")) in projects)]
+                         and _refresh_holds(s, required, mine, s["id"] in in_tree)]
                 stages.append({"stage": "knowledge_refreshed", "unit": unit["anchor"],
                                "label": unit["channel"][len("routine-"):],
                                "status": "done" if after else "pending",
                                "evidence": after[-1]["id"] if after else None,
+                               "required": sorted(required) or None,
                                "detail": (f"sage synced: {after[-1]['value']}" if after else
-                                          "no sage refresh is recorded after the research was accepted"
+                                          ("no sage refresh holding " + ", ".join(sorted(c[:12] for c in required))
+                                           + " is recorded for this request" if required else
+                                           "no sage refresh is recorded for this request")
                                           if research_done else "the research is not accepted yet")})
     order = ("tasks_agreed", "plan_accepted", "run_ended", "report_delivered", "knowledge_refreshed")
     return sorted(stages, key=lambda s: order.index(s["stage"]))

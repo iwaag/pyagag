@@ -93,7 +93,7 @@ def test_baseline_the_fixed_refresh_topic_returns_to_the_first_request():
     assert (home.channel, home.topic, home.anchor) == ("front", setup.desk_topic, setup.origin)
 
 
-def test_baseline_the_refresh_stage_is_matched_by_project_and_time_only():
+def test_another_runs_refresh_of_another_revision_does_not_complete_this_run():
     realm = Realm()
     study = Study(realm, "growbox", "b1")
     study.ask()
@@ -114,7 +114,12 @@ def test_baseline_the_refresh_stage_is_matched_by_project_and_time_only():
     elsewhere = [{"tag": "sagesync", "value": "growbox 0123456789ab project=growbox findings=1",
                   "id": done + 50, "at": now, "by": ARCHSAGE}]  # another run's refresh, another revision
     found = progress.card(result, now=now, syncs=elsewhere)
-    assert {s["stage"]: s["status"] for s in found["stages"]}["knowledge_refreshed"] == "done"
+    # Step 1 found this "done" (matched by project and time). Step 5: the
+    # record establishes nothing about this run's result, so it stays pending.
+    assert {s["stage"]: s["status"] for s in found["stages"]}["knowledge_refreshed"] == "pending"
+    theirs = [{**elsewhere[0], "value": f"growbox abc1234def56 project=growbox findings=1 includes=abc1234def5678"}]
+    assert {s["stage"]: s["status"] for s in progress.card(result, now=now, syncs=theirs)["stages"]}[
+        "knowledge_refreshed"] == "done"  # the revision establishes it, wherever it was recorded
 
 
 # --- step 2: one reading of a queue, shared ------------------------------------------------
@@ -274,3 +279,91 @@ def test_agentchat_reserve_records_the_person_s_own_words_where_they_said_them(m
     (note,) = [r["content"] for r in realm.rows if parse_reservation(r["content"])]
     assert parse_reservation(note) == (OMNI, "Omni Agent", study.origin)
     assert chat.main(["reserve", "--evidence", str(study.desk_ack)]) == 1  # Front's own post
+
+
+# --- step 5: the refresh returns to the run that asked ------------------------------------
+
+
+def _send(monkeypatch, realm, home, anchor, channel, topic, text):
+    from agag import chat
+
+    realm.me = FRONT
+    monkeypatch.setattr(chat, "client_from_environment", lambda: realm)
+    monkeypatch.setattr(chat, "join_and_record", lambda client, channel, topic, out: False)
+    monkeypatch.setattr(chat, "refuse_resolved", lambda client, channel, topic: None)
+    chat._ANCHORED.clear()
+    monkeypatch.setenv("AGENTCHAT_HOME", home)
+    monkeypatch.setenv("AGENTCHAT_HOME_ANCHOR", str(anchor))
+    return chat.main(["send", channel, topic, text])
+
+
+def test_a_topic_that_returns_to_another_request_is_refused_and_a_new_one_is_not(monkeypatch, capsys):
+    realm = Realm()
+    setup, later = Study(realm, "growbox", "setup"), Study(realm, "growbox", "b1")
+    setup.ask("Set the growbox study up.")
+    realm.post("archsage-agstudio1", "study-growbox",
+               f"[selfnote][rootchat] front/{setup.desk_topic} #{setup.origin}", FRONT)
+    realm.post("archsage-agstudio1", "study-growbox", "@**archsage** please set it up.", FRONT)
+    later.ask()
+    later.open_run()
+    run_home = f"{later.run_channel}/{later.run_topic}"
+    before = len(realm.topic_history("archsage-agstudio1", "study-growbox", 400))
+    assert _send(monkeypatch, realm, run_home, later.run_open, "archsage-agstudio1", "study-growbox",
+                 "@**archsage** please refresh sage:growbox") == 1
+    assert "belongs to another request" in capsys.readouterr().err
+    assert len(realm.topic_history("archsage-agstudio1", "study-growbox", 400)) == before
+    # The refusal is left on record in the run ([opfail]), where it happened.
+    assert realm.rows[-1]["content"].startswith("[selfnote][opfail]") and realm.rows[-1]["topic"] == later.run_topic
+    assert _send(monkeypatch, realm, run_home, later.run_open, "archsage-agstudio1", "refresh-growbox-b1",
+                 "@**archsage** please refresh sage:growbox") == 0
+    home = effective_rootchat(realm.topic_history("archsage-agstudio1", "refresh-growbox-b1", 50), FRONT)
+    assert (home.channel, home.topic, home.anchor) == (later.run_channel, later.run_topic, later.run_open)
+
+
+def test_the_same_request_may_post_from_its_desk_into_work_its_run_opened(monkeypatch):
+    realm = Realm()
+    study = Study(realm, "growbox", "b1")
+    study.ask()
+    study.open_run()
+    study.run_delegates()
+    assert _send(monkeypatch, realm, f"front/{study.desk_topic}", study.origin, study.plan_channel,
+                 study.plan_topic, "One more detail for the plan.") == 0
+
+
+def _accepted_study(realm, stamp, sha):
+    study = Study(realm, "growbox", stamp)
+    study.ask()
+    study.open_run()
+    study.run_delegates()
+    study.autolab_plans()
+    study.front_starts()
+    study.autolab_starts()
+    study.task_shows()
+    study.task_closes(sha=sha)
+    realm.post(study.plan_channel, study.plan_topic, f"[selfnote][acceptance] #{study.agreed} by {FRONT} (Front)",
+               AUTOLAB)
+    realm.post(study.plan_channel, study.plan_topic, "[selfnote][state] done", AUTOLAB)
+    return study
+
+
+def test_two_runs_of_the_same_study_each_need_their_own_refresh_in_any_order():
+    realm = Realm()
+    first, second = _accepted_study(realm, "r1", "1111111aaaaaaa"), _accepted_study(realm, "r2", "2222222bbbbbbb")
+    now = realm.clock + 5
+
+    def stage(study, *values):
+        syncs = [{"tag": "sagesync", "value": v, "id": 5000 + i, "at": now, "by": ARCHSAGE} for i, v in enumerate(values)]
+        found = progress.card(tracing.trace(realm, study.origin, now=now), now=now, syncs=syncs)
+        return {s["stage"]: s["status"] for s in found["stages"]}["knowledge_refreshed"]
+
+    for_second = (f"growbox 2222222bbbbb project=growbox findings=2 for={second.run_channel}/{second.run_topic}"
+                  f"#{second.run_open} includes=2222222bbbbbbb")
+    for_first = (f"growbox 1111111aaaaa project=growbox findings=1 for={first.run_channel}/{first.run_topic}"
+                 f"#{first.run_open} includes=1111111aaaaaaa")
+    # The second run's refresh arrives first: it completes the second, not the first.
+    assert stage(second, for_second) == "done" and stage(first, for_second) == "pending"
+    assert stage(first, for_second, for_first) == "done"
+    assert stage(second, for_first) == "pending"
+    # A refresh for this run that does not hold its result is not the refresh.
+    missed = for_first.replace("includes=", "missing=")
+    assert stage(first, missed) == "pending"

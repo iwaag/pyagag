@@ -254,3 +254,18 @@ def test_a_held_request_waits_for_a_person_whatever_its_conversations_claim():
 def test_an_unreadable_origin_is_unknown():
     found = progress.card(tracing.Trace(root=None, origin=1, observed_at=0, problem="gone"), now=10)
     assert found["state"] == "unknown" and found["root"] is None
+
+
+def test_a_check_that_says_ended_beside_an_unended_serving_is_unknown_and_not_in_progress():
+    """m11741's task, live on 2026-09-27: the probe says the run is over, the
+    conversation shows no reply ending its serving. Neither is "in progress"."""
+    result = traced(11711, 11770)
+    task = node(result, "workrun-task1-m11741")
+    now = at(11770) + 3600
+    ended = {"verdict": "ended", "why": "the run is over and its serving is delivered", "observed_at": now - 5,
+             "subject": {"ack": task.ack}}
+    found = progress.card(result, now=now, health={task.anchor: ended}, viewer_id=DEVELOPER)
+    got = unit(found, "task")
+    assert got["display"]["state"] == "unknown" and "no post here ended" in got["display"]["reason"]
+    meter = unit(found, "plan")["meter"]
+    assert (meter["working"], meter["unknown"]) == (0, 1)

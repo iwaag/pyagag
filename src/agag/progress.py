@@ -257,6 +257,12 @@ def _display(node: Node, kind: str, execution: dict, recovery: dict | None, *, n
         return "waiting", f"on {what}" + (f" — {wait['detail']}" if wait.get("detail") else ""), owner
     if fresh and verdict == "unknown":
         return "unknown", f"health check: {health.get('why')}", owner
+    if fresh and verdict == "ended" and node.execution == "open" and state not in ("queued",):
+        # The run is over (its journal says delivered, or it was served
+        # again), yet no post ended the serving here: whatever it did, its
+        # conversation does not show an answer (m11741's task, 2026-09-27).
+        return "unknown", (f"health check: {health.get('why')} — but no post here ended the serving acked at "
+                           f"#{node.ack}"), requester
     if kind == "plan" and not child_states and node.identity.startswith("mission "):
         serving = " (its planner's serving is open)" if node.execution == "open" else ""
         return "planning", f"no task is known yet{serving}", owner
@@ -329,10 +335,13 @@ def _meter(plan: Node, tasks: list[dict]) -> dict[str, Any] | None:
         revisions.append({"doc": doc["id"], "at": doc["at"], "total": len(opened) - len(gone)})
     if not tasks:
         return {"known": False, "total": None, "completed": 0, "working": 0, "awaiting_agreement": 0,
-                "cancelled": 0, "revisions": revisions, "note": "planning: no task is known yet"}
+                "stopped": 0, "unknown": 0, "cancelled": 0, "revisions": revisions,
+                "note": "planning: no task is known yet"}
     completed = [t for t in live if t["work"]["record"] in AGREED or t["work"]["state"] == "done"]
-    working = [t for t in live if t["display"]["state"] in ("working", "waiting", "stopped", "unknown")
+    working = [t for t in live if t["display"]["state"] in ("working", "waiting")
                and not t["awaiting_agreement"] and t not in completed]
+    stopped = [t for t in live if t["display"]["state"] == "stopped"]
+    unclear = [t for t in live if t["display"]["state"] == "unknown"]
     awaiting = [t for t in live if t["awaiting_agreement"]]
     note = ""
     totals = [r["total"] for r in revisions]
@@ -343,7 +352,8 @@ def _meter(plan: Node, tasks: list[dict]) -> dict[str, Any] | None:
     elif len(revisions) > 1:
         note = f"plan revised {len(revisions) - 1}× (the total did not change)"
     return {"known": True, "total": len(live), "completed": len(completed), "working": len(working),
-            "awaiting_agreement": len(awaiting), "cancelled": len(cancelled), "revisions": revisions,
+            "awaiting_agreement": len(awaiting), "stopped": len(stopped), "unknown": len(unclear),
+            "cancelled": len(cancelled), "revisions": revisions,
             "note": note, "segments": [t["display"]["state"] if not t["awaiting_agreement"] else "awaiting_agreement"
                                        for t in sorted(live, key=lambda t: t["serial"])]}
 

@@ -557,14 +557,33 @@ def probe(directory: Path, *, ack: int = 0, channel: str = "", topic: str = "", 
     return report
 
 
+HELP_TAIL = """\
+Output: one JSON object (`agag.health.v1`) on standard output — `verdict`,
+`why`, the facts above each with `observed_at`, and `unknowns`. The command
+always exits 0: a probe that fails answers `unknown` with the reason, so a
+monitor reads a verdict, never a traceback. It reads files and the process
+table; it posts nothing and changes nothing.
+
+  python -m agag.health --dir <instance>/.local/executions \\
+      --queue <instance>/.local/mirror/listener.sqlite --ack <ack id>
+  python -m agag.health --dir … --queue … --queued --since <post epoch> \\
+      --channel <channel> --topic <topic>"""
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m agag.health", description=__doc__.split("\n\n")[0])
-    parser.add_argument("--dir", required=True, type=Path, help="the live execution records")
-    parser.add_argument("--queue", type=Path, default=None, help="the listener's queue file (listener.sqlite)")
-    parser.add_argument("--ack", type=int, default=0)
-    parser.add_argument("--channel", default="")
-    parser.add_argument("--topic", default="")
-    parser.add_argument("--window", type=float, default=WINDOW_SECONDS)
+    parser = argparse.ArgumentParser(
+        prog="python -m agag.health", formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__.rstrip() + "\n\n" + HELP_TAIL)
+    parser.add_argument("--dir", required=True, type=Path,
+                        help="the owner's live execution records (`<instance>/.local/executions`)")
+    parser.add_argument("--queue", type=Path, default=None,
+                        help="the owner's listener queue file (`<instance>/.local/mirror/listener.sqlite`), read-only")
+    parser.add_argument("--ack", type=int, default=0,
+                        help="the acknowledgement that opened the serving asked about (as the conversation shows it)")
+    parser.add_argument("--channel", default="", help="the serving's conversation: its channel")
+    parser.add_argument("--topic", default="", help="the serving's conversation: its topic")
+    parser.add_argument("--window", type=float, default=WINDOW_SECONDS,
+                        help=f"seconds within which work must have arrived to read `running` (default {WINDOW_SECONDS:g})")
     parser.add_argument("--queued", action="store_true",
                         help="the conversation holds a post nobody acknowledged: where is it in the queue")
     parser.add_argument("--since", type=float, default=0.0, help="with --queued: when the post was made")

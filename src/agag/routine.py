@@ -246,17 +246,39 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agroutine", description=__doc__, epilog=EPILOG,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    create = sub.add_parser("create", help="register a routine with its first guide (or continue one)")
+    create = sub.add_parser(
+        "create", help="register a routine with its first guide (or continue one)",
+        description=(
+            "Make `#routine-<name>` in the `routine` folder (the provisioner credential), subscribe the realm's "
+            "owners, the routine runner and the board reader, and post the file as the first guide under your own "
+            "credential. It prints each step it took, the guide's message id and whether the stored text read "
+            "back intact. Run again, it completes whatever is missing and posts nothing twice; a different guide "
+            "over an existing one is refused (that is `update`). It starts nothing: a run is a request to the "
+            "routine runner, whose introduction says where to ask."))
     create.add_argument("name", help="the routine's name; the channel becomes routine-<name>")
-    create.add_argument("--guide-file", required=True)
-    create.add_argument("--provisioner-env", default=None)
-    update = sub.add_parser("update", help="post a new complete guide version")
+    create.add_argument("--guide-file", required=True, help="the whole guide, as a file")
+    create.add_argument("--provisioner-env", default=None,
+                        help="the provisioner credential (default: AGAG_PROVISIONER_ENV)")
+    update = sub.add_parser(
+        "update", help="post a new complete guide version",
+        description=(
+            "Post the file as the routine's new guide: the newest post in `guide` is the whole guide, so the file "
+            "must be the complete text, not a change. The post is read back by id; a stored text that differs "
+            "(truncated or altered) is a failure (exit 1) — shorten it and update again. The same text as the "
+            "newest guide posts nothing."))
     update.add_argument("name")
-    update.add_argument("--guide-file", required=True)
-    show = sub.add_parser("show", help="what exists for one routine")
+    update.add_argument("--guide-file", required=True, help="the whole new guide, as a file")
+    show = sub.add_parser(
+        "show", help="what exists for one routine",
+        description=(
+            "Print (JSON) what exists for the routine: the channel and whether it is archived, the guide's newest "
+            "message id, author, length and version count, whether it was truncated, how many `routinerun-` "
+            "topics it has, and `remaining` — what `create` would still have to do. With --provisioner-env it "
+            "also checks members and the folder. A read: it changes nothing."))
     show.add_argument("name")
     show.add_argument("--provisioner-env", default=None, help="also check members and folder")
-    sub.add_parser("list", help="every routine channel")
+    sub.add_parser("list", help="every routine channel",
+                   description="Print every `routine-` channel: the routine's name, the channel and its stream id.")
     for command in (create, update, show):
         command.add_argument("--json", action="store_true")
     return parser

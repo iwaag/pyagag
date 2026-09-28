@@ -313,7 +313,6 @@ class Trial:
         asked = responder.post(self.board, probe.channel, probe.topic, speaker, probe.text)
         servings: list[dict] = []
         extra: tuple[tuple[str, str], ...] = ()
-        mark = asked
         while len(servings) < MAX_SERVINGS:
             context = TopicContext(board, probe.channel, probe.topic, self_id, name,
                                    history=board.topic_history(probe.channel, probe.topic, 200), extra_threads=extra)
@@ -326,9 +325,8 @@ class Trial:
                                     f"@**{probe.speaker}** {reply}")
             servings.append({"reply": reply, "marked": bool(split.reply), "tool_calls": list(calls())})
             responder.deliver(self.board)
-            answers = [m for m in responder.posts_since(self.board, mark)
+            answers = [m for m in responder.posts_since(self.board, posted)
                        if m["sender_id"] != self_id and f"@**{name}**" in m["content"]]
-            mark = posted
             if not answers:
                 break
             extra = ((answers[-1]["display_recipient"], answers[-1]["subject"]),)

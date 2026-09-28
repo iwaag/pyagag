@@ -54,7 +54,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Iterable
 
-from .people import acts_for, for_suffix
+from .people import acts_for, for_suffix, principal_of
 from .selfnote import note, parse_note
 
 __all__ = [
@@ -349,7 +349,9 @@ def place(client, where, result, purpose: str, unit: int, evidence: int, why: st
         if not post:
             raise HoldRefused(f"#{evidence} does not exist or could not be read")
         by, name = int(post.get("sender_id") or 0), str(post.get("sender_full_name") or "")
-        if by == int(me["user_id"]):
+        # An agent's own words are not a person's hold — unless it carries a
+        # person's full authority, whose words are that person's (p6 ex2).
+        if by == int(me["user_id"]) and principal_of(by) is None:
             raise HoldRefused(f"#{evidence} is your own post: a hold is a person's, on their words")
     nodes = {int(n.anchor): n for n in result.nodes()} if result is not None and result.root is not None else {}
     if unit not in nodes:

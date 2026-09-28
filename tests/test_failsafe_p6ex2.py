@@ -221,3 +221,15 @@ def test_the_proxy_withdraws_what_the_developer_asked(proxy):
                                                                     ask="question"))
     rows = [ask, _post(2, OMNI, "Omni Agent", "Never mind that question.", PostMeta(intent="report", re=(1,)))]
     assert read_requests(rows).by_id()[1].state == WITHDRAWN
+
+
+def test_the_proxy_records_a_hold_on_its_own_words_with_its_own_credential_and_an_agent_may_not(proxy):
+    realm, m = closed()
+    words = realm.post("front", m.desk, "Keep the resume decision with me.", OMNI)
+    omni = realm.speaking_as(OMNI)
+    assert _hold(omni, m, "resume", m.task, words) == 0
+    realm.next_id, realm.clock = omni.next_id, omni.clock  # the view wrote into the same rows
+    (hold,) = holding.holds_of(tracing.trace(realm, m.origin, now=realm.clock + 60))
+    assert (hold.by, hold.name, hold.written_by) == (OMNI, "Omni Agent", str(OMNI))
+    own = realm.post("front", m.desk, "I keep this.", FRONT)
+    assert _hold(realm.speaking_as(FRONT), m, "decision", m.origin, own) == 1

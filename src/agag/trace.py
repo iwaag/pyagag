@@ -1763,7 +1763,10 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
                 "whoever asked decides what to do about the failure (retry, change the request, or stop and say so)",
                 node.last_activity, tuple(node.evidence), anchor=node.anchor,
             ))
+        closed_exchange = (not node.identity and node.state == "awaiting_requester" and node.taken_up
+                           and node.execution != "open")
         if resolved and node.state in ("queued", "executing", "awaiting_delivery", "awaiting_requester") \
+                and not closed_exchange \
                 and node.note_state not in DONE_WORDS and overdue("resolved_live", node.last_activity):
             # A ✔ on work its record calls finished is no question: a close-out
             # answer still owed to its requester is `undelivered`'s, above

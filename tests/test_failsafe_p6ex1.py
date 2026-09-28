@@ -423,3 +423,22 @@ def test_a_task_its_owner_started_names_its_real_requester_for_agreement():
     assert "Front" in task2.requesters
     unit = next(u for u in progress._walk(card["root"]) if u["label"].endswith("#2"))
     assert "autolab-agstudio1's agreement" not in unit["display"]["reason"]
+
+
+def test_a_closed_plain_exchange_under_a_request_is_not_resolved_live():
+    """p6 ex1 step 5: once o14251's retirement stopped hiding it, Observer
+    asked about archsage's refresh topic — answered, taken up, ✔ — as `✔
+    while awaiting requester`. A plain exchange that complete is closed."""
+    realm = Realm()
+    m = Mission(realm, "exchange")
+    realm.post("archsage-agstudio1", "refresh-x", f"[selfnote][rootchat] front/{m.desk} #{m.origin} rel=work", FRONT)
+    realm.post("archsage-agstudio1", "refresh-x", "@**archsage** please refresh.", FRONT)
+    realm.post("archsage-agstudio1", "refresh-x", ACK, 24)
+    answer = realm.post("archsage-agstudio1", "refresh-x", "@**Front** refreshed.\n\n`ag-post intent=report end=0`", 24)
+    realm.post("front", m.desk, served_note(Conversation("archsage-agstudio1", "refresh-x"), answer), FRONT)
+    realm.resolve("archsage-agstudio1", "refresh-x", FRONT)
+    result = tracing.trace(realm, m.origin, now=realm.clock + 3600)
+    node = next(n for n in result.nodes() if "refresh-x" in n.topic)
+    assert node.state == "awaiting_requester" and node.taken_up
+    assert not [c for c in tracing.stall_candidates(result, now=realm.clock + 3600)
+                if c.kind == "resolved_live" and "refresh-x" in c.topic]

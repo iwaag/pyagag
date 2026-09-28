@@ -177,6 +177,28 @@ class MirrorReads:
             return None
         return self.live().message(int(message_id), strict=strict)
 
+    def own_notes(self, tag: str, num_before: int = 1000) -> list[dict]:
+        """This account's own `[selfnote][<tag>]` messages, oldest first."""
+        me = int(self.whoami()["user_id"])
+        found: list[dict] = []
+        seen: set[int] = set()
+        for row in self.store.notes(tag=tag, sender_id=me):
+            if row.message_id not in seen:
+                seen.add(row.message_id)
+                message = self.store.message(row.message_id)
+                if message is not None:
+                    found.append(message.as_zulip())
+        return found[-int(num_before):]
+
+    def own_rootchat_notes(self, num_before: int = 1000) -> list[dict]:
+        return self.own_notes("rootchat", num_before)
+
+    def own_moved_notes(self, num_before: int = 1000) -> list[dict]:
+        return self.own_notes("rootchat-moved", num_before)
+
+    def own_served_notes(self, num_before: int = 1000) -> list[dict]:
+        return self.own_notes("served", num_before)
+
     def public_notes(self, tag: str, num_before: int = 1000) -> list[dict]:
         found: list[dict] = []
         seen: set[int] = set()

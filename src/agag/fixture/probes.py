@@ -1,0 +1,119 @@
+"""What is asked of the fixture board, and how an answer is judged.
+
+Each probe is one post a person makes, the role it is served by, and a pass
+rule over the reply the role marks. The rules are deliberately about
+**content the board holds** — names, ids, states — so the same rule judges
+a run with the old guide and a run with the new one. A rule is a set of
+facts that must all appear (each fact is one or more accepted spellings)
+and facts that must not; `judge` reports which were met.
+
+Front's three are p1's board probes (report6): the incident wording of
+#15673, "the grow box thing", and forge's past work for ProtoPrey. The
+others are p2 step 7's: archsage asked about a sage by a loose name, an
+autolab planner asked about another project's state, Observer's triage
+asked about a request it did not open.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+__all__ = ["PROBES", "Probe", "judge"]
+
+
+@dataclass(frozen=True)
+class Probe:
+    name: str
+    agent: str
+    role: str
+    channel: str
+    topic: str
+    text: str
+    must: tuple[tuple[str, ...], ...]
+    must_not: tuple[str, ...] = ()
+    note: str = ""
+    speaker: str = "Developer"
+    extra: dict = field(default_factory=dict)
+
+
+PROBES = {p.name: p for p in (
+    Probe(
+        name="aisvgs-sufficient", agent="agfront", role="desk", channel="front",
+        topic="front-desk-fixture-aisvgs",
+        text=("AISVGsの調査は十分に行われ、主要な研究者や個人の取り組み、コミュニティの最先端を確認し、"
+              "車輪の再発明をする確率を下げつつ新しいアイディアを発明できる段階にあると言えますか？"),
+        must=(("pj-aisvgs", "routine-study-aisvgs", "sage:aisvgs"),
+              ("round 2", "round2", "ラウンド2", "第2", "strand 5", "strands 5", "5–7", "5-7"),
+              ("round 3", "round3", "ラウンド3", "第3", "researchplan-aisvgs-round3"),
+              ("自分で", "by hand", "yourself", "ご自身", "手を動かし", "手作業")),
+        must_not=("見つかりません", "記録がありません", "教えてください", "no record"),
+        note=("#15673's wording. Passes when the reply finds the study and its rounds on the board, says round 3 "
+              "is planned and not started, and carries the Developer's decision (in archsage's channel) that round 3 "
+              "is theirs to do by hand — the fact p1's run-0169 missed."),
+    ),
+    Probe(
+        name="growbox-thing", agent="agfront", role="desk", channel="front", topic="front-desk-fixture-growbox",
+        text="あのgrow boxのやつ、いまどこまで進んでる？",
+        must=(("pj-growbox",),
+              ("germination", "発芽"),
+              ("food safety", "food-safety", "食品安全", "衛生"),
+              ("control loop", "control-loop", "制御", "m20402")),
+        must_not=("教えてください", "どのプロジェクト"),
+        note="Passes when the reply names the study, the two accepted strands and the control-loop mission running now.",
+    ),
+    Probe(
+        name="forge-protoprey", agent="agfront", role="desk", channel="front", topic="front-desk-fixture-forge",
+        text="forgeってprotoprey向けに何を納品したんだっけ？",
+        must=(("hero", "ヒーロー", "野ウサギ", "hare"),
+              ("meadow", "草原", "背景"),
+              ("footstep", "足音", "sound", "サウンド", "効果音")),
+        must_not=("birthday", "誕生日"),
+        note=("Passes when the reply lists the two deliveries and says the footstep sounds were not delivered (no "
+              "sound-effect toolset; forge asked which way), and leaves out the unrelated birthday card."),
+    ),
+    Probe(
+        name="archsage-loose-sage", agent="archsage", role="archsage", channel="archsage-agstudio1",
+        topic="fixture-sprouts", text="Does the sprout-box sage know how many days mung beans take to sprout?",
+        must=(("sage:growbox", "growbox"),),
+        must_not=("which sage", "no sage"),
+        note=("A sage asked by a loose name. Passes when archsage takes 'the sprout-box sage' to be sage:growbox and "
+              "answers from its tree or says the tree does not answer; it may not ask which sage was meant."),
+    ),
+    Probe(
+        name="planner-other-project", agent="agautolab", role="superdirector", channel="pj-protoprey",
+        topic="workplan-protoprey-sprouts",
+        text=("Before you plan anything: where does the growbox study stand right now? I want a ProtoPrey location "
+              "built around sprouting seeds and would reuse its findings."),
+        must=(("pj-growbox", "growbox"), ("control loop", "control-loop", "m20402"),
+              ("germination", "food safety", "food-safety")),
+        must_not=("cannot see", "can't see", "no access"),
+        note="An autolab planner asked about another project's state: passes when it reads the growbox study off the board.",
+    ),
+    Probe(
+        name="triage-unopened", agent="agobserver", role="triage", channel="pj-protoprey",
+        topic="workplan-protoprey-locations", speaker="agobserver-agstudio1",
+        text="",
+        must=(("legit",),),
+        note=("Observer's triage asked about a request it did not open: autolab asked the Developer for the go-ahead "
+              "and nobody has answered. Passes on `legit` (the next move is the Developer's and they were asked)."),
+    ),
+)}
+
+
+def _found(text: str, spellings: tuple[str, ...]) -> str | None:
+    folded = text.casefold()
+    for spelling in spellings:
+        if spelling.casefold() in folded:
+            return spelling
+    return None
+
+
+def judge(probe: Probe, reply: str) -> dict:
+    """Which of the probe's facts the reply carries, and whether it passes."""
+    met = [(spellings, _found(reply, spellings)) for spellings in probe.must]
+    against = [s for s in probe.must_not if s.casefold() in reply.casefold()]
+    missing = [" / ".join(spellings) for spellings, hit in met if hit is None]
+    return {"probe": probe.name, "passed": not missing and not against,
+            "met": [hit for _, hit in met if hit is not None], "missing": missing, "against": against,
+            "words": len(re.findall(r"\S+", reply))}

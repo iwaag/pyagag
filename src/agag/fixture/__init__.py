@@ -13,6 +13,10 @@ a line naming the fixture.
     python -m agag.fixture probes             # the probes and their pass rules
     python -m agag.fixture check <probe> <reply file>   # a reply against its rule
 
+A probe that delegates is served on an **overlay**, the trial's own copy of
+the board, where `agentchat send` is recorded and answered by the probe's
+script (`responder.py`); every other write is still refused there.
+
 `board.py` is the realm (projects and studies, routines with runs, archsage's
 topics, every agent's introduction, forge's past work, one ✔'d past request);
 `probes.py` is what is asked of it and how an answer is judged; `run.py`

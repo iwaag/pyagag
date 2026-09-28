@@ -32,13 +32,16 @@ from agag.zulip import ZulipError
 
 from .store import Store
 
-__all__ = ["FIXTURE_GITEA", "FIXTURE_META", "FIXTURE_REPOSITORIES_META", "FixtureRefused", "MirrorReads"]
+__all__ = ["FIXTURE_GITEA", "FIXTURE_META", "FIXTURE_REPOSITORIES_META", "FIXTURE_USERS_META", "FixtureRefused",
+           "MirrorReads"]
 
 #: The store meta key a fixture board carries (its name).
 FIXTURE_META = "fixture"
 #: The fixture's repositories (JSON: slug → `main`'s revision), which
 #: `agproject status` reads instead of the host's Gitea.
 FIXTURE_REPOSITORIES_META = "fixture_repositories"
+#: The fixture's people and agents (JSON list of `user_id`/`full_name`/`is_bot`).
+FIXTURE_USERS_META = "fixture_users"
 #: Where the fixture's repositories say they are: a host that resolves nowhere.
 FIXTURE_GITEA = "https://gitea.fixture.invalid"
 
@@ -83,6 +86,32 @@ class MirrorReads:
             return True
         queue, _ = self.store.checkpoint()
         return queue is not None
+
+    # -- a trial's overlay: `send` recorded and answered by its script ----------
+
+    @property
+    def overlay(self) -> bool:
+        """A trial's own copy of a fixture board, carrying a responder script
+        (`agag.fixture.responder`): the one store that takes a `send`."""
+        return bool(self.fixture and self.store.get_meta("fixture_overlay"))
+
+    def send_to_channel(self, channel: str, topic: str, content: str) -> int:
+        if not self.overlay:
+            return self.live().send_to_channel(channel, topic, content)
+        from agag.fixture.responder import record_send
+
+        return record_send(self.path, channel, topic, content)
+
+    def ensure_subscribed(self, channel: str) -> bool:
+        if not self.overlay:
+            return self.live().ensure_subscribed(channel)
+        return False  # the board's reader already reads every channel on it
+
+    def users(self) -> list[dict]:
+        """A fixture's people and agents (`--to <name>` resolves against them)."""
+        if not self.fixture:
+            return self.live().users()
+        return json.loads(self.store.get_meta(FIXTURE_USERS_META) or "[]")
 
     def repository(self, slug: str, org: str) -> dict:
         """A study's repository as `agag.project.gitea_head` reports one,

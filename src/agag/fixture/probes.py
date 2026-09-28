@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .responder import Canned
+
 __all__ = ["DRIVERS", "PROBES", "Probe", "judge"]
 
 #: The module that serves an agent's probes, run from that agent's checkout
@@ -47,6 +49,16 @@ class Probe:
     note: str = ""
     speaker: str = "Developer"
     extra: dict = field(default_factory=dict)
+    #: The responder's script (`agag.fixture.responder`): a probe that has one
+    #: is served on an overlay, and again on each scripted callback. Its
+    #: `must`/`must_not` then judge the **last** serving's reply, the tool
+    #: rules every serving's calls, and `sends_must` the posts the served
+    #: agent sent (each group: one post carrying any of its spellings).
+    script: tuple[Canned, ...] = ()
+    sends_must: tuple[tuple[str, ...], ...] = ()
+    #: How many servings the conversation must have had: a scripted answer
+    #: counts only when it came back on a serving of its own.
+    servings_min: int = 1
 
 
 PROBES = {p.name: p for p in (
@@ -136,6 +148,39 @@ PROBES = {p.name: p for p in (
               "live trial (#15842) failed here: one turn, no tool call, a reply saying both were recorded."),
     ),
     Probe(
+        name="delegate-answer", agent="agfront", role="desk", channel="front", topic="front-desk-fixture-pump",
+        text="growbox の制御ループ（m20402）で、ポンプを何秒・何時間おきに回すことになったか autolab に確認して教えて。",
+        script=(Canned("autolab-agstudio1", "{asker} The pump runs 20 s every 4 hours, six times a day; it is set in "
+                       "`main/control/schedule.toml` at `7c2e91d`. Answers #{ask}.\n\n`ag-post intent=report re={ask}`",
+                       topics=("workplan-", "workrun-")),),
+        must=(("4 hours", "4時間", "4 h", "4h", "four hours"), ("20 s", "20秒", "20 seconds", "20s", "20 秒")),
+        tools_must=(("agentchat send",),),
+        servings_min=2,
+        note=("Front delegates: the pump schedule is on no post of the board, so only autolab can say. The fixture's "
+              "responder answers the first post Front sends to autolab (a mention, autolab's channel, or a "
+              "workplan-/workrun- topic) with a canned report; the conversation is then served again as the "
+              "listener serves a callback. Passes when the callback serving reports 20 s every 4 hours."),
+    ),
+    Probe(
+        name="delegate-decision", agent="agfront", role="desk", channel="front", topic="front-desk-fixture-lights",
+        text=("growbox の制御ループ（m20402）の照明を1日何時間点けるか、autolab に決めてもらって結果を教えて。"
+              "どちらかを選ぶよう聞かれたら、電気代を抑えるほうで答えておいて。"),
+        script=(Canned("autolab-agstudio1", "{asker} For the light schedule I need a decision: 16 h a day (faster "
+                       "greening, about twice the power) or 12 h a day (slower, half the power). Which one?\n\n"
+                       "`ag-post intent=response_request to=15 ask=decision`", topics=("workplan-", "workrun-")),
+                Canned("autolab-agstudio1", "{asker} Set: lights 12 h a day (06:00–18:00) in "
+                       "`main/control/schedule.toml` at `b41d0e7`; the task goes on with it. Answers #{ask}.\n\n"
+                       "`ag-post intent=report re={ask}`", topics=("workplan-", "workrun-"))),
+        must=(("12 h", "12時間", "12 hours", "12h", "06:00", "b41d0e7"),),
+        must_not=("16時間にしました", "16 h a day was set"),
+        tools_must=(("agentchat send",),),
+        sends_must=(("12 h", "12時間", "12 hours", "12h", "12-hour", "twelve"),),
+        servings_min=3,
+        note=("Front answers a response_request from the fixture agent. autolab's scripted first answer asks Front to "
+              "choose (16 h or 12 h of light); the Developer said to take the cheaper one. Passes when a later serving "
+              "sends autolab the 12-hour choice and the last one reports what autolab set."),
+    ),
+    Probe(
         name="triage-unopened", agent="agobserver", role="triage", channel="pj-protoprey",
         topic="workplan-protoprey-locations", speaker="agobserver-agstudio1",
         text="",
@@ -154,9 +199,12 @@ def _found(text: str, spellings: tuple[str, ...]) -> str | None:
     return None
 
 
-def judge(probe: Probe, reply: str, tool_calls: list[str] | None = None) -> dict:
+def judge(probe: Probe, reply: str, tool_calls: list[str] | None = None, *, sends: list[str] | None = None,
+          servings: int = 1) -> dict:
     """Which of the probe's facts the reply (and its tool calls) carries, and
-    whether it passes."""
+    whether it passes. For a scripted probe `reply` is the last serving's,
+    `tool_calls` every serving's, `sends` what the served agent sent, and
+    `servings` how many there were."""
     met = [(spellings, _found(reply, spellings)) for spellings in probe.must]
     against = [s for s in probe.must_not if s.casefold() in reply.casefold()]
     missing = [" / ".join(spellings) for spellings, hit in met if hit is None]
@@ -165,6 +213,11 @@ def judge(probe: Probe, reply: str, tool_calls: list[str] | None = None) -> dict
         if not any(s in calls for s in spellings):
             missing.append("tool call: " + " / ".join(spellings))
     against += [f"tool call: {s}" for s in probe.tools_must_not if s in calls]
+    for spellings in probe.sends_must:
+        if not any(_found(post, spellings) for post in sends or ()):
+            missing.append("sent: " + " / ".join(spellings))
+    if servings < probe.servings_min:
+        missing.append(f"servings: {servings} of at least {probe.servings_min}")
     observed = {" / ".join(spellings): _found(reply, spellings) for spellings in probe.observe}
     return {"probe": probe.name, "passed": not missing and not against,
             "met": [hit for _, hit in met if hit is not None], "missing": missing, "against": against,

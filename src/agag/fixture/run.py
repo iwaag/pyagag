@@ -48,14 +48,17 @@ from agag.harness import HarnessResult
 from agag.mirror.reads import MirrorReads
 from agag.reply import split_reply
 
+from . import responder
 from .board import DEV, NAMES, OBSERVER, build_store
 from .probes import PROBES, Probe, judge
 
 __all__ = ["DRY_REPLY", "PROBE_ID", "Trial", "TrialError", "client", "fixture_environment", "guides_at", "newest",
-           "outcome", "probe_history", "record_facts", "session_log", "tool_calls", "trial_parser"]
+           "outcome", "probe_history", "record_facts", "record_facts_all", "session_log", "tool_calls", "trial_parser"]
 
 #: The probe post's id: above every id the board holds.
 PROBE_ID = 30_001
+#: A scripted conversation is served at most this many times.
+MAX_SERVINGS = 4
 
 
 @contextlib.contextmanager
@@ -143,6 +146,17 @@ def session_log(cwd: Path) -> Path | None:
     return newest(Path.home() / ".claude" / "projects" / slug, "*.jsonl")
 
 
+def record_facts_all(root: Path) -> dict:
+    """Cost, turns and duration summed over every run record under `root`
+    (a scripted conversation's servings), with the records' paths."""
+    paths = sorted(Path(root).rglob("run-*.json"), key=lambda p: p.stat().st_mtime) if Path(root).is_dir() else []
+    records = [json.loads(p.read_text(encoding="utf-8")) for p in paths]
+    return {"records": [str(p) for p in paths],
+            "cost_usd": round(sum(r.get("cost_usd") or 0 for r in records), 4) if records else None,
+            "turns": sum(r.get("num_turns") or 0 for r in records) if records else None,
+            "duration_s": round(sum(r.get("duration_ms") or 0 for r in records) / 1000, 1)}
+
+
 def record_facts(records: Path) -> dict:
     """Cost, turns, duration and model of the newest run record in `records`."""
     path = newest(records, "run-*.json")
@@ -219,6 +233,9 @@ class Trial:
     shared: bool
     dry_run: bool
     records: Path
+    #: The trial's own copy of the board, for a probe with a responder script
+    #: (`agag.fixture.responder`); None otherwise.
+    overlay: Path | None = None
 
     @classmethod
     def start(cls, args: argparse.Namespace, repository: Path) -> "Trial":
@@ -241,8 +258,18 @@ class Trial:
                 guides = guides_at(repository, args.guides_rev, out / f"guides@{args.guides_rev}")
             except TrialError as error:
                 raise SystemExit(f"trial: {error}") from None
-        return cls(probe=PROBES[args.probe], out=out, store=store, guides=guides, guides_rev=args.guides_rev or "",
-                   shared=not args.no_shared, dry_run=bool(args.dry_run), records=records)
+        probe = PROBES[args.probe]
+        overlay = None
+        if probe.script:
+            overlay = responder.make_overlay(store, out / "overlay", probe.script,
+                                             {name: ident for ident, name in NAMES.items()})
+        return cls(probe=probe, out=out, store=store, guides=guides, guides_rev=args.guides_rev or "",
+                   shared=not args.no_shared, dry_run=bool(args.dry_run), records=records, overlay=overlay)
+
+    @property
+    def board(self) -> Path:
+        """The store a serving reads: the overlay when there is one."""
+        return self.overlay or self.store
 
     @contextlib.contextmanager
     def session(self):
@@ -250,7 +277,7 @@ class Trial:
         asked; and on a dry run no harness starts: its prompt is written to
         `<out>/prompt.md` and it answers `DRY_REPLY`."""
         with contextlib.ExitStack() as stack:
-            stack.enter_context(fixture_environment(self.store))
+            stack.enter_context(fixture_environment(self.board))
             if not self.shared:
                 stack.enter_context(_patched(topics_module, "shared_sections", lambda names: ""))
             if self.dry_run:
@@ -265,7 +292,59 @@ class Trial:
     def facts(self) -> dict:
         return {"guides": str(self.guides or "(this checkout's)"), "guides_rev": self.guides_rev,
                 "shared": self.shared, "store": str(self.store), "dry_run": self.dry_run,
-                "records_root": str(self.records)}
+                "records_root": str(self.records), "overlay": str(self.overlay or "")}
+
+    def converse(self, serve, calls) -> int:
+        """A scripted probe's whole conversation, served as its listener
+        would: the person's post (in the overlay), a serving, its reply
+        posted home, and — each time the responder's scripted line names the
+        served agent — the home conversation served again with the
+        conversation that called placed beside it (`extra_threads`), as the
+        listener's callback does. `serve(context)` is the agent's serving;
+        `calls()` the tool calls of the serving that just ran. Judged over
+        every serving; returns the driver's exit status."""
+        from agag.topics import TopicContext
+
+        probe = self.probe
+        board = client(self.board)
+        me = board.whoami()
+        self_id, name = int(me["user_id"]), str(me["full_name"])
+        speaker = next((ident for ident, who in NAMES.items() if who == probe.speaker), DEV)
+        asked = responder.post(self.board, probe.channel, probe.topic, speaker, probe.text)
+        servings: list[dict] = []
+        extra: tuple[tuple[str, str], ...] = ()
+        mark = asked
+        while len(servings) < MAX_SERVINGS:
+            context = TopicContext(board, probe.channel, probe.topic, self_id, name,
+                                   history=board.topic_history(probe.channel, probe.topic, 200), extra_threads=extra)
+            with self.session():
+                result = serve(context)
+            split = split_reply(result.output or "")
+            reply = split.reply if split.reply else (result.output or "")
+            # Delivered home as the listener would: to the person who asked.
+            posted = responder.post(self.board, probe.channel, probe.topic, self_id,
+                                    f"@**{probe.speaker}** {reply}")
+            servings.append({"reply": reply, "marked": bool(split.reply), "tool_calls": list(calls())})
+            answers = [m for m in responder.posts_since(self.board, mark)
+                       if m["sender_id"] != self_id and f"@**{name}**" in m["content"]]
+            mark = posted
+            if not answers:
+                break
+            extra = ((answers[-1]["display_recipient"], answers[-1]["subject"]),)
+        sends = [m["content"] for m in responder.posts_since(self.board, asked)
+                 if m["sender_id"] == self_id and not m["content"].startswith("[selfnote]")
+                 and (m["display_recipient"], m["subject"]) != (probe.channel, probe.topic)]
+        every_call = [c for serving in servings for c in serving["tool_calls"]]
+        verdict = judge(probe, servings[-1]["reply"], every_call, sends=sends, servings=len(servings))
+        result = {**verdict, "marked": servings[-1]["marked"], **self.facts(), "servings": servings, "sends": sends,
+                  "tool_calls": every_call, "reply": servings[-1]["reply"],
+                  **record_facts_all(self.records)}
+        (self.out / "outcome.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+        (self.out / "reply.md").write_text("\n\n---\n\n".join(s["reply"] for s in servings) + "\n",
+                                           encoding="utf-8")
+        print(json.dumps({k: v for k, v in result.items() if k not in ("reply", "servings")}, ensure_ascii=False,
+                         indent=1))
+        return 0 if result["passed"] else 2
 
     def finish(self, output: str, *, records: Path | None = None, calls: list[str] | None = None, **facts) -> int:
         """Judge `output` under the probe's rule, beside the newest run

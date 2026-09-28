@@ -29,7 +29,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agag.mirror.reads import FIXTURE_META, FIXTURE_REPOSITORIES_META
+from agag.mirror.reads import FIXTURE_META, FIXTURE_REPOSITORIES_META, FIXTURE_USERS_META
 from agag.mirror.store import Store
 
 FIXTURE_NAME = "agent-guide-p2"
@@ -511,6 +511,9 @@ def build_store(directory: Path, board: Board | None = None) -> Path:
         store.set_checkpoint("fixture", 0)
         store.set_meta(FIXTURE_META, FIXTURE_NAME)
         store.set_meta(FIXTURE_REPOSITORIES_META, json.dumps(board.repositories, sort_keys=True))
+        store.set_meta(FIXTURE_USERS_META, json.dumps(
+            [{"user_id": ident, "full_name": name, "is_bot": ident not in (DEV, OMNI), "is_active": True}
+             for ident, name in NAMES.items() if ident != NOTICE], ensure_ascii=False))
         store.set_meta("self_id", str(FRONT))
         store.set_meta("full_name", NAMES[FRONT])
         store.set_meta("email", "front-bot@fixture.invalid")

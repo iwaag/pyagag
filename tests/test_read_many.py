@@ -176,8 +176,8 @@ def test_a_fixture_board_answers_everything_and_writes_nothing(monkeypatch, fixt
     assert reads.topic_history(CHANNEL, "nothing-here") == []
     with pytest.raises(FixtureRefused):
         reads.stream_id("not-on-the-board")
-    with pytest.raises(FixtureRefused):
-        reads.users()
+    # A fixture answers for its own people (agent_guide p2 ex1: `send --to <name>`); this one holds none.
+    assert reads.users() == []
 
 
 def test_the_store_is_opened_read_only(tmp_path):

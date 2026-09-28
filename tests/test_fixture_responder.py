@@ -88,4 +88,4 @@ def test_scripted_probes_are_judged_over_the_conversation():
     assert judge(probe, final, calls, sends=["…", "12 h a day, please"], servings=3)["passed"]
     assert not judge(probe, final, calls, sends=["…"], servings=3)["passed"]
     assert not judge(probe, final, calls, sends=["12 h"], servings=2)["passed"]
-    assert judge(PROBES["delegate-answer"], "20秒を4時間おき", calls, servings=2)["passed"]
+    assert judge(PROBES["delegate-answer"], "41分、有料論文で12分止まった", calls, servings=2)["passed"]

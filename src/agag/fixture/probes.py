@@ -148,18 +148,22 @@ PROBES = {p.name: p for p in (
               "live trial (#15842) failed here: one turn, no tool call, a reply saying both were recorded."),
     ),
     Probe(
-        name="delegate-answer", agent="agfront", role="desk", channel="front", topic="front-desk-fixture-pump",
-        text="growbox の制御ループ（m20402）で、ポンプを何秒・何時間おきに回すことになったか autolab に確認して教えて。",
-        script=(Canned("autolab-agstudio1", "{asker} The pump runs 20 s every 4 hours, six times a day; it is set in "
-                       "`main/control/schedule.toml` at `7c2e91d`. Answers #{ask}.\n\n`ag-post intent=report re={ask}`",
+        name="delegate-answer", agent="agfront", role="desk", channel="front", topic="front-desk-fixture-m20390",
+        text="growbox の発芽の調査（m20390）、終わるまでにどれくらいかかって、途中で詰まったところはあったのか、autolab に聞いて教えて。",
+        script=(Canned("autolab-agstudio1", "{asker} m20390 took 41 minutes of work. It stalled once, for 12 minutes: "
+                       "one of the germination papers (source 7) was paywalled, so I replaced it with the authors' "
+                       "open preprint. Answers #{ask}.\n\n`ag-post intent=report re={ask}`",
                        topics=("workplan-", "workrun-")),),
-        must=(("4 hours", "4時間", "4 h", "4h", "four hours"), ("20 s", "20秒", "20 seconds", "20s", "20 秒")),
+        must=(("41",), ("paywall", "有料", "ペイウォール", "preprint", "プレプリント")),
         tools_must=(("agentchat send",),),
         servings_min=2,
-        note=("Front delegates: the pump schedule is on no post of the board, so only autolab can say. The fixture's "
-              "responder answers the first post Front sends to autolab (a mention, autolab's channel, or a "
-              "workplan-/workrun- topic) with a canned report; the conversation is then served again as the "
-              "listener serves a callback. Passes when the callback serving reports 20 s every 4 hours."),
+        note=("Front delegates: how m20390 went is autolab's own experience, on no post of the board (the board has "
+              "only its start and its done line). The fixture's responder answers the first post Front sends to "
+              "autolab (a mention, autolab's channel, or a workplan-/workrun- topic) with a canned report; the "
+              "conversation is then served again as the listener serves a callback. Passes when the callback "
+              "serving reports the 41 minutes and the paywalled source. (A first version asked about the running "
+              "control loop; Front read it as a status poll of running work and asked nobody, as board.md's as9 "
+              "sentence says.)"),
     ),
     Probe(
         name="delegate-decision", agent="agfront", role="desk", channel="front", topic="front-desk-fixture-lights",

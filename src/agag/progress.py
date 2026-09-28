@@ -232,6 +232,11 @@ def _display(node: Node, kind: str, execution: dict, recovery: dict | None, *, n
         why = f" ({hold.why})" if hold.why and hold.purpose != "decision" else ""
         return ("awaiting_you", f"held by {who} for {hold.purpose}{why}: waits for {hold.waits_for}",
                 "you" if viewer_id is not None and int(viewer_id) == int(hold.by) else who)
+    decided = node.disposition if node.disposition and node.disposition.get("covered") else None
+    if decided and decided.get("kind") != "suppressed" and state in ("done", "cancelled"):
+        # Ended by a recorded decision (`agag.dispositions`): said as that,
+        # never as the unit's own completion (failsafe p6 ex1).
+        return ("completed" if state == "done" else "cancelled"), node.detail.split("; its own record:")[0], ""
     if state == "done":
         reason = {"finished": "the run finished and reached its goal",
                   "ended": "the run ended without reaching its goal"}.get(word, f"its record says {word or 'done'}")
@@ -420,6 +425,11 @@ def _unit(node: Node, *, root: bool, now: int, health: dict[int, dict], recovery
         turn_blocked_by=turn_blocked_by, awaiting_agreement=awaiting,
         child_states=[c["display"]["state"] for c in children if c["kind"] == "task"], asked=asked or [],
         hold=(held or {}).get(int(node.anchor)))
+    if node.disposition and node.disposition.get("kind") == "suppressed" and state not in ("completed", "cancelled"):
+        # Monitoring suppressed on open work: it stays what it is, and says
+        # why nobody is chasing it — or that something new happened since.
+        reason = (f"{reason}; {node.disposition['says']}" if node.disposition.get("covered") else
+                  f"{reason}; new activity since #{node.disposition['id']} is monitored again")
     cancelled_at = next((r["id"] for r in reversed(_records(node, "state"))
                          if (r.get("value") or "").split()[:1] == ["cancelled"]), None)
     unit = {
@@ -451,6 +461,7 @@ def _unit(node: Node, *, root: bool, now: int, health: dict[int, dict], recovery
         # Root notes naming this conversation that make theirs no work of it
         # (failsafe p6 ex1): citations, and relations nothing records.
         "relations": [dict(row) for row in node.relations],
+        "disposition": dict(node.disposition) if node.disposition else None,
         "children": children,
     }
     report = health.get(int(node.anchor)) or {}
@@ -653,7 +664,21 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
     stages = _stages(root, now, syncs)
     deciding = [u for u in units if not u.get("passthrough")] or units
     state = card_state(deciding)
-    if state in ("answered", "completed") and any(s["status"] == "pending" for s in stages):
+    ended = next((d for d in getattr(result, "dispositions", []) or []
+                  if d.state == "in_force" and d.ended and int(d.unit) == int(result.root.anchor)
+                  and int(result.root.anchor) in d.covers), None)
+    if ended is not None and state in ("completed", "cancelled", "answered", "waiting"):
+        # The request ended by a recorded decision, and nothing new happened
+        # in it since: that decision is the card's state and reason — its
+        # stages are history, and unfinished work below it is listed.
+        state = "completed" if ended.kind == "completed" else "cancelled"
+        focus = None
+        reason = ended.says()
+        if ended.remaining:
+            reason += "; ended with it: " + ", ".join(f"{r['label']} ({r['state'].replace('_', ' ')})"
+                                                     for r in ended.remaining)
+        next_actor = ""
+    elif state in ("answered", "completed") and any(s["status"] == "pending" for s in stages):
         # A delivered answer or an ended run completes nothing on its own.
         pending_stage = next(s for s in stages if s["status"] == "pending")
         state, focus = "waiting", None
@@ -669,7 +694,7 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
         reason = focus["display"]["reason"] if focus else ""
         next_actor = focus["display"]["next"] if focus else ""
     work = [u for u in units if u["kind"] in WORK_KINDS]
-    if state == "answered" and work and all(u["display"]["state"] in ("completed", "cancelled") for u in work) \
+    if ended is None and state == "answered" and work and all(u["display"]["state"] in ("completed", "cancelled") for u in work) \
             and not any(s["status"] == "pending" for s in stages):
         # Every unit of work is finished by record, every stage is recorded,
         # and the conversations around them are answered.
@@ -697,6 +722,7 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
         "latest_work_at": latest, "stale": not source_live, "problem": result.problem,
         "stages": stages, "root": root, "settled_receipts": settled,
         "holds": [h.as_dict() for h in holds],
+        "dispositions": [d.as_dict() for d in getattr(result, "dispositions", []) or []],
         "unknown_relations": list(result.unknown_relations),
         "counts": {s: sum(1 for u in units if u["display"]["state"] == s) for s in STATES},
     }

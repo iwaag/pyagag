@@ -835,6 +835,33 @@ def build_parser() -> argparse.ArgumentParser:
     hold.add_argument("--evidence", type=int, default=0, help="the holder's own post asking for the hold")
     hold.add_argument("why", nargs="*", help="what the person keeps for themselves, in a few words")
     hold.add_argument("--json", action="store_true", help="the holds as JSON")
+    disposition = subcommands.add_parser(
+        "disposition",
+        help="a request's standing, decided on record: list, suppress monitoring, end it, or reverse a decision",
+        description=(
+            "A disposition is a decision about a request (or one unit of it), recorded in the request's own "
+            "conversation so every reader — you, Observer, the progress panel — reads the same thing. KIND is "
+            "`suppressed` (monitoring suppressed: the work stays open and visible; nobody chases it), "
+            "`completed` (the request ended with its requested outcome), `cancelled` (ended on a decision, "
+            "without it) or `withdrawn` (taken back by whoever asked: a stray post, an abandoned trial) — or "
+            "`reversed` with MESSAGE_ID naming a disposition. An ended unit reads done or cancelled, and "
+            "unfinished work below it is listed as ended with it, with what its owner's record still says. A "
+            "disposition covers what had happened when it was made: a later post (a new request, question or "
+            "result) is not covered and is monitored as ever; bookkeeping notes and restarts change nothing. "
+            "Without KIND, lists the request's dispositions. --evidence is the decision maker's post; a repeat "
+            "writes nothing."
+        ),
+    )
+    disposition.add_argument("message_id", nargs="?", type=int, default=None,
+                             help="any message of the request's conversation (or the disposition, to reverse it)")
+    disposition.add_argument("kind", nargs="?", default=None,
+                             choices=("suppressed", "completed", "cancelled", "withdrawn", "reversed"))
+    disposition.add_argument("--unit", type=int, default=0,
+                             help="the anchor of the unit it covers, as `agentchat trace` prints it (default: the "
+                                  "whole request)")
+    disposition.add_argument("--evidence", type=int, default=0, help="the decision maker's own post")
+    disposition.add_argument("why", nargs="*", help="the reason, in a few words")
+    disposition.add_argument("--json", action="store_true", help="the dispositions as JSON")
     release = subcommands.add_parser(
         "release",
         help="release a person's hold, on their words",
@@ -1228,11 +1255,15 @@ def _run(args, client: ZulipClient, out) -> int:
         else:
             print("\n".join(recheck_lines(checked)), file=out)
         return 0 if checked.verdict != "unreadable" else 1
-    if args.command in ("hold", "release"):
+    if args.command in ("hold", "release", "disposition"):
         from .holds import holds_command, release_command
 
         if args.command == "hold":
             return holds_command(client, args, out, home=home_from_environment())
+        if args.command == "disposition":
+            from .dispositions import command as disposition_command
+
+            return disposition_command(client, args, out, home=home_from_environment())
         return release_command(client, args, out)
     if args.command == "receipt":
         from .receipt import inspect as inspect_receipt, receipt_lines, repair as repair_receipt

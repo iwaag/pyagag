@@ -177,7 +177,8 @@ _FINISH_BLOCK = re.compile(r"```" + FINISH_FENCE + r"[ \t]*\n(?P<body>.*?)\n```"
 #: delivered home, a sage refreshed from its study (`sagesync`, archsage),
 #: every `[state]` word in order, and a person's holds and their releases
 #: (`agag.holds`, failsafe p6).
-RECORD_TAGS = ("doc", "acceptance", "change", "delivered", "sagesync", "state", "hold", "hold-release")
+RECORD_TAGS = ("doc", "acceptance", "change", "delivered", "sagesync", "state", "hold", "hold-release",
+               "disposition", "disposition-reversed")
 #: A post by the owner whose text begins with one of these is a failure
 #: notice rather than an answer. Each is what a listener already posts:
 #: `agag.reply.no_reply_notice`, autolab's previous-work gate, the send refusal.
@@ -264,6 +265,18 @@ class Node:
     #: relation, decided_by, author}` — a citation (`reference`), or an
     #: `unknown` relation with the command that resolves it.
     relations: list[dict] = field(default_factory=list)
+    #: The newest substantive post here — speech that is not an ack; not a
+    #: selfnote, not a system notice (failsafe p6 ex1: a disposition covers
+    #: activity up to its `upto`, and bookkeeping is not activity).
+    last_substantive: int = 0
+    #: Every substantive post here as `[id, sender id, ack its reply ends
+    #: (ag-post end=, 0 when none)]` — what a disposition's boundary is
+    #: judged against.
+    activity: list[list[int]] = field(default_factory=list)
+    #: The decision in force for this conversation (`agag.dispositions`):
+    #: `{id, kind, covered, unit, says}`; `covered` is false when something
+    #: substantive happened here after it.
+    disposition: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -281,6 +294,9 @@ class Trace:
     #: Root notes into this tree whose relation nothing records (failsafe p6
     #: ex1): each adopts nothing until its author says what it is.
     unknown_relations: list[dict] = field(default_factory=list)
+    #: The request's dispositions (`agag.dispositions.Disposition`), applied
+    #: to the tree.
+    dispositions: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -290,6 +306,7 @@ class Trace:
             "calls": self.calls,
             "problem": self.problem,
             "unknown_relations": list(self.unknown_relations),
+            "dispositions": [d.as_dict() for d in self.dispositions],
             "root": self.root.as_dict() if self.root else None,
         }
 
@@ -1380,8 +1397,14 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
                     {requester: name for requester, name, _ in requested})),
             receipt=found.get("receipt") or {},
             relations=[_relation_row(link) for link in cited.get(key, [])],
+            last_substantive=max((int(m.get("id") or 0) for m in messages or ()
+                                  if is_speech(m) and not is_ack(str(m.get("content") or ""))), default=0),
+            activity=[[int(m.get("id") or 0), int(m.get("sender_id") or 0),
+                       int((parse_post(m.get("content")).meta or _NO_META).end or 0)]
+                      for m in messages or () if is_speech(m) and not is_ack(str(m.get("content") or ""))],
             **facts,
         )
+        endings[int(node.anchor)] = ending
         if depth >= max_depth:
             node.holder = _holder(node, ending)
             return node
@@ -1426,6 +1449,7 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
     # and Observer asked, again and again. Marks are matched by the post they
     # name, so a requester's mark anywhere in this request's tree is its
     # receipt.
+    endings: dict[int, dict | None] = {}
     receipts: dict[int, list[dict]] = {}
     for messages in histories.values():
         for message in messages or ():
@@ -1436,6 +1460,14 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
     result.root = build(root_key, 0, set(), True, [], [])
     result.calls = reader.calls
     result.problem = index_problem
+    # A decision recorded on the request — monitoring suppressed, or the
+    # request ended (`agag.dispositions`) — read the same by every reader;
+    # then who holds what is decided again for what is still open.
+    from .dispositions import apply as apply_dispositions
+
+    result.dispositions = apply_dispositions(result)
+    if result.dispositions:
+        _rehold(result.root, endings)
     result.unknown_relations = [row for node in result.nodes() for row in node.relations
                                 if row["relation"] == UNKNOWN_RELATION]
     return result
@@ -1452,6 +1484,13 @@ def _relation_row(link: _Link) -> dict:
         row["resolve"] = (f"{link.author_name}: `agentchat relation {link.child_channel} {_bare(link.child_topic)} "
                           f"work|reference --because <post>`")
     return row
+
+
+def _rehold(node: Node, endings: dict[int, dict | None]) -> None:
+    for child in node.children:
+        _rehold(child, endings)
+    if node.holder != "done":
+        node.holder = _holder(node, endings.get(int(node.anchor)))
 
 
 def _order_tasks(node: Node) -> None:
@@ -1525,6 +1564,13 @@ def trace_lines(result: Trace) -> list[str]:
             lines.append(f"{pad}{'  ' if depth else ''}  anchored by {', '.join(node.requested_by)}")
         for failure in node.failures:
             lines.append(f"{pad}{'  ' if depth else ''}  ! operation failed: {failure}")
+        if node.disposition and node.disposition.get("kind") == "suppressed":
+            lines.append(f"{pad}{'  ' if depth else ''}  " + (
+                f"monitoring suppressed: {node.disposition['says']}" if node.disposition.get("covered") else
+                f"new activity since #{node.disposition['id']} ({node.disposition['says']}): not covered"))
+        elif node.disposition and not node.disposition.get("covered"):
+            lines.append(f"{pad}{'  ' if depth else ''}  new activity since #{node.disposition['id']} "
+                         f"({node.disposition['says']}): not covered")
         for row in node.relations:
             if row["relation"] == UNKNOWN_RELATION:
                 lines.append(f"{pad}{'  ' if depth else ''}  ? relation unknown: {row['channel']}/{row['topic']} "

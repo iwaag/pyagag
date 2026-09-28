@@ -259,3 +259,150 @@ def test_rename_resolve_and_a_reused_name_keep_the_relation_on_its_request():
     assert not any(n.anchor == reused for n in result.nodes())
     own = tracing.trace(realm, m.origin, now=realm.clock + 60)
     assert any(m.task_topic in t for t in topics(own))
+
+
+# --- step 3: monitoring suppressed, or the request ended -----------------------------------------
+
+from agag import dispositions as disposing
+from agag import progress
+from agag.selfnote import served_note
+
+
+def unfinished() -> tuple[Realm, Mission]:
+    """A request whose task showed a result nobody has taken up: open work,
+    and an answer without its receipt."""
+    realm = Realm()
+    m = Mission(realm, "open")
+    return realm, m
+
+
+def decide(realm: Realm, m: Mission, kind: str, unit: int = 0, why: str = "the developer's cleanup call") -> int:
+    evidence = realm.post("front", "front-desk-cleanup", f"Please mark {m.desk} {kind}.", DEV)
+    written, _, _, _ = disposing.record(realm.speaking_as(FRONT), m.origin, kind, unit=unit, evidence=evidence,
+                                        why=why)
+    return written
+
+
+def look(realm: Realm, m: Mission):
+    result = tracing.trace(realm, m.origin, now=realm.clock + 60)
+    return result, progress.card(result, now=realm.clock + 60)
+
+
+def test_suppressed_monitoring_keeps_the_work_open_and_explains_it_on_every_reader():
+    realm, m = unfinished()
+    before, card_before = look(realm, m)
+    decide(realm, m, "suppressed", why="the trial waits for the developer's return; do not chase it")
+    result, card = look(realm, m)
+    assert [n.state for n in result.nodes()] == [n.state for n in before.nodes()], "nothing is ended"
+    assert card["state"] == card_before["state"] != "completed"
+    task = next(n for n in result.nodes() if n.identity.startswith("task"))
+    assert int(task.anchor) in disposing.suppressed_anchors(result), "Observer's scope"
+    assert "monitoring suppressed by Developer" in progress.card(result, now=realm.clock + 60)["reason"] \
+        or any("monitoring suppressed" in u["display"]["reason"] for u in progress._walk(card["root"]))
+    assert any("monitoring suppressed" in line for line in tracing.trace_lines(result))
+
+
+def test_a_suppression_on_one_unit_leaves_the_rest_of_the_request_monitored():
+    realm, m = unfinished()
+    task = next(n for n in look(realm, m)[0].nodes() if n.identity.startswith("task"))
+    decide(realm, m, "suppressed", unit=int(task.anchor))
+    result, _ = look(realm, m)
+    assert disposing.suppressed_anchors(result) == {int(task.anchor)}
+
+
+@pytest.mark.parametrize("kind,state,card_state", [("completed", "done", "completed"),
+                                                   ("cancelled", "cancelled", "cancelled"),
+                                                   ("withdrawn", "cancelled", "cancelled")])
+def test_an_ended_request_reads_its_actual_outcome_and_lists_what_ended_with_it(kind, state, card_state):
+    realm, m = unfinished()
+    decide(realm, m, kind, why="the trial is over")
+    result, card = look(realm, m)
+    assert result.root.state == state
+    task = next(n for n in result.nodes() if n.identity.startswith("task"))
+    assert task.state == "cancelled", "work below an ended request is not completed by it"
+    assert "ended with" in task.detail and "its own record: awaiting delivery" in task.detail
+    (found,) = result.dispositions
+    assert {r["label"] for r in found.remaining} >= {task.identity}
+    assert card["state"] == card_state and f"ended: {kind} by Developer" in card["reason"]
+    assert "ended with it:" in card["reason"]
+    assert task.receipt.get("state") == "settled", "its missing receipt is bookkeeping now"
+    assert not tracing.stall_candidates(result, now=realm.clock + 3600), "nothing to chase"
+
+
+def test_new_substantive_activity_is_not_covered_but_bookkeeping_changes_nothing():
+    realm, m = unfinished()
+    decide(realm, m, "withdrawn")
+    # bookkeeping: a receipt repair, a served mark, a ✔ — all after the decision
+    realm.post("front", m.desk, f"[selfnote][receipt] #{m.shown} by #{m.shown} (bookkeeping) in "
+                                f"{m.channel}/{m.task_topic}", FRONT)
+    realm.post("front", m.desk, served_note(Conversation(m.channel, m.task_topic), m.shown), FRONT)
+    realm.resolve("front", m.desk, DEV)
+    result, card = look(realm, m)
+    assert result.root.state == "cancelled" and card["state"] == "cancelled", "bookkeeping is not activity"
+    # a new request in the same conversation is new activity
+    realm.post("front", m.desk, "One more thing: please also check the logs.", DEV)
+    result, card = look(realm, m)
+    assert result.root.state != "cancelled" and card["state"] not in ("cancelled", "completed")
+    assert result.root.disposition["covered"] is False
+    task = next(n for n in result.nodes() if n.identity.startswith("task"))
+    assert task.state == "cancelled", "the part nothing new happened in stays ended"
+
+
+def test_a_new_result_under_a_suppression_is_monitored_again():
+    realm, m = unfinished()
+    decide(realm, m, "suppressed")
+    result, _ = look(realm, m)
+    task = next(n for n in result.nodes() if n.identity.startswith("task"))
+    assert int(task.anchor) in disposing.suppressed_anchors(result)
+    realm.post(m.channel, m.task_topic, "@**Front** a second result, please look.", AUTOLAB)
+    result, _ = look(realm, m)
+    assert int(task.anchor) not in disposing.suppressed_anchors(result)
+
+
+def test_repeats_reversals_and_restarts_converge():
+    realm, m = unfinished()
+    first = decide(realm, m, "withdrawn")
+    assert first
+    evidence = int(disposing.read_dispositions(realm, m.origin)[0][0].evidence)
+    again = disposing.record(realm.speaking_as(FRONT), m.origin, "withdrawn", evidence=evidence)
+    assert again[0] == 0 and again[1].id == first, "a repeat of the same decision writes nothing"
+    # A fresh reader (a restart) reads the same outcome from the same records.
+    assert look(realm, m)[1]["state"] == look(realm, m)[1]["state"] == "cancelled"
+    undo = realm.post("front", "front-desk-cleanup", "Actually, keep it open.", DEV)
+    written, _ = disposing.reverse(realm.speaking_as(FRONT), first, evidence=undo, why="reopened")
+    assert written and disposing.reverse(realm.speaking_as(FRONT), first, evidence=undo)[0] == 0
+    result, card = look(realm, m)
+    assert card["state"] != "cancelled" and result.dispositions[0].state == "reversed"
+
+
+def test_agentchat_disposition_lists_records_and_refuses_without_evidence():
+    realm, m = unfinished()
+    front = realm.speaking_as(FRONT)
+    out = io.StringIO()
+    args = chat.build_parser().parse_args(["disposition", str(m.origin), "completed", "done", "here"])
+    assert disposing.command(front, args, out) == 1 and "--evidence" in out.getvalue()
+    evidence = realm.post("front", "front-desk-cleanup", "It is complete for me.", DEV)
+    out = io.StringIO()
+    args = chat.build_parser().parse_args(["disposition", str(m.origin), "completed", "--evidence", str(evidence),
+                                           "requested", "outcome", "reached"])
+    assert disposing.command(front, args, out) == 0
+    assert "recorded #" in out.getvalue() and "ended with it:" in out.getvalue()
+    out = io.StringIO()
+    assert disposing.command(front, chat.build_parser().parse_args(["disposition", str(m.origin)]), out) == 0
+    assert "IN_FORCE — ended: completed" in out.getvalue()
+
+
+def test_the_recorder_s_own_reply_reporting_the_decision_is_not_new_activity():
+    realm, m = unfinished()
+    ask = realm.post("front", m.desk, "This trial is finished; please close it out.", DEV)
+    ack = realm.post("front", m.desk, ACK, FRONT)
+    written, _, _, _ = disposing.record(realm.speaking_as(FRONT), m.origin, "completed", evidence=ask,
+                                        why="the developer closed it")
+    realm.post("front", m.desk, f"@**Developer** recorded it as completed.\n\n`ag-post intent=report end={ack}`",
+               FRONT)
+    result, card = look(realm, m)
+    assert result.root.state == "done" and card["state"] == "completed"
+    again = disposing.record(realm.speaking_as(FRONT), m.origin, "completed", evidence=ask)
+    assert again[0] == 0, "the same decision, still covering, converges"
+    realm.post("front", m.desk, "@**Developer** by the way, a new finding.\n\n`ag-post intent=report`", FRONT)
+    assert look(realm, m)[0].root.disposition["covered"] is False, "anything else Front says later is new"

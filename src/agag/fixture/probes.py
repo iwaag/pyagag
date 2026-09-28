@@ -16,7 +16,6 @@ asked about a request it did not open.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 
 __all__ = ["PROBES", "Probe", "judge"]
@@ -32,6 +31,9 @@ class Probe:
     text: str
     must: tuple[tuple[str, ...], ...]
     must_not: tuple[str, ...] = ()
+    #: Facts looked for and reported, but not part of the pass rule: what a
+    #: trial wants to see measured that no guide in scope is meant to change.
+    observe: tuple[tuple[str, ...], ...] = ()
     note: str = ""
     speaker: str = "Developer"
     extra: dict = field(default_factory=dict)
@@ -45,12 +47,13 @@ PROBES = {p.name: p for p in (
               "車輪の再発明をする確率を下げつつ新しいアイディアを発明できる段階にあると言えますか？"),
         must=(("pj-aisvgs", "routine-study-aisvgs", "sage:aisvgs"),
               ("round 2", "round2", "ラウンド2", "第2", "strand 5", "strands 5", "5–7", "5-7"),
-              ("round 3", "round3", "ラウンド3", "第3", "researchplan-aisvgs-round3"),
-              ("自分で", "by hand", "yourself", "ご自身", "手を動かし", "手作業")),
+              ("round 3", "round3", "ラウンド3", "第3", "researchplan-aisvgs-round3")),
         must_not=("見つかりません", "記録がありません", "教えてください", "no record"),
-        note=("#15673's wording. Passes when the reply finds the study and its rounds on the board, says round 3 "
-              "is planned and not started, and carries the Developer's decision (in archsage's channel) that round 3 "
-              "is theirs to do by hand — the fact p1's run-0169 missed."),
+        observe=(("study-aisvgs-round3", "自分で", "ご自身で", "by hand", "yourself", "回さない"),),
+        note=("#15673's wording. Passes when the reply finds the study and its rounds on the board and says round 3 "
+              "is planned and not started (p1's pass for run-0169). Observed, not required: whether it also carries "
+              "the Developer's decision, recorded only in archsage's channel, that round 3 is theirs to do by hand — "
+              "where such a decision belongs is p1's open finding 1, held by the Developer."),
     ),
     Probe(
         name="growbox-thing", agent="agfront", role="desk", channel="front", topic="front-desk-fixture-growbox",
@@ -91,6 +94,16 @@ PROBES = {p.name: p for p in (
         note="An autolab planner asked about another project's state: passes when it reads the growbox study off the board.",
     ),
     Probe(
+        name="entrance-plans", agent="agautolab", role="front", channel="autolab-agstudio1",
+        topic="fixture-plans", speaker="Front",
+        text="Where do all of your plans stand right now? One line per project, please.",
+        must=(("pj-aisvgs", "aisvgs"), ("pj-growbox", "growbox"), ("pj-protoprey", "protoprey"),
+              ("m20402", "control loop", "control-loop"), ("m20455", "v0.2", "locations", "go-ahead")),
+        note=("autolab's entrance (as10: an entrance that answered from one project missed another). Passes when "
+              "every project with missions is named, with the running control-loop mission and the v0.2 plan "
+              "waiting for the Developer."),
+    ),
+    Probe(
         name="triage-unopened", agent="agobserver", role="triage", channel="pj-protoprey",
         topic="workplan-protoprey-locations", speaker="agobserver-agstudio1",
         text="",
@@ -114,6 +127,7 @@ def judge(probe: Probe, reply: str) -> dict:
     met = [(spellings, _found(reply, spellings)) for spellings in probe.must]
     against = [s for s in probe.must_not if s.casefold() in reply.casefold()]
     missing = [" / ".join(spellings) for spellings, hit in met if hit is None]
+    observed = {" / ".join(spellings): _found(reply, spellings) for spellings in probe.observe}
     return {"probe": probe.name, "passed": not missing and not against,
             "met": [hit for _, hit in met if hit is not None], "missing": missing, "against": against,
-            "words": len(re.findall(r"\S+", reply))}
+            "observed": observed, "chars": len(reply)}

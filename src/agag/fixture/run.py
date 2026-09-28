@@ -213,8 +213,12 @@ def trial_parser(prog: str, description: str, agent: str) -> argparse.ArgumentPa
                         help="serve with this guide tree (an agent/guides directory; default: this checkout's)")
     guides.add_argument("--guides-rev", default=None, metavar="COMMIT",
                         help="serve with this checkout's agent/guides as of COMMIT (git archive into <out>)")
-    parser.add_argument("--no-shared", action="store_true",
+    shared = parser.add_mutually_exclusive_group()
+    shared.add_argument("--no-shared", action="store_true",
                         help="leave out pyagag's shared guide sections (the composition before agent_guide p2)")
+    shared.add_argument("--shared-guides", type=Path, default=None, metavar="DIR",
+                        help="read pyagag's shared sections (<name>.md) from DIR instead of the installed package: "
+                             "a change to them tried before it is released")
     parser.add_argument("--dry-run", action="store_true",
                         help="build the serving and write its prompt to <out>/prompt.md; run no model")
     parser.add_argument("--replies", type=Path, nargs="+", default=None, metavar="FILE",
@@ -244,6 +248,8 @@ class Trial:
     overlay: Path | None = None
     #: Fixed run outputs, one per serving (`--replies`), in place of a model.
     replies: tuple[Path, ...] = ()
+    #: Where the shared sections are read from instead of the package (`--shared-guides`).
+    shared_guides: Path | None = None
 
     @classmethod
     def start(cls, args: argparse.Namespace, repository: Path) -> "Trial":
@@ -273,7 +279,8 @@ class Trial:
                                              {name: ident for ident, name in NAMES.items()})
         return cls(probe=probe, out=out, store=store, guides=guides, guides_rev=args.guides_rev or "",
                    shared=not args.no_shared, dry_run=bool(args.dry_run), records=records, overlay=overlay,
-                   replies=tuple(Path(r).resolve() for r in (getattr(args, "replies", None) or ())))
+                   replies=tuple(Path(r).resolve() for r in (getattr(args, "replies", None) or ())),
+                   shared_guides=Path(args.shared_guides).resolve() if getattr(args, "shared_guides", None) else None)
 
     @property
     def board(self) -> Path:
@@ -289,11 +296,23 @@ class Trial:
             stack.enter_context(fixture_environment(self.board))
             if not self.shared:
                 stack.enter_context(_patched(topics_module, "shared_sections", lambda names: ""))
+            elif self.shared_guides is not None:
+                stack.enter_context(_patched(topics_module, "shared_text", self._shared_text))
             if self.dry_run:
                 stack.enter_context(_patched(agent_module, "run_harness", self._dry_harness))
             elif self.replies:
                 stack.enter_context(_patched(agent_module, "run_harness", self._scripted_harness))
             yield self
+
+    def _shared_text(self, name: str) -> str:
+        path = self.shared_guides / f"{name}.md"
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError as error:
+            raise topics_module.GuideError(f"cannot read shared guide {name!r} from {path}: {error}") from error
+        if not text:
+            raise topics_module.GuideError(f"shared guide is empty: {path}")
+        return text
 
     def _dry_harness(self, agent, prompt, *, cwd, **_):
         (self.out / "prompt.md").write_text(prompt, encoding="utf-8")
@@ -314,7 +333,8 @@ class Trial:
 
     def facts(self) -> dict:
         return {"guides": str(self.guides or "(this checkout's)"), "guides_rev": self.guides_rev,
-                "shared": self.shared, "store": str(self.store), "dry_run": self.dry_run,
+                "shared": self.shared, "shared_guides": str(self.shared_guides or ""),
+                "store": str(self.store), "dry_run": self.dry_run,
                 "records_root": str(self.records), "overlay": str(self.overlay or ""),
                 "replies": [str(r) for r in self.replies]}
 

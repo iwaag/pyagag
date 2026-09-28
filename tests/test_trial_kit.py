@@ -99,3 +99,25 @@ def test_tool_calls_come_from_the_session_log(tmp_path):
     )) + "\nnot json\n", encoding="utf-8")
     assert tool_calls(log) == ["Bash: agentchat intro"]
     assert tool_calls(None) == [] and tool_calls(tmp_path / "missing") == []
+
+
+def test_shared_guides_from_a_directory_replace_the_packages(tmp_path, monkeypatch):
+    """agent_guide p3: a change to pyagag's shared sections is tried before it is released."""
+    tree = tmp_path / "shared"
+    tree.mkdir()
+    for name in topics.SHARED_SECTIONS:
+        (tree / f"{name}.md").write_text(f"# {name} as changed\n", encoding="utf-8")
+    parser = trial_parser("t", "", "agfront")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["growbox-thing", "--out", "o", "--no-shared", "--shared-guides", str(tree)])
+    args = parser.parse_args(["growbox-thing", "--out", str(tmp_path / "out"), "--shared-guides", str(tree),
+                              "--dry-run"])
+    trial = Trial.start(args, tmp_path)
+    monkeypatch.setenv(RECORDS_ROOT_VARIABLE, str(trial.records))
+    with trial.session():
+        assert topics.shared_sections(("board", "refs")) == "# board as changed\n\n# refs as changed"
+        (tree / "refs.md").write_text("", encoding="utf-8")
+        with pytest.raises(topics.GuideError):
+            topics.shared_sections(("refs",))
+    assert "as changed" not in topics.shared_sections(("board",))
+    assert trial.facts()["shared_guides"] == str(tree)

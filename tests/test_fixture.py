@@ -86,6 +86,19 @@ def test_tool_rules_judge_acts():
                                      "Bash: agentchat send front x '[selfnote][served] a 1'"])["passed"]
 
 
+def test_a_send_into_a_named_topic_is_judged_but_a_read_of_it_is_not():
+    """agent_guide p3's fd-wr guard: a second start into a ✔ topic's bare name."""
+    probe = PROBES["guard-finished"]
+    read = "Bash: agentchat read pj-growbox workplan-growbox-germination-days"
+    assert judge(probe, "終わっています（9d34067f5c0a）", [read])["passed"]
+    assert judge(probe, "9d34067f5c0a", [read, "Bash: agentchat send pj-growbox workplan-growbox-germination-days-recap "
+                                                "'何か残っていますか'"])["passed"]
+    verdict = judge(probe, "9d34067f5c0a", [read, "Bash: agentchat send pj-growbox workplan-growbox-germination-days "
+                                                  "--intent report '続きをお願いします'"])
+    assert not verdict["passed"] and verdict["against"] == ["sent into: workplan-growbox-germination-days"]
+    assert not judge(PROBES["guard-status"], "m20402: 14 件中 9 件", ["Bash: agentchat send autolab-agstudio1 x 'どう？'"])["passed"]
+
+
 def test_judge_names_what_is_missing():
     probe = PROBES["growbox-thing"]
     good = "#pj-growbox: 発芽(germination) と food safety は完了、control loop (m20402) が進行中です。"

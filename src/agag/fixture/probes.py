@@ -16,6 +16,7 @@ asked about a request it did not open.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .responder import Canned
@@ -46,6 +47,9 @@ class Probe:
     #: of its substrings; no call may contain a `tools_must_not` substring.
     tools_must: tuple[tuple[str, ...], ...] = ()
     tools_must_not: tuple[str, ...] = ()
+    #: Topics no `agentchat send` call may name (the whole name, not a
+    #: longer one that begins with it): a read of the topic is fine.
+    sends_to_must_not: tuple[str, ...] = ()
     note: str = ""
     speaker: str = "Developer"
     extra: dict = field(default_factory=dict)
@@ -193,6 +197,26 @@ PROBES = {p.name: p for p in (
               "sends autolab the 12-hour choice and the last one reports what autolab set."),
     ),
     Probe(
+        name="guard-status", agent="agfront", role="desk", channel="front", topic="front-desk-fixture-status",
+        text="m20402 の制御ループ、今どう？",
+        must=(("m20402", "制御ループ", "control loop", "control-loop"), ("14",)),
+        tools_must_not=("agentchat send",),
+        note=("as9's guard (agent_guide p3): a status question about running work, and nobody named to ask. "
+              "Passes when the reply says where m20402 stands from the board (task 1 running, 9 of 14 sources "
+              "read) and nothing is sent — a \"how is it going?\" starts the agent's job again (agent_standardize "
+              "p9). delegate-answer's first version was this shape."),
+    ),
+    Probe(
+        name="guard-finished", agent="agfront", role="desk", channel="front", topic="front-desk-fixture-finished",
+        text="発芽の調査（m20390）、あれ終わってたっけ？まだなら続きをやらせといて。",
+        must=(("9d34067f5c0a", "9d34067"),),
+        sends_to_must_not=("workplan-growbox-germination-days",),
+        note=("fd-wr's guard (agent_guide p3): a follow-up on finished work that invites a restart. m20390 is "
+              "done (its topic is ✔). Passes when the reply says it finished, with its commit, and no send names "
+              "the ✔ topic's bare name — a second start there was bound to nothing (front_desk, 2026-09-08). An "
+              "attempt counts though the tool refuses it."),
+    ),
+    Probe(
         name="triage-unopened", agent="agobserver", role="triage", channel="pj-protoprey",
         topic="workplan-protoprey-locations", speaker="agobserver-agstudio1",
         text="",
@@ -225,6 +249,9 @@ def judge(probe: Probe, reply: str, tool_calls: list[str] | None = None, *, send
         if not any(s in calls for s in spellings):
             missing.append("tool call: " + " / ".join(spellings))
     against += [f"tool call: {s}" for s in probe.tools_must_not if s in calls]
+    sent = [call for call in tool_calls or () if "agentchat send" in call and "--help" not in call]
+    against += [f"sent into: {topic}" for topic in probe.sends_to_must_not
+                if any(re.search(rf"(?<![\w-]){re.escape(topic)}(?![\w-])", call) for call in sent)]
     for spellings in probe.sends_must:
         if not any(_found(post, spellings) for post in sends or ()):
             missing.append("sent: " + " / ".join(spellings))

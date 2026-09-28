@@ -66,6 +66,7 @@ __all__ = [
     "AGENTCHAT_ENV_VARIABLE",
     "AgentSpec",
     "LOG_ONLY_ENV_VAR",
+    "RECORDS_ROOT_VARIABLE",
     "SWEEP_ACK",
     "chat_environment",
     "exec_options_for",
@@ -79,6 +80,11 @@ __all__ = [
     "run_role",
     "topic_filter",
 ]
+
+
+#: A root for serving workspaces and run records other than the checkout's
+#: `.local/` (`AgentSpec.runs_local`): the trial kit's (`agag.fixture.run`).
+RECORDS_ROOT_VARIABLE = "AGAG_RECORDS_ROOT"
 
 
 def is_ack(content: str) -> bool:
@@ -172,12 +178,21 @@ class AgentSpec:
         return self.root / "agent" / "guides"
 
     @property
+    def runs_local(self) -> Path:
+        """Where serving workspaces and run records go: this checkout's
+        `.local/`, or `$AGAG_RECORDS_ROOT/<agent>/.local/` when a trial kit
+        set it (`agent_guide` p2 ex1). The relay's cost gauge and in-flight
+        view read the checkout's, so a trial's runs are never counted live."""
+        elsewhere = os.environ.get(RECORDS_ROOT_VARIABLE, "").strip()
+        return Path(elsewhere).expanduser() / self.agent / ".local" if elsewhere else self.local
+
+    @property
     def topics_root(self) -> Path:
-        return self.local / "topics"
+        return self.runs_local / "topics"
 
     @property
     def records_root(self) -> Path:
-        return self.local / "agent"
+        return self.runs_local / "agent"
 
     # --- names ----------------------------------------------------------
     @property

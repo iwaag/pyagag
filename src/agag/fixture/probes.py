@@ -18,7 +18,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-__all__ = ["PROBES", "Probe", "judge"]
+__all__ = ["DRIVERS", "PROBES", "Probe", "judge"]
+
+#: The module that serves an agent's probes, run from that agent's checkout
+#: with its own venv: `.venv/bin/python -m <driver> <probe> --out <dir>`.
+DRIVERS = {"agfront": "agfront.trial", "archsage": "archsage.trial", "agautolab": "agautolab.trial",
+           "agobserver": "agobserver.trial"}
 
 
 @dataclass(frozen=True)

@@ -17,7 +17,9 @@ a line naming the fixture.
 topics, every agent's introduction, forge's past work, one ✔'d past request);
 `probes.py` is what is asked of it and how an answer is judged; `run.py`
 serves one probe to a role the way its listener's first serving would, with
-a given guide, against the fixture.
+a given guide, against the fixture — the kit each agent's driver
+(`probes.DRIVERS`: `agfront.trial`, `archsage.trial`, `agautolab.trial`,
+`agobserver.trial`) is built on.
 """
 
 from .board import FIXTURE_NAME, Board, build_board, build_store

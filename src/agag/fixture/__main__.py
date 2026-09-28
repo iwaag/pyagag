@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from .board import build_store
-from .probes import PROBES, judge
+from .probes import DRIVERS, PROBES, judge
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,6 +32,7 @@ def main(argv: list[str] | None = None) -> int:
             if probe.must_not:
                 print(f"  must not: " + ", ".join(probe.must_not))
             print(f"  {probe.note}")
+            print(f"  run: cd {probe.agent} && .venv/bin/python -m {DRIVERS[probe.agent]} {probe.name} --out <dir>")
     else:
         print(json.dumps(judge(PROBES[args.probe], args.reply.read_text(encoding="utf-8")), ensure_ascii=False,
                          indent=1))

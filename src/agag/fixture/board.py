@@ -21,6 +21,18 @@ What it holds, for the probes in `probes.py`:
 - **pj-worldtrend**, a study with only its plan.
 - Every agent's introduction in `#agents`, and one ✔'d past Front Desk
   request.
+
+**A mission is recorded as a live one is** (`agent_guide` p3 ex1). Its
+name is its `[selfnote][mission]` note's own message id, so the note sits at
+an explicit id (`Board.post(..., ident=)`), and a finished mission carries
+what `agentchat trace` reads it by: each task's `[task]`/`[rootchat]`/
+`[start]` notes, the shown result, the requester's agreement, autolab's
+`[change] accepted … +shown=`, `[state] completed` and ✔, then the
+requester's record (`agentchat accept`: `[state] accepted` on each task,
+`[acceptance] … after=#<shown>`, `[state] done`, ✔). p3 found the board
+saying "m20390 is done: accepted by Front" over a mission `trace` read as
+`queued`, and one careful run believed the trace. `consistency()` checks the
+whole board for that kind of contradiction.
 """
 
 from __future__ import annotations
@@ -29,16 +41,32 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agag.acceptance import acceptance_note
 from agag.mirror.reads import FIXTURE_META, FIXTURE_REPOSITORIES_META, FIXTURE_USERS_META
 from agag.mirror.store import Store
+from agag.selfnote import note, start_note
 
 FIXTURE_NAME = "agent-guide-p2"
+#: Which board a result ran on: written into the store's meta
+#: (`BOARD_VERSION_META`) and from there into every trial's `outcome.json`.
+#: 1 — agent_guide p2 to p3: finished missions were a done line only.
+#: 2 — p3 ex1: missions recorded as live ones are (module doc); mission ids
+#: are their notes' ids, so growbox's and protoprey's missions were renamed.
+BOARD_VERSION = 2
+BOARD_VERSION_META = "fixture_version"
 
 DEV, OMNI, AUTOLAB, FORGE, CAGENT, FRONT, OBSERVER, ARCHSAGE, NOTICE = 8, 9, 11, 13, 14, 15, 23, 24, 0
 NAMES = {DEV: "Developer", OMNI: "Omni Agent", AUTOLAB: "autolab-agstudio1", FORGE: "agforge-agstudio1",
          CAGENT: "Cagent", FRONT: "Front", OBSERVER: "agobserver-agstudio1", ARCHSAGE: "archsage",
          NOTICE: "Notification Bot"}
 ACK = "Message received. Please wait for the reply."
+#: The missions, by the id of their `[mission]` note: the name everything
+#: else calls them (agent_guide p3 ex1 renamed growbox's and protoprey's —
+#: m20390, m20396, m20402, m20410, m20455 on board 1 — because a finished
+#: mission's record no longer fits between those ids).
+M_AISVGS_R1, M_AISVGS_R2 = 20301, 20355
+M_GERMINATION, M_FOOD_SAFETY, M_CONTROL_LOOP = 20420, 20460, 20510
+M_PROTOPREY_V01, M_PROTOPREY_V02 = 20550, 20600
 T0 = 1_790_300_000  # 2026-09-25, a quiet morning
 
 
@@ -65,8 +93,15 @@ class Board:
     def channel(self, name: str, description: str) -> None:
         self.channels[name] = (100 + len(self.channels), description)
 
-    def post(self, channel: str, topic: str, sender: int, content: str, *, minutes: float = 3) -> int:
+    def post(self, channel: str, topic: str, sender: int, content: str, *, minutes: float = 3,
+             ident: int | None = None) -> int:
+        """One message; `ident` places it at that id (a mission's note is its
+        name), which must be ahead of every id already used."""
         self.clock += int(minutes * 60)
+        if ident is not None:
+            if ident <= self.next_id:
+                raise ValueError(f"#{ident} is taken: the board is already at #{self.next_id}")
+            self.next_id = ident - 1
         self.next_id += 1
         self.rows.append({"id": self.next_id, "channel": channel, "topic": topic, "sender_id": sender,
                           "content": content.strip(), "timestamp": self.clock,
@@ -84,6 +119,75 @@ class Board:
     def root(self, channel: str, topic: str, sender: int, home: str, anchor: int) -> int:
         return self.post(channel, topic, sender, f"[selfnote][rootchat] {home} #{anchor} rel=work", minutes=0.1)
 
+    def run_request(self, routine: str, run: str, text: str, **kw) -> int:
+        """A routine run asked of Front, and Front's acknowledgement: the
+        owner `trace` reads a run's finish block by."""
+        asked = self.post(routine, run, DEV, f"Run request: {text}", **kw)
+        self.post(routine, run, FRONT, ACK, minutes=0.2)
+        return asked
+
+    # -- a mission, as autolab and its requester record one -----------------------
+
+    def mission(self, channel: str, topic: str, ident: int, slug: str, title: str, plan: str) -> int:
+        """autolab's acknowledgement, the `[mission]` note at `ident` (the
+        mission's name) and the plan document."""
+        self.post(channel, topic, AUTOLAB, ACK, minutes=0.2)
+        mission = self.post(channel, topic, AUTOLAB, note("mission", slug), minutes=0.5, ident=ident)
+        doc = self.post(channel, topic, AUTOLAB, f"# m{mission} — {title}\n\n{plan}", minutes=1)
+        self.post(channel, topic, AUTOLAB, note("doc", str(doc)), minutes=0.05)
+        return mission
+
+    def start_task(self, channel: str, topic: str, mission: int, n: int, because: int, requester: int,
+                   description: str) -> str:
+        """Task `n`'s conversation, opened and started by autolab itself."""
+        work, run = f"work-m{mission}", f"workrun-task{n}-m{mission}"
+        self.post(work, run, AUTOLAB, note("task", f"{mission}#{n}"), minutes=0.2)
+        self.root(work, run, AUTOLAB, f"{channel}/{topic}", mission)
+        doc = self.post(work, run, AUTOLAB, description, minutes=0.2)
+        self.post(work, run, AUTOLAB, note("doc", str(doc)), minutes=0.05)
+        if n == 1:
+            self.post(channel, topic, AUTOLAB, note("state", "started"), minutes=0.05)
+        self.post(work, run, AUTOLAB, f"Task {n} of m{mission} starts now: the mission was started (#{because}), and "
+                  f"the mission is authorised to run. The report comes back to {NAMES[requester]}; a post here adds "
+                  f"to this task.\n\n" + line("progress"), minutes=0.1)
+        self.post(work, run, AUTOLAB, start_note(because, requester, NAMES[requester]), minutes=0.05)
+        self.post(work, run, AUTOLAB, ACK, minutes=0.2)
+        return run
+
+    def finish_task(self, mission: int, n: int, requester: int, result: str, sha: str, agreement: str, *,
+                    minutes: float) -> tuple[int, int]:
+        """The task's shown result, its requester's agreement and autolab's
+        close-out, integrated at `sha`; ✔. Returns (shown, agreement)."""
+        work, run, who = f"work-m{mission}", f"workrun-task{n}-m{mission}", f"@**{NAMES[requester]}**"
+        commit, tree = _full(sha), _full(sha, "tree")
+        checkpoint = self.post(work, run, AUTOLAB, note("change", f"checkpoint main={commit}:{tree}"),
+                               minutes=minutes)
+        shown = self.post(work, run, AUTOLAB, f"{who}\n\n{result}\n\n"
+                          + line("response_request", to=requester, ask="confirmation"), minutes=0.2)
+        agreed = self.post(work, run, requester, f"{agreement}\n\n" + line("report"), minutes=4)
+        self.post(work, run, AUTOLAB, ACK, minutes=0.2)
+        self.post(work, run, AUTOLAB, note("change", f"accepted main={commit} #{agreed} +gen=2 +shown={shown} "
+                                                     f"+checkpoint={checkpoint}"), minutes=1)
+        self.post(work, run, AUTOLAB, note("change", f"integrated main={commit}/fast-forward/pushed #{agreed}"),
+                  minutes=0.1)
+        self.post(work, run, AUTOLAB, note("state", "completed"), minutes=0.05)
+        self.post(work, run, AUTOLAB, f"{who}\n\nthe accepted change is the result shown in #{shown} (checkpoint "
+                  f"#{checkpoint}), unchanged since\n\ntask {n} of m{mission} is completed and "
+                  f"its result is posted above; resolving this topic\n\nintegrated into the project: main "
+                  f"{sha[:10]} (fast-forward, pushed)\n\n" + line("report", re=agreed), minutes=0.2)
+        self.resolve(work, run, AUTOLAB)
+        return shown, agreed
+
+    def accept(self, channel: str, topic: str, mission: int, tasks: int, evidence: int, shown: int,
+               by: int) -> None:
+        """The requester's record, as `agentchat accept <mission> --evidence
+        <evidence>` writes it: selfnotes only, then ✔."""
+        for n in range(1, tasks + 1):
+            self.post(f"work-m{mission}", f"✔ workrun-task{n}-m{mission}", by, note("state", "accepted"), minutes=0.5)
+        self.post(channel, topic, by, acceptance_note(evidence, by, NAMES[by], after=shown), minutes=0.05)
+        self.post(channel, topic, by, note("state", "done"), minutes=0.05)
+        self.resolve(channel, topic, by)
+
     # -- the Zulip shape ---------------------------------------------------------
 
     def zulip_rows(self):
@@ -93,6 +197,24 @@ class Board:
                    "subject": row["topic"], "sender_id": row["sender_id"],
                    "sender_full_name": NAMES.get(row["sender_id"], str(row["sender_id"])),
                    "sender_realm_str": row["realm"], "timestamp": row["timestamp"], "content": row["content"]}
+
+
+def _full(sha: str, kind: str = "commit") -> str:
+    """A 40-digit id for a short commit the board's prose uses (or, with
+    `kind="tree"`, its tree)."""
+    import hashlib
+
+    digest = hashlib.sha1(f"{kind}:{sha}".encode()).hexdigest()
+    return (sha + digest)[:40] if kind == "commit" else digest
+
+
+def finish_block(achieved: bool, reason: str, report: str) -> str:
+    """A routine run's end as its runner records it (agfront
+    `routine.record_text`, `ag.routinerun-finish.v1`): what `trace` reads
+    as `finished`/`ended`."""
+    body = json.dumps({"schema": "ag.routinerun-finish.v1", "achieved": achieved, "reason": reason,
+                       "report": report}, ensure_ascii=False, indent=1)
+    return f"```ag-routinerun\n{body}\n```"
 
 
 # --- the realm ------------------------------------------------------------------
@@ -164,8 +286,10 @@ def build_board() -> Board:
         ("routine-study-growbox", "Routine `study-growbox`. `guide` = the process guide (newest post is the whole "
                                   "guide; posting there starts nothing). Each execution is its own `routinerun-<id>` "
                                   "topic here."),
-        ("work-m20301", "project: aisvgs; mission m20301 (round 1)"),
-        ("work-m20402", "project: growbox; mission m20402 (control loop)"),
+        *((f"work-m{m}", f"project: {slug}; mission m{m} ({what})") for m, slug, what in (
+            (M_AISVGS_R1, "aisvgs", "round 1"), (M_AISVGS_R2, "aisvgs", "round 2"),
+            (M_GERMINATION, "growbox", "germination"), (M_FOOD_SAFETY, "growbox", "food safety"),
+            (M_CONTROL_LOOP, "growbox", "control loop"), (M_PROTOPREY_V01, "protoprey", "v0.1.0"))),
     ):
         b.channel(name, text)
     for instance, text in INTROS.items():
@@ -214,45 +338,44 @@ In `#pj-aisvgs`, ask autolab for **one** mission and see it through:
 > The next round of the research plan (`researchplan-aisvgs`): the strands it names for that round, each with its sources, findings committed to `main/` with a row in `reports/INDEX.md`.
 
 Afterwards ask archsage, in a topic of its channel of this run's own, to refresh `sage:aisvgs` to the integrated `main` commit, and report the revision.""")
-    r1 = b.post("routine-study-aisvgs", run1, FRONT, "Run request: study-aisvgs, once — round 1 (strands 1–4).")
-    b.root("pj-aisvgs", "workplan-aisvgs-round1", FRONT, f"routine-study-aisvgs/{run1}", r1)
-    ask1 = b.post("pj-aisvgs", "workplan-aisvgs-round1", FRONT,
+    r1 = b.run_request("routine-study-aisvgs", run1, "study-aisvgs, once — round 1 (strands 1–4).")
+    topic = "workplan-aisvgs-round1"
+    b.root("pj-aisvgs", topic, FRONT, f"routine-study-aisvgs/{run1}", r1)
+    ask1 = b.post("pj-aisvgs", topic, FRONT,
                   "@**autolab-agstudio1** one mission: round 1 of `researchplan-aisvgs` (strands 1–4). "
                   "Start when planned; I accept for the routine.\n\n" + line("response_request", to=AUTOLAB))
-    b.post("pj-aisvgs", "workplan-aisvgs-round1", AUTOLAB, "[selfnote][mission] aisvgs", minutes=0.2)
-    b.post("pj-aisvgs", "workplan-aisvgs-round1", AUTOLAB,
-           "# m20301 — aisvgs round 1\n\nOne task: strands 1–4, one report each. Started (task 1 in `work-m20301`).")
-    b.post("work-m20301", "workrun-task1-m20301", AUTOLAB,
-           "Done: `reports/strand1-approaches.md`, `strand2-literature.md` (61 papers), `strand3-tools.md` "
-           "(24 tools with licence and hardware), `strand4-benchmarks.md`; INDEX rows added. Checkpoint "
-           "`3c1a9e0`.\n\n" + line("response_request", to=FRONT, ask="confirmation"), minutes=90)
-    b.post("work-m20301", "workrun-task1-m20301", FRONT, "Agreed: the four reports are complete.\n\n" + line("report"))
-    b.post("work-m20301", "workrun-task1-m20301", AUTOLAB, "Closed; integrated on `main` at `3c1a9e0`.\n\n"
-           + line("report"))
-    b.resolve("work-m20301", "workrun-task1-m20301", AUTOLAB)
-    b.post("pj-aisvgs", "workplan-aisvgs-round1", AUTOLAB,
-           f"m20301 is done: accepted by Front (answers #{ask1}). `main` at `3c1a9e0`.\n\n" + line("report"))
-    b.resolve("pj-aisvgs", "workplan-aisvgs-round1", FRONT)
-    b.post("routine-study-aisvgs", run1, FRONT, "Round 1 integrated at `3c1a9e0`; refresh asked of archsage "
-           "(`refresh-aisvgs-routinerun-20260925-0900`): `sage:aisvgs` now at `3c1a9e0`. Run ends: achieved.\n\n"
-           + line("report"))
+    m = b.mission("pj-aisvgs", topic, M_AISVGS_R1, "aisvgs", "aisvgs round 1",
+                  "One task: strands 1–4, one report each, findings on `main/` with INDEX rows.")
+    b.start_task("pj-aisvgs", topic, m, 1, ask1, FRONT, "# Strands 1–4 of `researchplan-aisvgs`\n\n"
+                 "One report per strand under `main/reports/`, with its sources; a row each in `reports/INDEX.md`.")
+    shown, agreed = b.finish_task(
+        m, 1, FRONT, "Done: `reports/strand1-approaches.md`, `strand2-literature.md` (61 papers), `strand3-tools.md` "
+        "(24 tools with licence and hardware), `strand4-benchmarks.md`; INDEX rows added. Checkpoint `3c1a9e0`.",
+        "3c1a9e0", "Agreed: the four reports are complete.", minutes=90)
+    b.accept("pj-aisvgs", topic, m, 1, agreed, shown, FRONT)
+    b.post("routine-study-aisvgs", run1, FRONT, f"m{m} accepted and done: round 1 integrated at `3c1a9e0`; refresh "
+           "asked of archsage (`refresh-aisvgs-routinerun-20260925-0900`): `sage:aisvgs` now at `3c1a9e0`. Run ends: "
+           "achieved.\n\n" + finish_block(True, "round 1 integrated and the sage refreshed",
+                                           f"m{m}: strands 1–4 on `main` at `3c1a9e0`; `sage:aisvgs` at `3c1a9e0`."))
     b.resolve("routine-study-aisvgs", run1, FRONT)
     # Round 2.
     run2 = "routinerun-20260926-2100"
     b.clock += 36 * 3600
-    r2 = b.post("routine-study-aisvgs", run2, FRONT, "Run request: study-aisvgs, once — round 2 (strands 5–7).")
-    b.root("pj-aisvgs", "workplan-aisvgs-round2", FRONT, f"routine-study-aisvgs/{run2}", r2)
-    b.post("pj-aisvgs", "workplan-aisvgs-round2", FRONT,
-           "@**autolab-agstudio1** one mission: round 2 of `researchplan-aisvgs` (strands 5–7: researchers, "
-           "independent makers, community practice). I accept for the routine.\n\n"
-           + line("response_request", to=AUTOLAB))
-    b.post("pj-aisvgs", "workplan-aisvgs-round2", AUTOLAB,
-           "# m20355 — aisvgs round 2\n\nOne task: strands 5–7. Started.", minutes=1)
-    b.post("pj-aisvgs", "workplan-aisvgs-round2", AUTOLAB,
-           "m20355 is done: accepted by Front. Reports `strand5-researchers.md` (38 people and labs), "
-           "`strand6-makers.md`, `strand7-community.md` integrated on `main` at `f57eed1a27de`.\n\n" + line("report"),
-           minutes=120)
-    b.resolve("pj-aisvgs", "workplan-aisvgs-round2", FRONT)
+    r2 = b.run_request("routine-study-aisvgs", run2, "study-aisvgs, once — round 2 (strands 5–7).")
+    topic = "workplan-aisvgs-round2"
+    b.root("pj-aisvgs", topic, FRONT, f"routine-study-aisvgs/{run2}", r2)
+    ask2 = b.post("pj-aisvgs", topic, FRONT,
+                  "@**autolab-agstudio1** one mission: round 2 of `researchplan-aisvgs` (strands 5–7: researchers, "
+                  "independent makers, community practice). I accept for the routine.\n\n"
+                  + line("response_request", to=AUTOLAB))
+    m = b.mission("pj-aisvgs", topic, M_AISVGS_R2, "aisvgs", "aisvgs round 2", "One task: strands 5–7.")
+    b.start_task("pj-aisvgs", topic, m, 1, ask2, FRONT, "# Strands 5–7 of `researchplan-aisvgs`\n\n"
+                 "Researchers and labs, independent makers, community practice: one report each, INDEX rows.")
+    shown, agreed = b.finish_task(
+        m, 1, FRONT, "Done: `strand5-researchers.md` (38 people and labs), `strand6-makers.md`, "
+        "`strand7-community.md`; INDEX rows added. Checkpoint `f57eed1a27de`.",
+        "f57eed1a27de", "Agreed: the three reports are complete.", minutes=120)
+    b.accept("pj-aisvgs", topic, m, 1, agreed, shown, FRONT)
     ref = b.post("archsage-agstudio1", "refresh-aisvgs-routinerun-20260926-2100", FRONT,
                  "@**archsage** refresh `sage:aisvgs` to include `f57eed1a27de` (round 2).\n\n"
                  + line("response_request", to=ARCHSAGE))
@@ -263,8 +386,10 @@ Afterwards ask archsage, in a topic of its channel of this run's own, to refresh
            f"`sage:aisvgs` refreshed: tree at `f57eed1a27de`, 11 knowledge files. Answers #{ref}.\n\n"
            + line("report", re=ref))
     b.resolve("archsage-agstudio1", "refresh-aisvgs-routinerun-20260926-2100", FRONT)
-    b.post("routine-study-aisvgs", run2, FRONT, "Round 2 integrated at `f57eed1a27de`; `sage:aisvgs` refreshed to it. "
-           "Run ends: achieved.\n\n" + line("report"))
+    b.post("routine-study-aisvgs", run2, FRONT, f"m{m} accepted and done: round 2 integrated at `f57eed1a27de`; "
+           "`sage:aisvgs` refreshed to it. Run ends: achieved.\n\n"
+           + finish_block(True, "round 2 integrated and the sage refreshed",
+                          f"m{m}: strands 5–7 on `main` at `f57eed1a27de`; `sage:aisvgs` at `f57eed1a27de`."))
     b.resolve("routine-study-aisvgs", run2, FRONT)
     # Round 3: planned in archsage's channel, decided there by the Developer.
     b.clock += 10 * 3600
@@ -309,42 +434,51 @@ In `#pj-growbox`, ask autolab for **one** mission and see it through:
 > The next strand of `researchplan-growbox` that has no report yet: its sources, findings committed to `main/` with a row in `reports/INDEX.md`.
 
 The runner accepts once the report and the integrated commit are in. Afterwards ask archsage, in a topic of its channel of this run's own, to refresh `sage:growbox` to that commit.""")
-    for stem, run, strand, sha, mission in (
-        ("germination-days", "routinerun-20260927-1300", "germination (strand 1)", "9d34067f5c0a", "m20390"),
-        ("food-safety", "routinerun-20260927-1400", "sprout food safety (strand 2)", "51ab2e0c77d1", "m20396"),
+    for stem, run, strand, sha, ident, minutes in (
+        ("germination-days", "routinerun-20260927-1300", "germination (strand 1)", "9d34067f5c0a", M_GERMINATION, 41),
+        ("food-safety", "routinerun-20260927-1400", "sprout food safety (strand 2)", "51ab2e0c77d1", M_FOOD_SAFETY, 38),
     ):
-        r = b.post("routine-study-growbox", run, FRONT, f"Run request: study-growbox, once — {strand}.", minutes=30)
+        r = b.run_request("routine-study-growbox", run, f"study-growbox, once — {strand}.", minutes=30)
         topic = f"workplan-growbox-{stem}"
         b.root("pj-growbox", topic, FRONT, f"routine-study-growbox/{run}", r)
-        b.post("pj-growbox", topic, FRONT, f"@**autolab-agstudio1** one mission: {strand}. I accept for the routine.\n\n"
-               + line("response_request", to=AUTOLAB))
-        b.post("pj-growbox", topic, AUTOLAB, f"# {mission} — growbox {stem}\n\nOne task. Started.", minutes=1)
-        b.post("pj-growbox", topic, AUTOLAB,
-               f"{mission} is done: accepted by Front. `reports/strand-{stem}.md` integrated on `main` at `{sha}`.\n\n"
-               + line("report"), minutes=45)
-        b.resolve("pj-growbox", topic, FRONT)
+        ask = b.post("pj-growbox", topic, FRONT, f"@**autolab-agstudio1** one mission: {strand}. I accept for the "
+                     "routine.\n\n" + line("response_request", to=AUTOLAB))
+        m = b.mission("pj-growbox", topic, ident, "growbox", f"growbox {stem}",
+                      f"One task: {strand}, its sources, `reports/strand-{stem}.md` with an INDEX row.")
+        b.start_task("pj-growbox", topic, m, 1, ask, FRONT, f"# {strand[0].upper()}{strand[1:]}\n\n"
+                     f"`reports/strand-{stem}.md` with its sources; a row in `reports/INDEX.md`.")
+        shown, agreed = b.finish_task(
+            m, 1, FRONT, f"Done: `reports/strand-{stem}.md` with its sources; INDEX row added. Checkpoint `{sha}`.",
+            sha, "Agreed: the report is complete.", minutes=minutes)
+        b.accept("pj-growbox", topic, m, 1, agreed, shown, FRONT)
         b.post("archsage-agstudio1", f"refresh-growbox-{run}", ARCHSAGE,
                f"`sage:growbox` refreshed: tree at `{sha}`.\n\n" + line("report"), minutes=2)
         b.resolve("archsage-agstudio1", f"refresh-growbox-{run}", FRONT)
-        b.post("routine-study-growbox", run, FRONT, f"{strand} integrated at `{sha}`; `sage:growbox` refreshed. "
-               "Run ends: achieved.\n\n" + line("report"))
+        b.post("routine-study-growbox", run, FRONT, f"m{m} accepted and done: {strand} integrated at `{sha}`; "
+               "`sage:growbox` refreshed. Run ends: achieved.\n\n"
+               + finish_block(True, f"{strand} integrated and the sage refreshed",
+                              f"m{m}: `reports/strand-{stem}.md` on `main` at `{sha}`; `sage:growbox` at `{sha}`."))
         b.resolve("routine-study-growbox", run, FRONT)
     # Strand 3: running now.
     b.clock += 18 * 3600
     run = "routinerun-20260928-0900"
-    r = b.post("routine-study-growbox", run, FRONT, "Run request: study-growbox, once — the control loop (strand 3).")
+    r = b.run_request("routine-study-growbox", run, "study-growbox, once — the control loop (strand 3).")
     topic = "workplan-growbox-control-loop"
     b.root("pj-growbox", topic, FRONT, f"routine-study-growbox/{run}", r)
     ask = b.post("pj-growbox", topic, FRONT, "@**autolab-agstudio1** one mission: the control loop (strand 3). "
                  "I accept for the routine.\n\n" + line("response_request", to=AUTOLAB))
-    b.post("pj-growbox", topic, AUTOLAB, ACK, minutes=0.2)
-    b.post("pj-growbox", topic, AUTOLAB, f"# m20402 — growbox control loop\n\nOne task: sensors, pump and light "
-           f"schedules on open hardware (ESP32, Raspberry Pi Pico), with three reference builds. Started: task 1 in "
-           f"`work-m20402`. Answers #{ask}.\n\n" + line("progress", re=ask), minutes=1)
-    b.post("work-m20402", "workrun-task1-m20402", AUTOLAB,
+    m = b.mission("pj-growbox", topic, M_CONTROL_LOOP, "growbox", "growbox control loop",
+                  "One task: sensors, pump and light schedules on open hardware (ESP32, Raspberry Pi Pico), with "
+                  "three reference builds.")
+    b.post("pj-growbox", topic, AUTOLAB, f"Planned m{m}, one task, and started it: task 1 in `work-m{m}`. Answers "
+           f"#{ask}.\n\n" + line("progress", re=ask), minutes=0.5)
+    task = b.start_task("pj-growbox", topic, m, 1, ask, FRONT, "# The control loop (strand 3)\n\n"
+                        "Sensors, pump and light schedules on open hardware (ESP32, Raspberry Pi Pico); three "
+                        "reference builds; `reports/strand-control-loop.md`.")
+    b.post(f"work-m{m}", task, AUTOLAB,
            "Working: 9 of 14 sources read; the moisture-sensor comparison is drafted in "
            "`reports/strand-control-loop.md`.\n\n" + line("progress"), minutes=40)
-    b.post("routine-study-growbox", run, FRONT, "Asked autolab for the control-loop mission (m20402, "
+    b.post("routine-study-growbox", run, FRONT, f"Asked autolab for the control-loop mission (m{m}, "
            "`#pj-growbox › workplan-growbox-control-loop`); waiting for its result.\n\n" + line("progress"))
 
 
@@ -354,12 +488,21 @@ def _protoprey(b: Board) -> None:
 # ProtoPrey — goal
 
 A playable prototype of a prey-perspective nature adventure: text-adventure core with images, being eaten as the core loop, no gore. v0.1.0 is one hunt across three locations.""")
-    b.post("pj-protoprey", "workplan-protoprey-v01", FRONT,
-           f"@**autolab-agstudio1** plan v0.1.0 from the goal (#{goal}).\n\n" + line("response_request", to=AUTOLAB))
-    b.post("pj-protoprey", "workplan-protoprey-v01", AUTOLAB,
-           "m20410 is done: ProtoPrey v0.1.0 (`main` at `1f4c2f4`): three locations; the hero sprite and the meadow "
-           "background came from forge.\n\n" + line("report"), minutes=240)
-    b.resolve("pj-protoprey", "workplan-protoprey-v01", DEV)
+    topic = "workplan-protoprey-v01"
+    ask = b.post("pj-protoprey", topic, FRONT,
+                 f"@**autolab-agstudio1** plan v0.1.0 from the goal (#{goal}).\n\n" + line("response_request", to=AUTOLAB))
+    m = b.mission("pj-protoprey", topic, M_PROTOPREY_V01, "protoprey", "ProtoPrey v0.1.0",
+                  "One task: the text-adventure core, one hunt across three locations; the hero sprite and the meadow "
+                  "background asked of forge.")
+    b.start_task("pj-protoprey", topic, m, 1, ask, FRONT, "# ProtoPrey v0.1.0\n\n"
+                 "The core loop and three locations; images from forge (`assetplan-protoprey-hero`, "
+                 "`assetplan-protoprey-meadow`).")
+    shown, agreed = b.finish_task(
+        m, 1, FRONT, "Done: ProtoPrey v0.1.0, three locations; the hero sprite and the meadow background came from "
+        "forge. Checkpoint `1f4c2f4`.", "1f4c2f4", "Agreed: v0.1.0 plays through.", minutes=240)
+    b.accept("pj-protoprey", topic, m, 1, agreed, shown, FRONT)
+    b.post("pj-protoprey", "✔ " + topic, FRONT, f"m{m} is done, accepted (#{agreed}): ProtoPrey v0.1.0 on `main` at "
+           "`1f4c2f4`, three locations.\n\n" + line("report"), minutes=1)
     for stem, what, url in (
         ("protoprey-hero", "the hero sprite: a young hare, side view, 512×512, transparent background",
          "https://files.agstudio.home.arpa/images/2026-09-21/7c1f…/hero.png"),
@@ -393,12 +536,15 @@ A playable prototype of a prey-perspective nature adventure: text-adventure core
            "Delivered: https://files.agstudio.home.arpa/images/2026-09-22/…/card.png\n\n" + line("report"), minutes=8)
     b.resolve("agforge-agstudio1", "assetrun-birthday-card", FORGE)
     b.resolve("agforge-agstudio1", "assetplan-birthday-card", DEV)
-    b.post("pj-protoprey", "workplan-protoprey-locations", DEV,
+    topic = "workplan-protoprey-locations"
+    b.post("pj-protoprey", topic, DEV,
            "@**autolab-agstudio1** v0.2: two more locations (a fallen log hollow, a stream bank).\n\n"
            + line("response_request", to=AUTOLAB), minutes=60)
-    b.post("pj-protoprey", "workplan-protoprey-locations", AUTOLAB,
-           "# m20455 — ProtoPrey v0.2 locations\n\nTwo tasks, one per location; each asks forge for its background. "
-           "Waiting for your go-ahead.\n\n" + line("response_request", to=DEV, ask="confirmation"), minutes=2)
+    m = b.mission("pj-protoprey", topic, M_PROTOPREY_V02, "protoprey", "ProtoPrey v0.2 locations",
+                  "Two tasks, one per location; each asks forge for its background.")
+    b.post("pj-protoprey", topic, AUTOLAB, f"@**Developer** planned m{m}: two tasks, one per location; each asks forge "
+           "for its background. Waiting for your go-ahead.\n\n" + line("response_request", to=DEV, ask="confirmation"),
+           minutes=2)
 
 
 def _worldtrend(b: Board) -> None:
@@ -429,8 +575,8 @@ def _owed_answer(b: Board) -> None:
     b.root("pj-protoprey", "workplan-protoprey-sound-check", FRONT, f"front/{home}", a)
     ask = b.post("pj-protoprey", "workplan-protoprey-sound-check", FRONT,
                  "@**autolab-agstudio1** does forge's open footsteps request (`agforge-agstudio1 › "
-                 "assetplan-protoprey-footsteps`) block ProtoPrey v0.2 (m20455)? A yes or no with the reason, please.\n\n"
-                 + line("response_request", to=AUTOLAB, ask="question"))
+                 f"assetplan-protoprey-footsteps`) block ProtoPrey v0.2 (m{M_PROTOPREY_V02})? A yes or no with the "
+                 "reason, please.\n\n" + line("response_request", to=AUTOLAB, ask="question"))
     b.post("front", home, FRONT, f"autolab に確認を依頼しました（`#pj-protoprey › workplan-protoprey-sound-check` "
            f"#{ask}）。回答が来たらここで報告します。\n\n" + line("progress", re=a))
     b.post("pj-protoprey", "workplan-protoprey-sound-check", AUTOLAB, ACK, minutes=0.2)
@@ -511,6 +657,7 @@ def build_store(directory: Path, board: Board | None = None) -> Path:
             store.set_coverage(sid, topic, complete=True, oldest_id=min(ids), newest_id=max(ids), at=board.clock)
         store.set_checkpoint("fixture", 0)
         store.set_meta(FIXTURE_META, FIXTURE_NAME)
+        store.set_meta(BOARD_VERSION_META, str(BOARD_VERSION))
         store.set_meta(FIXTURE_REPOSITORIES_META, json.dumps(board.repositories, sort_keys=True))
         store.set_meta(FIXTURE_USERS_META, json.dumps(
             [{"user_id": ident, "full_name": name, "is_bot": ident not in (DEV, OMNI), "is_active": True}

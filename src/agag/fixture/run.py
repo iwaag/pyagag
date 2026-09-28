@@ -49,7 +49,7 @@ from agag.mirror.reads import MirrorReads
 from agag.reply import split_reply
 
 from . import responder
-from .board import DEV, NAMES, OBSERVER, build_store
+from .board import BOARD_VERSION_META, DEV, NAMES, OBSERVER, build_store
 from .probes import PROBES, Probe, judge
 
 __all__ = ["DRY_REPLY", "PROBE_ID", "Trial", "TrialError", "client", "fixture_environment", "guides_at", "newest",
@@ -86,6 +86,12 @@ def fixture_environment(store: Path):
 
 def client(store: Path) -> MirrorReads:
     return MirrorReads(Path(store))
+
+
+def board_version(store: Path) -> int:
+    """Which board a store holds (`board.BOARD_VERSION`); 1 for a store built
+    before boards were stamped (agent_guide p3 ex1)."""
+    return int(MirrorReads(Path(store)).store.get_meta(BOARD_VERSION_META) or 1)
 
 
 def probe_history(probe: Probe, board=None) -> list[dict]:
@@ -332,7 +338,8 @@ class Trial:
         return HarnessResult(output=text, exit_code=0, meta={"scripted": str(self.replies[used])})
 
     def facts(self) -> dict:
-        return {"guides": str(self.guides or "(this checkout's)"), "guides_rev": self.guides_rev,
+        return {"board_version": board_version(self.store),
+                "guides": str(self.guides or "(this checkout's)"), "guides_rev": self.guides_rev,
                 "shared": self.shared, "shared_guides": str(self.shared_guides or ""),
                 "store": str(self.store), "dry_run": self.dry_run,
                 "records_root": str(self.records), "overlay": str(self.overlay or ""),

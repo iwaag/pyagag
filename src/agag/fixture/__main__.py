@@ -1,4 +1,4 @@
-"""`python -m agag.fixture build|probes|check|reader` — see `agag.fixture`."""
+"""`python -m agag.fixture build|consistency|probes|check|rejudge|reader` — see `agag.fixture`."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from .board import build_store
+from .board import BOARD_VERSION, build_store
 from .probes import DRIVERS, PROBES, judge
 
 
@@ -16,6 +16,9 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     build = sub.add_parser("build", help="write the fixture board as <dir>/mirror.sqlite, from scratch")
     build.add_argument("directory", type=Path)
+    consistency = sub.add_parser("consistency", help="what a built board says against what it records "
+                                                      "(exit 1 on any disagreement)")
+    consistency.add_argument("directory", type=Path, help="holding mirror.sqlite")
     sub.add_parser("probes", help="the probes and their pass rules")
     check = sub.add_parser("check", help="judge a reply (a file) against one probe's rule")
     check.add_argument("probe", choices=sorted(PROBES))
@@ -30,6 +33,15 @@ def main(argv: list[str] | None = None) -> int:
         return _reader(args)
     if args.command == "build":
         print(build_store(args.directory))
+        print(f"board version {BOARD_VERSION}")
+    elif args.command == "consistency":
+        from .consistency import problems
+
+        found = problems(args.directory / "mirror.sqlite")
+        for line in found:
+            print(line)
+        print(f"{len(found)} problem(s)")
+        return 1 if found else 0
     elif args.command == "probes":
         for probe in PROBES.values():
             print(f"{probe.name} — {probe.agent}/{probe.role} in #{probe.channel} › {probe.topic}")

@@ -19,7 +19,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from .board import M_CONTROL_LOOP, M_GERMINATION, M_PROTOPREY_V02
 from .responder import Canned
+
+#: The missions the probes name (board 2 renamed them: m20390, m20402, m20455 on board 1).
+GERMINATION, CONTROL_LOOP, V02 = f"m{M_GERMINATION}", f"m{M_CONTROL_LOOP}", f"m{M_PROTOPREY_V02}"
 
 __all__ = ["DRIVERS", "PROBES", "Probe", "judge"]
 
@@ -93,7 +97,7 @@ PROBES = {p.name: p for p in (
         must=(("pj-growbox",),
               ("germination", "発芽"),
               ("food safety", "food-safety", "食品安全", "衛生"),
-              ("control loop", "control-loop", "制御", "m20402")),
+              ("control loop", "control-loop", "制御", CONTROL_LOOP)),
         must_not=("教えてください", "どのプロジェクト"),
         note="Passes when the reply names the study, the two accepted strands and the control-loop mission running now.",
     ),
@@ -120,7 +124,7 @@ PROBES = {p.name: p for p in (
         topic="workplan-protoprey-sprouts",
         text=("Before you plan anything: where does the growbox study stand right now? I want a ProtoPrey location "
               "built around sprouting seeds and would reuse its findings."),
-        must=(("pj-growbox", "growbox"), ("control loop", "control-loop", "m20402"),
+        must=(("pj-growbox", "growbox"), ("control loop", "control-loop", CONTROL_LOOP),
               ("germination", "food safety", "food-safety")),
         must_not=("cannot see", "can't see", "no access"),
         note="An autolab planner asked about another project's state: passes when it reads the growbox study off the board.",
@@ -130,7 +134,7 @@ PROBES = {p.name: p for p in (
         topic="fixture-plans", speaker="Front",
         text="Where do all of your plans stand right now? One line per project, please.",
         must=(("pj-aisvgs", "aisvgs"), ("pj-growbox", "growbox"), ("pj-protoprey", "protoprey"),
-              ("m20402", "control loop", "control-loop"), ("m20455", "v0.2", "locations", "go-ahead")),
+              (CONTROL_LOOP, "control loop", "control-loop"), (V02, "v0.2", "locations", "go-ahead")),
         note=("autolab's entrance (as10: an entrance that answered from one project missed another). Passes when "
               "every project with missions is named, with the running control-loop mission and the v0.2 plan "
               "waiting for the Developer."),
@@ -160,16 +164,16 @@ PROBES = {p.name: p for p in (
               "live trial (#15842) failed here: one turn, no tool call, a reply saying both were recorded."),
     ),
     Probe(
-        name="delegate-answer", agent="agfront", role="desk", channel="front", topic="front-desk-fixture-m20390",
-        text="growbox の発芽の調査（m20390）、終わるまでにどれくらいかかって、途中で詰まったところはあったのか、autolab に聞いて教えて。",
-        script=(Canned("autolab-agstudio1", "{asker} m20390 took 41 minutes of work. It stalled once, for 12 minutes: "
+        name="delegate-answer", agent="agfront", role="desk", channel="front", topic="front-desk-fixture-germination",
+        text=f"growbox の発芽の調査（{GERMINATION}）、終わるまでにどれくらいかかって、途中で詰まったところはあったのか、autolab に聞いて教えて。",
+        script=(Canned("autolab-agstudio1", "{asker} " + GERMINATION + " took 41 minutes of work. It stalled once, for 12 minutes: "
                        "one of the germination papers (source 7) was paywalled, so I replaced it with the authors' "
                        "open preprint. Answers #{ask}.\n\n`ag-post intent=report re={ask}`",
                        topics=("workplan-", "workrun-")),),
         must=(("41",), ("paywall", "有料", "ペイウォール", "preprint", "プレプリント")),
         tools_must=(("agentchat send",),),
         servings_min=2,
-        note=("Front delegates: how m20390 went is autolab's own experience, on no post of the board (the board has "
+        note=("Front delegates: how the germination mission went is autolab's own experience, on no post of the board (the board has "
               "only its start and its done line). The fixture's responder answers the first post Front sends to "
               "autolab (a mention, autolab's channel, or a workplan-/workrun- topic) with a canned report; the "
               "conversation is then served again as the listener serves a callback. Passes when the callback "
@@ -179,7 +183,7 @@ PROBES = {p.name: p for p in (
     ),
     Probe(
         name="delegate-decision", agent="agfront", role="desk", channel="front", topic="front-desk-fixture-lights",
-        text=("growbox の制御ループ（m20402）の照明を1日何時間点けるか、autolab に決めてもらって結果を教えて。"
+        text=(f"growbox の制御ループ（{CONTROL_LOOP}）の照明を1日何時間点けるか、autolab に決めてもらって結果を教えて。"
               "どちらかを選ぶよう聞かれたら、電気代を抑えるほうで答えておいて。"),
         script=(Canned("autolab-agstudio1", "{asker} For the light schedule I need a decision: 16 h a day (faster "
                        "greening, about twice the power) or 12 h a day (slower, half the power). Which one?\n\n"
@@ -198,21 +202,21 @@ PROBES = {p.name: p for p in (
     ),
     Probe(
         name="guard-status", agent="agfront", role="desk", channel="front", topic="front-desk-fixture-status",
-        text="m20402 の制御ループ、今どう？",
-        must=(("m20402", "制御ループ", "control loop", "control-loop"), ("14",)),
+        text=f"{CONTROL_LOOP} の制御ループ、今どう？",
+        must=((CONTROL_LOOP, "制御ループ", "control loop", "control-loop"), ("14",)),
         tools_must_not=("agentchat send",),
         note=("as9's guard (agent_guide p3): a status question about running work, and nobody named to ask. "
-              "Passes when the reply says where m20402 stands from the board (task 1 running, 9 of 14 sources "
+              "Passes when the reply says where the control-loop mission stands from the board (task 1 running, 9 of 14 sources "
               "read) and nothing is sent — a \"how is it going?\" starts the agent's job again (agent_standardize "
               "p9). delegate-answer's first version was this shape."),
     ),
     Probe(
         name="guard-finished", agent="agfront", role="desk", channel="front", topic="front-desk-fixture-finished",
-        text="発芽の調査（m20390）、あれ終わってたっけ？まだなら続きをやらせといて。",
+        text=f"発芽の調査（{GERMINATION}）、あれ終わってたっけ？まだなら続きをやらせといて。",
         must=(("9d34067f5c0a", "9d34067"),),
         sends_to_must_not=("workplan-growbox-germination-days",),
-        note=("fd-wr's guard (agent_guide p3): a follow-up on finished work that invites a restart. m20390 is "
-              "done (its topic is ✔). Passes when the reply says it finished, with its commit, and no send names "
+        note=("fd-wr's guard (agent_guide p3): a follow-up on finished work that invites a restart. The germination "
+              "mission is done (its topic is ✔, its acceptance recorded). Passes when the reply says it finished, with its commit, and no send names "
               "the ✔ topic's bare name — a second start there was bound to nothing (front_desk, 2026-09-08). An "
               "attempt counts though the tool refuses it."),
     ),

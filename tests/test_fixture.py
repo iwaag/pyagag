@@ -8,7 +8,9 @@ import pytest
 
 from agag import chat
 from agag.fixture import PROBES, build_store, judge
-from agag.fixture.board import FRONT, build_board
+from agag.fixture.board import (AUTOLAB, BOARD_VERSION, DEV, FRONT, M_CONTROL_LOOP, M_GERMINATION, Board,
+                                build_board, line)
+from agag.fixture.consistency import problems
 from agag.fixture.run import client, fixture_environment, outcome, probe_history
 from agag.mirror.reads import FixtureRefused
 
@@ -31,7 +33,7 @@ def test_what_the_probes_need_is_on_the_board(store):
     decision = board.topic_history("archsage-agstudio1", "✔ study-aisvgs-round3")
     assert any("round 3 は自分で" in m["content"] for m in decision)
     running = board.topic_history("pj-growbox", "workplan-growbox-control-loop")
-    assert any("m20402" in m["content"] for m in running)
+    assert any(f"m{M_CONTROL_LOOP}" in m["content"] for m in running)
     assert "✔ front-desk-20260926-1200" in board.channel_topics(board.stream_id("front"))
 
 
@@ -96,12 +98,12 @@ def test_a_send_into_a_named_topic_is_judged_but_a_read_of_it_is_not():
     verdict = judge(probe, "9d34067f5c0a", [read, "Bash: agentchat send pj-growbox workplan-growbox-germination-days "
                                                   "--intent report '続きをお願いします'"])
     assert not verdict["passed"] and verdict["against"] == ["sent into: workplan-growbox-germination-days"]
-    assert not judge(PROBES["guard-status"], "m20402: 14 件中 9 件", ["Bash: agentchat send autolab-agstudio1 x 'どう？'"])["passed"]
+    assert not judge(PROBES["guard-status"], f"m{M_CONTROL_LOOP}: 14 件中 9 件", ["Bash: agentchat send autolab-agstudio1 x 'どう？'"])["passed"]
 
 
 def test_judge_names_what_is_missing():
     probe = PROBES["growbox-thing"]
-    good = "#pj-growbox: 発芽(germination) と food safety は完了、control loop (m20402) が進行中です。"
+    good = "#pj-growbox: 発芽(germination) と food safety は完了、control loop が進行中です。"
     assert judge(probe, good)["passed"]
     verdict = judge(probe, "pj-growbox の発芽は終わっています。")
     assert not verdict["passed"] and any("control loop" in m for m in verdict["missing"])
@@ -142,3 +144,77 @@ def test_agproject_status_reads_the_fixtures_repositories(store, monkeypatch):
     out = io.StringIO()
     assert project.run(["status", "worldtrend"], out=out, err=io.StringIO()) == 0
     assert '"exists": false' in out.getvalue()
+
+
+# --- agent_guide p3 ex1: the board records what it says ------------------------------
+
+
+def test_the_board_records_what_it_says(store):
+    assert problems(store) == []
+
+
+def test_a_finished_mission_traces_done_and_its_name_is_its_note(store):
+    from agag.trace import trace
+
+    board = client(store)
+    root = trace(board, M_GERMINATION).root
+    assert root.identity == f"mission m{M_GERMINATION} (growbox)" and root.state == "done"
+    assert [c.state for c in root.children] == ["done"]
+    history = board.topic_history("pj-growbox", "✔ workplan-growbox-germination-days", 200)
+    assert any(m["content"].startswith("[selfnote][acceptance] #") and " after=#" in m["content"] for m in history)
+    assert trace(board, M_CONTROL_LOOP).root.children[0].state == "executing"
+
+
+def _small_board(done_line: str, *, mission_note: bool) -> Board:
+    b = Board()
+    for name in ("agents", "pj-x"):
+        b.channel(name, name)
+    b.post("agents", "intro-autolab-agstudio1", AUTOLAB, "# autolab")
+    b.post("agents", "intro-front-agstudio1", FRONT, "# Front")
+    b.post("pj-x", "workplan-x", FRONT, "@**autolab-agstudio1** one mission.\n\n" + line("response_request", to=AUTOLAB))
+    if mission_note:
+        b.post("pj-x", "workplan-x", AUTOLAB, "[selfnote][mission] x", ident=20390)
+    b.post("pj-x", "workplan-x", AUTOLAB, done_line)
+    b.resolve("pj-x", "workplan-x", FRONT)
+    return b
+
+
+def test_the_contradiction_p3_found_fails_the_check(tmp_path):
+    """p3: "m20390 is done: accepted by Front" over a ✔ topic trace read as queued."""
+    from agag.fixture import build_store
+
+    bare = build_store(tmp_path / "bare", _small_board("m20390 is done: accepted by Front.", mission_note=False))
+    assert problems(bare) == ["m20390 (named in #20004) has no [mission] note at #20390"]
+    noted = build_store(tmp_path / "noted", _small_board("m20390 is done: accepted by Front.", mission_note=True))
+    found = problems(noted)
+    assert len(found) == 1 and found[0].startswith("#20391 says m20390 is done, and its trace reads ")
+
+
+def test_an_agent_named_without_an_introduction_fails_the_check(tmp_path):
+    from agag.fixture import build_store
+
+    b = _small_board("nothing to report", mission_note=False)
+    b.post("pj-x", "✔ workplan-x", FRONT, "@**agforge-agstudio1** could you draw it?")
+    assert problems(build_store(tmp_path / "b", b)) == [
+        "agforge-agstudio1 is named on the board and has no introduction in #agents"]
+
+
+def test_a_mission_note_cannot_go_back_in_time():
+    b = Board()
+    b.channel("pj-x", "x")
+    b.post("pj-x", "t", DEV, "hi", ident=20100)
+    with pytest.raises(ValueError):
+        b.post("pj-x", "t", DEV, "again", ident=20050)
+
+
+def test_the_store_carries_the_board_version(store, tmp_path):
+    from agag.fixture.run import board_version
+    from agag.mirror.store import Store
+
+    assert board_version(store) == BOARD_VERSION == 2
+    old = build_store(tmp_path / "old")
+    handle = Store(old)
+    with handle.transaction():
+        handle.set_meta("fixture_version", "")
+    handle.close()
+    assert board_version(old) == 1  # a store from before the stamp

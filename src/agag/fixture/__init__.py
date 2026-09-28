@@ -10,6 +10,7 @@ cannot post anywhere: every write and every read beyond the board fails with
 a line naming the fixture.
 
     python -m agag.fixture build <dir>        # <dir>/mirror.sqlite, rebuilt from scratch
+    python -m agag.fixture consistency <dir>  # what the board says against what it records
     python -m agag.fixture probes             # the probes and their pass rules
     python -m agag.fixture check <probe> <reply file>   # a reply against its rule
 
@@ -18,8 +19,10 @@ the board, where `agentchat send` is recorded and answered by the probe's
 script (`responder.py`); every other write is still refused there.
 
 `board.py` is the realm (projects and studies, routines with runs, archsage's
-topics, every agent's introduction, forge's past work, one ✔'d past request);
-`probes.py` is what is asked of it and how an answer is judged; `run.py`
+topics, every agent's introduction, forge's past work, one ✔'d past request),
+stamped `BOARD_VERSION` into the store and every trial's `outcome.json`;
+`consistency.py` checks that it records what it says (a mission called done
+traces done: agent_guide p3 ex1); `probes.py` is what is asked of it and how an answer is judged; `run.py`
 serves one probe to a role the way its listener's first serving would, with
 a given guide, against the fixture — the kit each agent's driver
 (`probes.DRIVERS`: `agfront.trial`, `archsage.trial`, `agautolab.trial`,

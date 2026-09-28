@@ -11,6 +11,7 @@ import pytest
 
 from agag import agent, topics
 from agag.agent import RECORDS_ROOT_VARIABLE, AgentSpec, run_role
+from agag.fixture.board import BOARD_VERSION
 from agag.fixture.run import (DRY_REPLY, Trial, TrialError, guides_at, newest, record_facts, tool_calls,
                               trial_parser)
 
@@ -60,6 +61,7 @@ def test_a_trial_builds_its_board_and_keeps_records_under_out(repository, tmp_pa
     trial = Trial.start(args, repository)
     monkeypatch.setenv(RECORDS_ROOT_VARIABLE, str(trial.records))  # restored by monkeypatch
     assert trial.store == tmp_path / "out" / "board" / "mirror.sqlite" and trial.store.is_file()
+    assert trial.facts()["board_version"] == BOARD_VERSION  # agent_guide p3 ex1: a result says its board
     assert (trial.guides / "desk" / "guide.md").read_text(encoding="utf-8") == "old guide\n"
     spec = AgentSpec("front", tmp_path / "checkout")
     assert spec.records_root == tmp_path / "out" / "records" / "front" / ".local" / "agent"

@@ -614,9 +614,17 @@ def listener_main(
     ).start()
     if mirror is None:
         mirror = Mirror.open(spec.zulip_env, spec.local / "mirror", log=log)
+    from .claims import ClaimCheck
+
+    # failsafe p7: every delivered reply is checked against the records its
+    # serving wrote; the reader is the host's (`~/.config/agag/claims.toml`).
+    claims = None if passive else ClaimCheck.from_host()
+    if claims is not None:
+        log(f"claim check: {'reader ' + claims.reader.model if claims.reader else 'OFF — ' + claims.problem}"
+            if hasattr(claims.reader, "model") or claims.reader is None else "claim check: on")
     listener = Listener(
         mirror, client, topic_filter=topic_filter(spec), handler=topic_handler,
-        on_mention=mention_route, on_recover=recover_route, is_ack=is_ack, log=log,
+        on_mention=mention_route, on_recover=recover_route, is_ack=is_ack, log=log, claims=claims,
     )
     log(
         f"{spec.agent} zulip listener starting"

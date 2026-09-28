@@ -463,6 +463,9 @@ def _unit(node: Node, *, root: bool, now: int, health: dict[int, dict], recovery
         # (failsafe p6 ex1): citations, and relations nothing records.
         "relations": [dict(row) for row in node.relations],
         "disposition": dict(node.disposition) if node.disposition else None,
+        # A reply here said an act was done that no record shows (failsafe
+        # p7, `agag.claims`): open until it is recorded or corrected.
+        "claims": [dict(row) for row in node.claims],
         "children": children,
     }
     report = health.get(int(node.anchor)) or {}
@@ -705,6 +708,18 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
             state = "completed"
             reason = "every unit of work is finished by its record"
         next_actor = ""
+    claims = [{"unit": u["anchor"], "label": u["label"], **row} for u in units for row in u.get("claims") or []]
+    if claims and state in ("completed", "cancelled", "answered"):
+        # A reply that says something was recorded, with no record behind
+        # it, completes nothing: the request waits for the act or the
+        # correction (failsafe p7).
+        from .trace import claim_line
+
+        first = claims[0]
+        owner = next((u["owner"] for u in units if u["anchor"] == first["unit"]), "") or ""
+        state, focus = "waiting", None
+        reason = f"not complete: {claim_line(first)}" + (f" (+{len(claims) - 1} more)" if len(claims) > 1 else "")
+        next_actor = owner if first.get("state") == "repairing" else "you"
     settled = [{"unit": u["anchor"], "label": u["label"], **u["receipt"]} for u in units
                if u.get("receipt") and u["receipt"].get("state") == "settled"]
     if settled and state in ("completed", "cancelled"):
@@ -721,7 +736,7 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
         "state": state, "reason": reason, "next": next_actor,
         "focus": focus["anchor"] if focus else None,
         "latest_work_at": latest, "stale": not source_live, "problem": result.problem,
-        "stages": stages, "root": root, "settled_receipts": settled,
+        "stages": stages, "root": root, "settled_receipts": settled, "claims": claims,
         "holds": [h.as_dict() for h in holds],
         "dispositions": [d.as_dict() for d in getattr(result, "dispositions", []) or []],
         "unknown_relations": list(result.unknown_relations),

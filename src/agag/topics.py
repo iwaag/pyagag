@@ -397,6 +397,13 @@ def prompt_with_guide(lines, guide_text: str, *, reply: bool = False, continuati
         notice = reply_retry_notice()
         if notice:
             prompt = f"{prompt}\n\n{notice}"
+        from .claims import notice_for_current
+
+        # A reply of this agent's that said something was done that is not
+        # on record (failsafe p7): the serving answering it is told what.
+        claims = notice_for_current()
+        if claims:
+            prompt = f"{prompt}\n\n{claims}"
     if continuation:
         # The carry-forward block (`agag.continuation`), for a role whose
         # conversation outlives one serving and delegates elsewhere.
@@ -1121,6 +1128,11 @@ def serve_topic(
                 text = failure_line(split.error or "no reply", final=not owes_retry)
                 log(f"no usable reply for {reply_channel!r}/{reply_topic!r}: {split.error}; posting the failure "
                     f"(attempt {attempt}/{REPLY_ATTEMPTS}{', the reply stays owed' if owes_retry else ''})")
+            if split.ok:
+                # The run's own words, apart from the mention, the listener's
+                # lines and the post line: what the claim check reads
+                # (failsafe p7, `agag.claims`).
+                _remember(journal, reply_words=split.reply)
             if earlier_owed is not None:
                 _settle(journal, earlier)
             if split.meta_error:

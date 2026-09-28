@@ -283,6 +283,11 @@ class Node:
     #: `{id, kind, covered, unit, says}`; `covered` is false when something
     #: substantive happened here after it.
     disposition: dict = field(default_factory=dict)
+    #: Claims here still open (failsafe p7, `agag.claims`): a reply said an
+    #: act was done and no record shows it — `{id, reply, attempt, state,
+    #: at, by, missing}`, `state` `repairing` (its owner is served once with
+    #: the mismatch) or `escalated` (it said it again; the owners are told).
+    claims: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -1153,6 +1158,22 @@ def _records(messages: list[dict] | None, owner: int | None) -> list[dict]:
     return found
 
 
+def _open_claims(messages: list[dict] | None) -> list[dict]:
+    from .claims import open_claims
+
+    keep = ("id", "reply", "attempt", "state", "at", "by", "missing")
+    return [{key: row.get(key) for key in keep} for row in open_claims(messages or ())]
+
+
+def claim_line(claim: dict) -> str:
+    """One open claim, as the trace and the panel say it."""
+    said = ", ".join(f"{m.get('act')}" + (f" #{m.get('target')}" if m.get("target") else "")
+                     for m in claim.get("missing") or [])
+    how = ("its owner is served once with the mismatch" if claim.get("state") == "repairing"
+           else "said again after the notice; the owners are told")
+    return f"claim #{claim.get('id')}: reply #{claim.get('reply')} says {said} — no record ({how})"
+
+
 def _owed_names(messages, owner, homes, home_messages, here, names) -> list[str]:
     if not messages:
         return []
@@ -1404,6 +1425,7 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
                     messages, owner_id, homes, home_messages, key,
                     {requester: name for requester, name, _ in requested})),
             receipt=found.get("receipt") or {},
+            claims=_open_claims(messages),
             relations=[_relation_row(link) for link in cited.get(key, [])],
             last_substantive=max((int(m.get("id") or 0) for m in messages or ()
                                   if is_speech(m) and not is_ack(str(m.get("content") or ""))), default=0),
@@ -1538,6 +1560,8 @@ def next_actions(result: Trace) -> list[str]:
             lines.append(f"{node.channel}/{node.topic}: {node.detail}")
         if node.state == "failed":
             lines.append(f"{node.channel}/{node.topic}: {node.detail}")
+        for claim in node.claims:
+            lines.append(f"{node.channel}/{node.topic}: {claim_line(claim)}")
     return lines
 
 
@@ -1573,6 +1597,8 @@ def trace_lines(result: Trace) -> list[str]:
             lines.append(f"{pad}{'  ' if depth else ''}  anchored by {', '.join(node.requested_by)}")
         for failure in node.failures:
             lines.append(f"{pad}{'  ' if depth else ''}  ! operation failed: {failure}")
+        for claim in node.claims:
+            lines.append(f"{pad}{'  ' if depth else ''}  ! {claim_line(claim)}")
         if node.disposition and node.disposition.get("kind") == "suppressed":
             lines.append(f"{pad}{'  ' if depth else ''}  " + (
                 f"monitoring suppressed: {node.disposition['says']}" if node.disposition.get("covered") else
@@ -1706,6 +1732,10 @@ THRESHOLDS = {
     # failsafe p3: the request's own conversation ends in its agent's failure
     # notice after the listener's own second serving of the input.
     "unanswered": 60,
+    # failsafe p7: a reply said an act was done that no record shows, and
+    # said it again after its owner was told (`agag.claims`); an attempt-1
+    # claim nothing answered within `claims.REPAIR_SECONDS` is the same.
+    "claim": 60,
     # Unfinished work whose holder cannot be established (or is an agent
     # that took it up), with nothing new in the request for this long.
     "quiet": 1800,
@@ -1732,6 +1762,20 @@ def stall_candidates(result: Trace, now: int | None = None, thresholds: dict | N
     for node in result.nodes():
         is_root = node is root
         resolved = node.topic.startswith(RESOLVED_TOPIC_PREFIX)
+        for claim in node.claims:
+            from .claims import REPAIR_SECONDS
+
+            due = overdue("claim", int(claim.get("at") or 0)) if claim.get("state") == "escalated" else \
+                bool(claim.get("at")) and now - int(claim["at"]) >= max(REPAIR_SECONDS, limits["claim"])
+            if due:
+                found.append(Candidate(
+                    "claim", node.channel, node.topic, node.identity, claim_line(claim),
+                    node.owner or "the agent that owns this conversation",
+                    "a person reads the reply against the records and has the act recorded or the reply "
+                    f"corrected (`python -m agag.claims --settle {claim.get('id')} <why>` closes it as dismissed)",
+                    int(claim.get("at") or 0), (int(claim.get("id") or 0), int(claim.get("reply") or 0)),
+                    anchor=node.anchor,
+                ))
         if node.state == "queued" and overdue("unacknowledged", node.last_activity):
             found.append(Candidate(
                 "unacknowledged", node.channel, node.topic, node.identity, node.detail,

@@ -24,3 +24,10 @@ def _no_host_people_config(tmp_path_factory, monkeypatch):
     """The host's `~/.config/agag/people.toml` never reaches a test: a test
     that wants a proxy writes its own."""
     monkeypatch.setenv("AGAG_PEOPLE_CONFIG", str(tmp_path_factory.mktemp("people") / "people.toml"))
+
+
+@pytest.fixture(autouse=True)
+def _no_host_claims_config(tmp_path_factory, monkeypatch):
+    """The host's `~/.config/agag/claims.toml` never reaches a test: no test
+    calls the host's local model (failsafe p7)."""
+    monkeypatch.setenv("AGAG_CLAIMS_CONFIG", str(tmp_path_factory.mktemp("claims") / "claims.toml"))

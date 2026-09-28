@@ -586,11 +586,16 @@ class Store:
             name = self.channel_names().get(int(stream_id), "")
         return [self._row_to_message(row, name) for row in rows]
 
-    def messages_by_sender(self, sender_id: int, *, limit: int = 500) -> list[Message]:
+    def messages_by_sender(self, sender_id: int, *, limit: int = 500, since_id: int = 0,
+                           upto_id: int | None = None) -> list[Message]:
+        """One sender's messages, oldest first: the newest `limit`, with an
+        id above `since_id` and at most `upto_id` (failsafe p7: the posts a
+        serving made between its ack and its reply)."""
         with self._lock:
             rows = self._db.execute(
-                "SELECT * FROM messages WHERE sender_id = ? AND deleted = 0 ORDER BY id DESC LIMIT ?",
-                (int(sender_id), int(limit))).fetchall()
+                "SELECT * FROM messages WHERE sender_id = ? AND deleted = 0 AND id > ? AND id <= ?"
+                " ORDER BY id DESC LIMIT ?",
+                (int(sender_id), int(since_id), int(upto_id if upto_id is not None else 2**62), int(limit))).fetchall()
             names = self.channel_names()
         return [self._row_to_message(row, names.get(int(row["stream_id"]), "")) for row in reversed(rows)]
 

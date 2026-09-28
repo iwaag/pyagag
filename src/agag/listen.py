@@ -137,6 +137,7 @@ __all__ = [
     "Listener",
     "Queue",
     "QueueJournal",
+    "current_listener",
     "current_mirror",
     "mentions_bot",
 ]
@@ -149,6 +150,12 @@ def current_mirror() -> Mirror | None:
     same copy of the realm (Front's run recovery reads it instead of Zulip).
     None outside a listener."""
     return _current.get("mirror")
+
+
+def current_listener() -> "Listener | None":
+    """The running listener, for a notice a serving's prompt reads from it
+    (`agag.claims.notice_for_current`). None outside a listener."""
+    return _current.get("listener")
 
 
 def mentions_bot(content: str, bot_name: str) -> bool:
@@ -570,6 +577,7 @@ class Listener:
         retry_seconds: float = RETRY_SECONDS,
         reply_retry_seconds: float = REPLY_RETRY_SECONDS,
         delivery: dict | None = None,
+        claims=None,
     ):
         self.mirror = mirror
         self.client = client
@@ -588,6 +596,10 @@ class Listener:
         self.reply_retry_seconds = float(reply_retry_seconds)
         #: Keyword overrides for `agag.delivery.deliver` on redelivery.
         self.delivery = dict(delivery or {})
+        #: The check of every delivered reply against the records its
+        #: serving wrote (`agag.claims.ClaimCheck`, failsafe p7); None: off.
+        self.claims = claims
+        self._claims_looked = 0.0
         self.queue = Queue(queue_path or (mirror.store.path.parent / QUEUE_NAME))
         self.self_id: int | None = None
         self.bot_name = ""
@@ -940,6 +952,7 @@ class Listener:
         while not self._stop.is_set():
             entry = self.queue.take()
             if entry is None:
+                self._retry_claims()
                 with self._wake:
                     self._wake.wait(1.0)
                 continue
@@ -979,6 +992,11 @@ class Listener:
         self.log(f"{'serving' if entry.route == OWNER else 'serving mention in'} {entry.channel!r}/{live!r}")
         serve = self.handler if entry.route == OWNER else self.on_mention
         journal = self.queue.open_serving(entry)
+        if self.claims is not None and hasattr(self.mirror, "store"):
+            # Where this serving's own posts begin (failsafe p7): the newest
+            # message the mirror holds now. On the owner route the ack
+            # narrows it; the mention route has no ack.
+            self.queue.update_serving(journal.id, extra={"window_from": int(self.mirror.store.newest_id() or 0)})
         trigger = self.mirror.message(entry.message_id) if entry.message_id else None
         if trigger is not None:
             # Captured at intake: who asked, by the post that triggered this
@@ -1002,6 +1020,7 @@ class Listener:
         if record is not None and record.state == DELIVERED:
             self._fault_exit(EXIT_BEFORE_RECEIPT, entry)
             self._after_delivery(entry, record)
+            self._check_claims(self.queue.serving(record.id) or record)
         elif record is not None and record.state == RECEIVED:
             # The handler did not go through `serve_topic` (a participant
             # that posts on its own): the record says only that it ran.
@@ -1193,6 +1212,154 @@ class Listener:
         for line in written:
             self.log(f"marked {line} served in {home.channel}/{live} (an owed answer this serving took up)")
 
+    # -- claims: a reply that says it did what it did not (failsafe p7) -------------------------
+
+    def _retry_claims(self, now: float | None = None) -> None:
+        """Servings whose check could not conclude — the reader down, the
+        mirror behind — are tried again while the executor is idle, from
+        the journal, so a restart loses none of them."""
+        if self.claims is None:
+            return
+        now = time.time() if now is None else now
+        if now - self._claims_looked < min(5.0, float(self.claims.retry_seconds)):
+            return
+        self._claims_looked = now
+        for record in self.queue.servings(DELIVERED, limit=50):
+            state = record.extra.get("claims") or {}
+            if "window_from" not in record.extra or state.get("state") not in (None, "unchecked"):
+                continue
+            if state.get("state") == "unchecked" and (int(state.get("tries") or 0) >= self.claims.attempts
+                                                      or now < float(state.get("next_at") or 0)):
+                continue
+            try:
+                self._check_claims(record, now=now)
+            except Exception as error:  # noqa: BLE001 - a check never stops the executor
+                self.log(f"claim check of serving {record.id} failed: {error!r}")
+
+    def _check_claims(self, record: Serving, *, now: float | None = None) -> str:
+        """Read the delivered reply's claims, judge them against the records
+        the serving wrote, settle the claims it answered and record a new
+        mismatch (`agag.claims`). Returns the outcome word."""
+        from . import claims as claim_rules
+
+        check = self.claims
+        if check is None or self.self_id is None or record is None or record.state != DELIVERED:
+            return "off"
+        now = time.time() if now is None else now
+        extra = dict(record.extra)
+        words = claim_rules.reply_words(extra.get("reply_words") or "")
+        if not record.delivered_id or not words:
+            # No reply of the agent's: a failure line, nothing delivered.
+            self._claims_outcome(record, {"state": "skipped"})
+            return "skipped"
+        tries = int((extra.get("claims") or {}).get("tries") or 0) + 1
+
+        def unchecked(problem: str) -> str:
+            last = tries >= check.attempts
+            self._claims_outcome(record, {"state": "unchecked", "tries": tries, "problem": problem,
+                                          "next_at": now + float(check.retry_seconds), "final": last})
+            self.log(f"claims of #{record.delivered_id} unchecked ({problem}){'; giving up' if last else ''}")
+            status = getattr(self.status, "record_claims_unchecked", None)
+            if callable(status):
+                status(record.delivered_id, problem)
+            return "unchecked"
+
+        if check.reader is None:
+            return unchecked(check.problem or "no reader")
+        deadline = time.time() + float(check.mirror_wait)
+        while self.mirror.message(int(record.delivered_id)) is None:
+            if time.time() >= deadline:
+                return unchecked(f"the mirror does not hold #{record.delivered_id} yet")
+            check.sleep(0.2)
+        try:
+            claims = check.reader.read(words)
+        except claim_rules.ReaderError as error:
+            return unchecked(str(error))
+        home = (record.home_channel or record.channel, record.home_topic or record.topic)
+        reply_place = (record.reply_channel or home[0], record.reply_topic or home[1])
+        after = int(record.ack_id or 0) or int(extra.get("window_from") or 0)
+        window = claim_rules.window_records(self.mirror, self.self_id, after, int(record.delivered_id),
+                                            home=reply_place, exclude=(record.ack_id,), is_ack=self.is_ack)
+        missing, found = claim_rules.judge(claims, window, mirror=self.mirror, self_id=self.self_id,
+                                           home=reply_place, before=int(record.delivered_id))
+        live = self._home_live(record, Conversation(*reply_place))
+        conversation = self.mirror.messages(reply_place[0], live, across_resolve=True)
+        missing = self._settle_claims(record, conversation, missing, window, reply_place, live, after)
+        outcome = {"state": "mismatch" if missing else "clean", "tries": tries,
+                   "read": [c.as_dict() for c in claims], "found": found, "missing": missing,
+                   "window": [r.as_dict() for r in window]}
+        if missing:
+            outcome["note"] = self._write_claim(record, missing, found, after, reply_place, live, attempt=1)
+        self._claims_outcome(record, outcome)
+        self.log(f"claims of #{record.delivered_id}: {len(claims)} read, {len(found)} on record"
+                 + (f", {len(missing)} MISSING ({', '.join(m['act'] for m in missing)})" if missing else ""))
+        return outcome["state"]
+
+    def _settle_claims(self, record: Serving, conversation, missing: list[dict], window, place, live: str,
+                       after: int) -> list[dict]:
+        """The open claims this serving was the answer to — written before
+        it began, so its prompt carried them — are settled: `recorded` when
+        every missing act now has its record, else `corrected` when this
+        reply does not claim them again, else the repeat is attempt 2 and
+        nothing more is served. Returns this serving's own mismatches that
+        are not a repeat."""
+        from . import claims as claim_rules
+
+        rest = list(missing)
+        for claim in claim_rules.open_claims(conversation, self.self_id):
+            if claim["id"] >= after:
+                continue
+            still = []
+            for item in claim.get("missing") or []:
+                again = claim_rules.Claim(item.get("act", "send"), int(item.get("target") or 0),
+                                          str(item.get("where") or ""), str(item.get("quote") or ""))
+                gone, _ = claim_rules.judge([again], window, mirror=self.mirror, self_id=self.self_id, home=place,
+                                            before=int(record.delivered_id) + 1)
+                still += gone
+            if not still:
+                self._send_note(place, live, claim_rules.settled_note(claim["id"], "recorded", int(record.delivered_id)))
+                self.log(f"claim #{claim['id']} settled: recorded (reply #{record.delivered_id})")
+                continue
+            if claim["state"] == "escalated":
+                continue  # told once already; only its record closes it now
+            repeated = [m for m in rest if any(m["act"] == s["act"] for s in still)]
+            if repeated:
+                rest = [m for m in rest if m not in repeated]
+                self._write_claim(record, repeated, [], after, place, live, attempt=2, of=claim["id"])
+                self.log(f"claim #{claim['id']} repeated by #{record.delivered_id}: escalated, nothing more served")
+            else:
+                self._send_note(place, live, claim_rules.settled_note(claim["id"], "corrected", int(record.delivered_id)))
+                self.log(f"claim #{claim['id']} settled: corrected by #{record.delivered_id}")
+        return rest
+
+    def _write_claim(self, record: Serving, missing: list[dict], found: list[dict], after: int, place, live: str,
+                     *, attempt: int, of: int = 0) -> int:
+        from . import claims as claim_rules
+        from .selfnote import start_note
+
+        document = {"reply": int(record.delivered_id), "serving": int(record.id), "attempt": attempt,
+                    "window": [int(after), int(record.delivered_id)], "requester": record.requester_id,
+                    "requester_name": record.requester_name, "missing": missing, "found": found}
+        if of:
+            document["of"] = int(of)
+        note_id = self._send_note(place, live, claim_rules.claim_note(document))
+        if attempt == 1 and note_id and topic_matches(place[0], live, self.topic_filter):
+            # The notice is the trigger: our own start note, whose `because`
+            # is the claim — never the decision the false reply answered.
+            self._send_note(place, live, start_note(note_id, int(record.requester_id or 0),
+                                                    record.requester_name or ""))
+        elif attempt == 1:
+            self.log(f"claim #{note_id} is in {place[0]}/{live}, which this listener does not serve by itself: "
+                     "no repair serving; the trace shows it owed")
+        return note_id
+
+    def _send_note(self, place, live: str, text: str) -> int:
+        return int(self.client.send_to_channel(place[0], live, text) or 0)
+
+    def _claims_outcome(self, record: Serving, outcome: dict) -> None:
+        current = self.queue.serving(record.id) or record
+        self.queue.update_serving(record.id, extra={**current.extra, "claims": outcome})
+
     # -- lifecycle -----------------------------------------------------------------------------
 
     def start_executor(self) -> None:
@@ -1204,6 +1371,7 @@ class Listener:
         """Block: identify, wait for the mirror's first fill, recover, then
         follow the change feed until stopped."""
         _current["mirror"] = self.mirror
+        _current["listener"] = self
         self._identify()
         while not self.mirror.live and not self._stop.is_set():
             self.status.record_error(self.mirror.health()["reason"])
@@ -1248,3 +1416,4 @@ class Listener:
         with self._wake:
             self._wake.notify_all()
         _current.pop("mirror", None)
+        _current.pop("listener", None)

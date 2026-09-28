@@ -55,6 +55,7 @@ def test_a_run_started_inside_reads_the_fixture(store):
     with fixture_environment(store):
         environment = agent.chat_environment(_Spec())
     assert environment["AGENTCHAT_MIRROR"] == str(store)
+    assert environment["AGENTCHAT_JOURNAL"] == str(store.parent / "listener.sqlite")
     assert agent.chat_environment(_Spec())["AGENTCHAT_MIRROR"].endswith("mirror/mirror.sqlite")
 
 
@@ -108,3 +109,23 @@ def test_a_trace_runs_on_the_fixture(store):
     first = board.topic_history("pj-protoprey", "workplan-protoprey-locations", 50)[0]
     assert trace_lines(trace(board, int(first["id"])))
     assert board.roster_owner("pj-protoprey", "workplan-protoprey-locations") == ""
+
+
+def test_agproject_status_reads_the_fixtures_repositories(store, monkeypatch):
+    """agent_guide p2 ex1: a fixture study named like a real one got the real
+    Gitea's facts; the fixture answers for its own repositories now."""
+    from agag import project
+
+    def no_gitea(*_, **__):
+        raise AssertionError("the host's Gitea was asked")
+
+    monkeypatch.setattr(project, "gitea_head", no_gitea)
+    monkeypatch.setenv(chat.MIRROR_VARIABLE, str(store))
+    monkeypatch.delenv(chat.ENV_VARIABLE, raising=False)
+    out = io.StringIO()
+    assert project.run(["status", "aisvgs"], out=out, err=io.StringIO()) == 0
+    assert "state: ready" in out.getvalue() and "f57eed1a27de" in out.getvalue()
+    assert "gitea.fixture.invalid" in out.getvalue()
+    out = io.StringIO()
+    assert project.run(["status", "worldtrend"], out=out, err=io.StringIO()) == 0
+    assert '"exists": false' in out.getvalue()

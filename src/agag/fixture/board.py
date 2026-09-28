@@ -25,10 +25,11 @@ What it holds, for the probes in `probes.py`:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agag.mirror.reads import FIXTURE_META
+from agag.mirror.reads import FIXTURE_META, FIXTURE_REPOSITORIES_META
 from agag.mirror.store import Store
 
 FIXTURE_NAME = "agent-guide-p2"
@@ -53,6 +54,11 @@ class Board:
 
     channels: dict[str, tuple[int, str]] = field(default_factory=dict)
     rows: list[dict] = field(default_factory=list)
+    #: The studies' repositories on the fixture's Gitea: slug → `main`'s
+    #: revision. `agproject status` reads them from the store instead of the
+    #: host's Gitea (`agent_guide` p2 ex1: a fixture study named like a real
+    #: one got the real repository's facts).
+    repositories: dict[str, str] = field(default_factory=dict)
     next_id: int = 20_000
     clock: int = T0
 
@@ -166,6 +172,10 @@ def build_board() -> Board:
                                                "agforge-agstudio1": FORGE, "archsage-agstudio1": ARCHSAGE,
                                                "agobserver-agstudio1": OBSERVER, "cagent-agstudio1": CAGENT}[instance],
                text, minutes=1)
+    # `main` as the board last reports it: aisvgs after round 2, growbox after
+    # its food-safety strand (the control loop is still running); worldtrend
+    # has only its plan and no repository.
+    b.repositories = {"aisvgs": "f57eed1a27de", "growbox": "51ab2e0c77d1"}
     _aisvgs(b)
     _growbox(b)
     _protoprey(b)
@@ -500,6 +510,7 @@ def build_store(directory: Path, board: Board | None = None) -> Path:
             store.set_coverage(sid, topic, complete=True, oldest_id=min(ids), newest_id=max(ids), at=board.clock)
         store.set_checkpoint("fixture", 0)
         store.set_meta(FIXTURE_META, FIXTURE_NAME)
+        store.set_meta(FIXTURE_REPOSITORIES_META, json.dumps(board.repositories, sort_keys=True))
         store.set_meta("self_id", str(FRONT))
         store.set_meta("full_name", NAMES[FRONT])
         store.set_meta("email", "front-bot@fixture.invalid")

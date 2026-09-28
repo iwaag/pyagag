@@ -434,7 +434,13 @@ def inspect_project(slug: str, client, *, admin=None, kind: str | None = None, c
             if found:
                 state.repository, state.revision = found.group("repository"), found.group("revision")
     if check_gitea and state.kind == "study":
-        state.gitea = gitea_head(slug, environ=environ)
+        if getattr(client, "fixture", ""):
+            # A fixture board answers for its own Gitea: a study named like a
+            # real one must not get the real repository (agent_guide p2 ex1).
+            org = str((os.environ if environ is None else environ).get(GITEA_ORG_VARIABLE) or DEFAULT_GITEA_ORG)
+            state.gitea = client.repository(slug, org)
+        else:
+            state.gitea = gitea_head(slug, environ=environ)
     _judge(state)
     return state
 

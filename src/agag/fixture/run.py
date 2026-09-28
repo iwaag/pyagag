@@ -7,8 +7,9 @@ things for the duration:
 
 - every run started through `agag.agent` gets `AGENTCHAT_MIRROR` set to the
   fixture store instead of the listener's own mirror, so what the run reads
-  with `agentchat` (and `agproject status`) is the fixture board, and what it
-  tries to post is refused;
+  with `agentchat` (and `agproject status`, whose repository facts are the
+  fixture's own) is the fixture board, and what it tries to post is refused;
+  its `AGENTCHAT_JOURNAL` is beside the store, not the listener's;
 - `client()` is a `MirrorReads` over the fixture, the client the serving's
   own reads go through.
 
@@ -65,6 +66,10 @@ def fixture_environment(store: Path):
     def chat_environment(spec, **kwargs):
         environment = original(spec, **kwargs)
         environment["AGENTCHAT_MIRROR"] = str(store)
+        # `agentchat receipt` reads a listener journal for evidence: the
+        # board's (none, unless a trial puts one beside it), never the live
+        # listener's.
+        environment["AGENTCHAT_JOURNAL"] = str(Path(store).parent / "listener.sqlite")
         return environment
 
     agent_module.chat_environment = chat_environment

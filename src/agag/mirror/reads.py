@@ -24,6 +24,7 @@ or a read the store cannot answer, fails with a line saying so.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Callable
 
@@ -31,10 +32,15 @@ from agag.zulip import ZulipError
 
 from .store import Store
 
-__all__ = ["FIXTURE_META", "FixtureRefused", "MirrorReads"]
+__all__ = ["FIXTURE_GITEA", "FIXTURE_META", "FIXTURE_REPOSITORIES_META", "FixtureRefused", "MirrorReads"]
 
 #: The store meta key a fixture board carries (its name).
 FIXTURE_META = "fixture"
+#: The fixture's repositories (JSON: slug → `main`'s revision), which
+#: `agproject status` reads instead of the host's Gitea.
+FIXTURE_REPOSITORIES_META = "fixture_repositories"
+#: Where the fixture's repositories say they are: a host that resolves nowhere.
+FIXTURE_GITEA = "https://gitea.fixture.invalid"
 
 
 class FixtureRefused(ZulipError):
@@ -77,6 +83,17 @@ class MirrorReads:
             return True
         queue, _ = self.store.checkpoint()
         return queue is not None
+
+    def repository(self, slug: str, org: str) -> dict:
+        """A study's repository as `agag.project.gitea_head` reports one,
+        from a fixture's own rows; a live mirror holds none."""
+        if not self.fixture:
+            raise ZulipError("only a fixture board holds repositories")
+        found = json.loads(self.store.get_meta(FIXTURE_REPOSITORIES_META) or "{}").get(slug)
+        repository = f"{FIXTURE_GITEA}/{org}/{slug}.git"
+        if not found:
+            return {"repository": repository, "exists": False}
+        return {"repository": repository, "exists": True, "branch": "main", "revision": str(found), "empty": False}
 
     # -- identity -----------------------------------------------------------
 

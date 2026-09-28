@@ -61,6 +61,17 @@ def test_only_a_post_addressing_the_agent_takes_its_next_line(boards):
     assert deliver(overlay) == []
 
 
+def test_a_to_line_alone_reaches_nobody(boards):
+    """A post outside the agent's topics that only says `to=11` in its
+    ag-post line serves no listener, so no scripted line answers it."""
+    _, overlay = boards
+    board = client(overlay)
+    board.send_to_channel("pj-growbox", "growbox-recap", "how did it go?\n\n`ag-post intent=response_request to=11 ask=question`")
+    assert deliver(overlay) == []
+    board.send_to_channel("pj-growbox", "growbox-recap", "@**autolab-agstudio1** how did it go?")
+    assert len(deliver(overlay)) == 1
+
+
 def test_other_writes_stay_refused_on_the_overlay(boards):
     _, overlay = boards
     board = client(overlay)

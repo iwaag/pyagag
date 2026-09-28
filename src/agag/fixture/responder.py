@@ -9,10 +9,12 @@ marked with the probe's script. On an overlay, and only there:
 - `agentchat send` (`MirrorReads.send_to_channel`) records the post in the
   overlay — root note and message, as the realm would hold them — and the
   fixture store the trial started from is never opened for writing;
-- each post the served agent sends that addresses a scripted agent (names it
-  with `@**name**`, is posted in its channel or under one of its topic
-  prefixes, or asks it with `to=<id>`) takes that agent's next scripted
-  line: a canned answer, or a question that asks for a decision. The line is
+- each post the served agent sends that addresses a scripted agent the way
+  a listener is served (names it with `@**name**`, or is posted in its
+  channel or under one of its topic prefixes) takes that agent's next
+  scripted line — a `to=<id>` alone does not: it reaches no listener (a
+  first version counted it, and passed a run whose question the real agent
+  would never have seen): a canned answer, or a question that asks for a decision. The line is
   posted by that agent in the same topic **when the serving is over**
   (`deliver`), never during it, because a real answer arrives after the
   asking serving has ended (a first version answered at once, and the run
@@ -145,13 +147,15 @@ def _next_step(state: dict, channel: str, topic: str, content: str) -> tuple[int
     """The first unused script line whose agent this post addresses."""
     if content.startswith("[selfnote]"):
         return None
-    addressed = set(re.findall(r"@\*\*([^*|]+)(?:\|\d+)?\*\*", content))
-    asked = {int(n) for n in re.findall(r"\bto=(\d+)", content)}
+    addressed = {name.casefold() for name in re.findall(r"@\*\*([^*|]+)(?:\|\d+)?\*\*", content)}
     for index, canned in enumerate(state.get("script") or []):
         if index in state.get("used", []):
             continue
+        # What serves a listener (`agag.listen`): a mention, or a topic it
+        # owns — its channel or one of its prefixes. A `to=` in the post's
+        # `ag-post` line alone reaches nobody, so it takes no line either.
         name = canned["agent"]
-        if name in addressed or channel == name or int(state["agents"].get(name, -1)) in asked \
+        if name.casefold() in addressed or channel == name \
                 or any(topic.startswith(prefix) for prefix in canned.get("topics") or ()):
             return index, canned
     return None

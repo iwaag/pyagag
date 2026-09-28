@@ -258,6 +258,9 @@ def _new_activity(node, disposition: Disposition) -> int:
 def _end(node, disposition: Disposition, *, named: bool) -> None:
     if node.state in ("done", "cancelled"):
         return
+    if not named and not node.identity and node.state in ("awaiting_requester", "answered") \
+            and getattr(node, "taken_up", False) and node.execution != "open":
+        return  # a plain exchange already complete: nothing of it is left to end
     before = {"anchor": int(node.anchor), "label": node.identity or node.topic, "owner": node.owner,
               "state": node.state, "detail": node.detail}
     if not named:

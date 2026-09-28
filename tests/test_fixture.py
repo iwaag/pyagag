@@ -83,3 +83,14 @@ def test_judge_names_what_is_missing():
 def test_outcome_takes_the_marked_reply(tmp_path):
     result = outcome(PROBES["triage-unopened"], "thinking…\n<ag-reply intent=report>\nlegit\n</ag-reply>", tmp_path)
     assert result["passed"] and result["marked"] and (tmp_path / "outcome.json").is_file()
+
+
+def test_a_trace_runs_on_the_fixture(store):
+    """`agag.trace` asks `hasattr(client, "roster_owner")`: a fixture must
+    answer it, not refuse it (agent_guide p2 step 7, the triage probe)."""
+    from agag.trace import trace, trace_lines
+
+    board = client(store)
+    first = board.topic_history("pj-protoprey", "workplan-protoprey-locations", 50)[0]
+    assert trace_lines(trace(board, int(first["id"])))
+    assert board.roster_owner("pj-protoprey", "workplan-protoprey-locations") == ""

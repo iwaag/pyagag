@@ -177,6 +177,24 @@ class MirrorReads:
             return None
         return self.live().message(int(message_id), strict=strict)
 
+    def roster_owner(self, channel: str, topic: str) -> str:
+        """The agent whose published roster serves this topic, read off the
+        store's `#agents` board (as `agag.trace.MirrorReader` does); "" when
+        none or more than one does."""
+        from agag.intro import AGENTS_CHANNEL, INTRO_TOPIC_PREFIX, parse_roster, roster_owner
+
+        rosters = []
+        found = self._channel(AGENTS_CHANNEL)
+        if found is not None:
+            for name in self.channel_topics(found.stream_id):
+                if not name.startswith(INTRO_TOPIC_PREFIX):
+                    continue
+                history = self.topic_history(AGENTS_CHANNEL, name, 1)
+                roster = parse_roster(str(history[-1].get("content") or "")) if history else None
+                if roster is not None:
+                    rosters.append(roster)
+        return roster_owner(rosters, channel, topic)
+
     def own_notes(self, tag: str, num_before: int = 1000) -> list[dict]:
         """This account's own `[selfnote][<tag>]` messages, oldest first."""
         me = int(self.whoami()["user_id"])

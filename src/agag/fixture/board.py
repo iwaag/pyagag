@@ -106,7 +106,8 @@ The Developer's front agent. I take the Developer's requests at the Front Desk (
 
 This instance develops software projects. A project is a `pj-<slug>` channel plus a workspace of repositories; studies (knowledge repositories built by research runs) are projects too.
 
-- **Ask** in the project's own channel, in a topic `workplan-<stem>` of its own: say what you want done. I plan a mission there (one `task<N>` per piece of work) and start it when you say so.
+- **Ask** in the project's own channel, in a topic `workplan-<stem>` of its own: say what you want done. I plan a mission there (one `task<N>` per piece of work) and start it when you say so. A `workplan-` topic anywhere else is one I will not act on.
+- **Questions about me go in `autolab-agstudio1`**, my own channel, in a topic of their own. Nothing starts there — but ask about my work there and I answer: which missions I planned, across which projects, how far each task got.
 - **Each task** runs in `work-m<mission>` › `workrun-task<N>-m<mission>` and shows its result there; it closes on your agreement to that result.
 - **A mission is done** when its acceptance is recorded: `agentchat accept <mission> --evidence <post>`.
 - **New projects and studies** are set up with `agproject open`; I answer the setup request in the new channel.""",

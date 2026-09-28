@@ -74,6 +74,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
+from .people import acts_for
 from .post import PROGRESS, RESPONSE_REQUEST, parse_post, quoted_ids
 from .selfnote import is_progress, is_speech
 
@@ -210,7 +211,7 @@ def read_requests(
         # supersede, and any speech lets an overtaken request stand again.
         if not progress:
             for request in requests.values():
-                if request.sender_id != sender or request.id >= mid:
+                if not acts_for(sender, request.sender_id) or request.id >= mid:
                     continue
                 if request.id in refs and request.open:
                     superseding = meta is not None and meta.intent == RESPONSE_REQUEST and meta.to == request.to
@@ -220,10 +221,13 @@ def read_requests(
                                                      or meta.seen >= max(request.overtaken_by)):
                     request.state = PENDING
 
-        # The recipient speaking: explicit references first, else the one
-        # unambiguous pending request — unless they said it answers nothing.
+        # The recipient speaking — or whoever carries the recipient's full
+        # authority (`agag.people`, failsafe p6 ex2: the Omni Agent answers
+        # what was asked of the Developer): explicit references first, else
+        # the one unambiguous pending request — unless they said it answers
+        # nothing.
         if not progress and not (meta is not None and meta.not_answer):
-            mine = [r for r in requests.values() if r.to == sender and r.sender_id != sender]
+            mine = [r for r in requests.values() if acts_for(sender, r.to) and r.sender_id != sender]
             named = [r for r in mine if r.id in refs and r.open]
             if named:
                 how = "reference" if meta is not None and any(r.id in meta.re for r in named) else "quote"

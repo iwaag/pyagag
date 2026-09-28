@@ -35,7 +35,10 @@ is never archived), written by whoever records it on the holder's words:
     cancelled by record;
   - `decision` and `indefinite`: never by themselves;
 - **an explicit release**, `[selfnote][hold-release] #<hold> by <user id>
-  (<name>) #<evidence> — <why>`, on the holder's words (`agentchat release`,
+  (<name>) [for <holder> (<name>)] #<evidence> — <why>`, on the holder's
+  words or those of whoever carries the holder's full authority
+  (`agag.people`, failsafe p6 ex2: the Omni Agent for the Developer, either
+  way round; `by` is who actually spoke) (`agentchat release`,
   `agobserver.hold --release`).
 
 Unrelated activity releases nothing: a new post, a ✔, another unit's
@@ -51,6 +54,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Iterable
 
+from .people import acts_for, for_suffix
 from .selfnote import note, parse_note
 
 __all__ = [
@@ -71,7 +75,8 @@ RELEASE_TAG = "hold-release"
 PURPOSES = ("acceptance", "resume", "decision", "indefinite")
 _HOLD = re.compile(r"^(?P<purpose>[a-z]+) a(?P<unit>\d+) by (?P<by>\d+)(?: \((?P<name>[^)]*)\))? #(?P<evidence>\d+)"
                    r"(?: — (?P<why>.*))?$", re.S)
-_RELEASE = re.compile(r"^#(?P<hold>\d+) by (?P<by>\d+)(?: \((?P<name>[^)]*)\))? #(?P<evidence>\d+)"
+_RELEASE = re.compile(r"^#(?P<hold>\d+) by (?P<by>\d+)(?: \((?P<name>[^)]*)\))?"
+                      r"(?: for (?P<for>\d+)(?: \((?P<for_name>[^)]*)\))?)? #(?P<evidence>\d+)"
                       r"(?: — (?P<why>.*))?$", re.S)
 #: What each purpose waits for, said to whoever reads a hold still in force.
 WAITS_FOR = {
@@ -94,10 +99,11 @@ def hold_note(purpose: str, unit: int, by_id: int, by_name: str = "", evidence: 
     return note(HOLD_TAG, f"{purpose} a{int(unit)} by {int(by_id)}{name} #{int(evidence)}{reason}")
 
 
-def release_note(hold_id: int, by_id: int, by_name: str = "", evidence: int = 0, why: str = "") -> str:
+def release_note(hold_id: int, by_id: int, by_name: str = "", evidence: int = 0, why: str = "",
+                 on_behalf: str = "") -> str:
     name = f" ({_one_line(by_name).replace('(', '').replace(')', '')})" if by_name else ""
     reason = f" — {_one_line(why)}" if why.strip() else ""
-    return note(RELEASE_TAG, f"#{int(hold_id)} by {int(by_id)}{name} #{int(evidence)}{reason}")
+    return note(RELEASE_TAG, f"#{int(hold_id)} by {int(by_id)}{name}{on_behalf} #{int(evidence)}{reason}")
 
 
 def parse_hold(content) -> dict | None:
@@ -116,6 +122,7 @@ def parse_release(content) -> dict | None:
     if match is None:
         return None
     return {"hold": int(match.group("hold")), "by": int(match.group("by")), "name": match.group("name") or "",
+            "for": int(match.group("for") or 0), "for_name": match.group("for_name") or "",
             "evidence": int(match.group("evidence")), "why": (match.group("why") or "").strip()}
 
 
@@ -223,7 +230,9 @@ def holds_of(result, messages: Iterable[dict] | None = None) -> list[Hold]:
         if release is not None:
             hold.state = "released"
             hold.ended_by = {"id": release["id"], "how": "released",
-                             "what": f"released by {release['name'] or release['by']} on #{release['evidence']}"
+                             "what": f"released by {release['name'] or release['by']}"
+                                     + (f" for {release['for_name'] or release['for']}" if release["for"] else "")
+                                     + f" on #{release['evidence']}"
                                      + (f": {release['why']}" if release["why"] else "")}
         else:
             settled = _settled(hold, unit)
@@ -389,17 +398,26 @@ def release(client, hold_id: int, evidence: int, why: str = "", *, in_person: in
     if hold.state != "held":
         return 0, hold
     if in_person is not None and not evidence:
-        if int(in_person) != hold.by:
-            raise HoldRefused(f"#{hold_id} is {hold.name or hold.by}'s hold: only they release it")
-        written = int(client.send_to_channel(where[0], where[1],
-                                             release_note(hold.id, hold.by, hold.name, 0, why)) or 0)
+        if isinstance(in_person, tuple):
+            who, who_name = int(in_person[0]), str(in_person[1] or "")
+        else:
+            who, who_name = int(in_person), (hold.name if int(in_person) == hold.by else "")
+        if not acts_for(who, hold.by):
+            raise HoldRefused(f"#{hold_id} is {hold.name or hold.by}'s hold: only they, or whoever carries their "
+                              "full authority, release it")
+        written = int(client.send_to_channel(where[0], where[1], release_note(
+            hold.id, who, who_name, 0, why, for_suffix(who, hold.by, hold.name))) or 0)
         return written, hold
     post = client.message(int(evidence))
     if not post:
         raise HoldRefused(f"#{evidence} does not exist or could not be read")
-    if int(post.get("sender_id") or 0) != hold.by:
-        raise HoldRefused(f"#{evidence} is not {hold.name or hold.by}'s: a hold is released on its holder's words "
+    speaker = int(post.get("sender_id") or 0)
+    if not acts_for(speaker, hold.by):
+        raise HoldRefused(f"#{evidence} is not {hold.name or hold.by}'s: a hold is released on its holder's words, "
+                          "or those of whoever carries their full authority "
                           f"(or settles by itself when {hold.waits_for.split(' (')[0]} is on record)")
-    written = int(client.send_to_channel(where[0], where[1],
-                                         release_note(hold.id, hold.by, hold.name, evidence, why)) or 0)
+    # The record names who actually spoke, and whose authority it was.
+    written = int(client.send_to_channel(where[0], where[1], release_note(
+        hold.id, speaker, str(post.get("sender_full_name") or ""), evidence, why,
+        for_suffix(speaker, hold.by, hold.name))) or 0)
     return written, hold

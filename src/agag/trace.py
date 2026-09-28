@@ -163,7 +163,8 @@ DECIDED_WORDS = frozenset({"accepted", "done"})
 #: the result shown for review) and `[selfnote][acceptance] #<evidence> by
 #: <user> (<name>) [after=#<shown>]` (`agag.acceptance`).
 _SHOWN = re.compile(r"\+shown=(\d+)")
-_ACCEPTANCE_RECORD = re.compile(r"^#(?P<evidence>\d+) by (?P<by>\d+)(?: \((?P<name>[^)]*)\))?(?: after=#(?P<after>\d+))?")
+_ACCEPTANCE_RECORD = re.compile(r"^#(?P<evidence>\d+) by (?P<by>\d+)(?: \((?P<name>[^)]*)\))?"
+                                r"(?: for (?P<for>\d+)(?: \((?P<for_name>[^)]*)\))?)?(?: after=#(?P<after>\d+))?")
 #: A routine run's end is its owner's `ag-routinerun` block
 #: (`ag.routinerun-finish.v1`, agfront `routine.record_text`), echoed into the
 #: run topic before the ✔: `finished` when the routine's goal was reached,
@@ -740,7 +741,9 @@ def decisions(messages: list[dict] | None, owner: int | None) -> tuple[list[dict
             bound = int(match.group("after") or 0) or int(match.group("evidence"))
             record = {"kind": "accepted", "id": mid, "covers": bound, "by": by,
                       "what": f"the acceptance #{match.group('evidence')} by "
-                              f"{match.group('name') or match.group('by')} recorded at #{mid}"}
+                              f"{match.group('name') or match.group('by')}"
+                              + (f" for {match.group('for_name') or match.group('for')}" if match.group("for") else "")
+                              + f" recorded at #{mid}"}
             own.append(record)
             down.append(record)
     return own, down

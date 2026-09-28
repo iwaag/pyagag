@@ -17,3 +17,10 @@ def _no_host_refs_config(tmp_path_factory, monkeypatch):
     """The developer's own `~/.config/agag/refs.toml` never reaches a test."""
     monkeypatch.setenv("AGREFS_HOST_CONFIG", str(tmp_path_factory.mktemp("hostcfg") / "refs.toml"))
     monkeypatch.delenv("AGREFS_CATALOG", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_host_people_config(tmp_path_factory, monkeypatch):
+    """The host's `~/.config/agag/people.toml` never reaches a test: a test
+    that wants a proxy writes its own."""
+    monkeypatch.setenv("AGAG_PEOPLE_CONFIG", str(tmp_path_factory.mktemp("people") / "people.toml"))

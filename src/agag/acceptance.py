@@ -40,6 +40,12 @@ somebody who **holds** the decision, whoever records it:
   `agentchat reserve` on that person's own words) leaves that person as the
   only holder. The mission then waits for their words.
 
+A holder's decision may also be made by whoever carries that holder's full
+authority (`agag.people`: the Omni Agent for the Developer, failsafe p6
+ex2), on a reservation too. The record names the actual speaker with the
+authority it used — `by 9 (Omni Agent) for 8 (Developer)` — and such a
+proxy's words count wherever it said them, as the person's would.
+
 The recorder — the holder itself, autolab's close-out, the completion
 door, anybody — changes nothing: the same post gives the same record. The
 evidence must be a holder's post (never the mission's own agent: a
@@ -70,6 +76,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from .people import acts_for, for_suffix, principal_of
 from .selfnote import Conversation, effective_rootchat, is_speech, note, parse_note, parse_rootchat
 from .trace import CANCELLED_WORDS, trace
 from .zulip import RESOLVED_TOPIC_PREFIX, ZulipClient, ZulipError, locate, log as default_log
@@ -108,14 +115,15 @@ class AcceptanceRefused(RuntimeError):
     """The mission cannot be accepted now, and nothing was written."""
 
 
-def acceptance_note(evidence: int, by_id: int, by_name: str = "", after: int = 0) -> str:
-    """`[selfnote][acceptance] #<evidence> by <user id> (<name>) [after=#<shown>]`.
-    Evidence 0 means a holder recorded their own decision with no post to
-    point at (the completion door); `after` is the shown result the decision
-    followed."""
+def acceptance_note(evidence: int, by_id: int, by_name: str = "", after: int = 0, on_behalf: str = "") -> str:
+    """`[selfnote][acceptance] #<evidence> by <user id> (<name>) [for <user id>
+    (<name>)] [after=#<shown>]`. Evidence 0 means a holder recorded their own
+    decision with no post to point at (the completion door); `after` is the
+    shown result the decision followed; `on_behalf` (`agag.people.for_suffix`)
+    names the holder whose authority a proxy decided on (failsafe p6 ex2)."""
     name = f" ({by_name})" if by_name else ""
     shown = f" after=#{int(after)}" if after else ""
-    return note(ACCEPTANCE_TAG, f"#{int(evidence)} by {int(by_id)}{name}{shown}")
+    return note(ACCEPTANCE_TAG, f"#{int(evidence)} by {int(by_id)}{name}{on_behalf}{shown}")
 
 
 def reservation_note(user_id: int, name: str = "", post: int = 0) -> str:
@@ -153,9 +161,15 @@ class Decision:
     delegated: set[int] = field(default_factory=set)
 
     def may_decide(self, user_id: int) -> bool:
+        return self.holder_for(user_id) is not None
+
+    def holder_for(self, user_id: int) -> tuple[int, str] | None:
+        """The holder whose decision `user_id` makes — themselves, or the
+        person whose full authority they carry (`agag.people`) — or None."""
         if self.reserved is not None:
-            return int(user_id) == self.reserved[0]
-        return any(int(user_id) == holder for holder, _ in self.holders)
+            return self.reserved[:2] if acts_for(user_id, self.reserved[0]) else None
+        mine = next(((h, n) for h, n in self.holders if int(user_id) == h), None)
+        return mine or next(((h, n) for h, n in self.holders if acts_for(user_id, h)), None)
 
     def describe(self) -> str:
         if self.reserved is not None:
@@ -269,13 +283,15 @@ class Acceptance:
     written: list[str] = field(default_factory=list)
     resolved: bool = False
     after: int = 0
+    #: ` for <id> (<name>)` when a proxy accepted on its principal's authority.
+    on_behalf: str = ""
 
     @property
     def label(self) -> str:
         return f"m{self.mission}"
 
     def summary(self) -> str:
-        whose = f"{self.by_name or self.by_id}" + (f" (#{self.evidence})" if self.evidence else "")
+        whose = f"{self.by_name or self.by_id}{self.on_behalf}" + (f" (#{self.evidence})" if self.evidence else "")
         if self.already and not self.written:
             if not self.by_id:
                 return f"{self.label} is already done (closed before acceptances were recorded); nothing was written"
@@ -380,12 +396,16 @@ def accept_mission(
     shown = _shown(tasks)
     if not recorded:
         if evidence is None:
-            if me.get("is_bot", True) or not held.may_decide(me_id):
+            # A bot is an agent, never a person recording in person — unless it
+            # carries a person's full authority (failsafe p6 ex2).
+            if (me.get("is_bot", True) and principal_of(me_id) is None) or not held.may_decide(me_id):
                 raise AcceptanceRefused(
                     "an acceptance is recorded with the post where it was given: pass the message id of the "
                     f"words of {held.describe()} (--evidence). Only a holder recording their own decision in "
                     "person needs none")
             done.evidence, done.by_id, done.by_name = 0, me_id, str(me.get("full_name") or "")
+            holder = held.holder_for(me_id)
+            done.on_behalf = for_suffix(me_id, holder[0], holder[1]) if holder else ""
         else:
             said = client.message(int(evidence), strict=True)
             if said is None:
@@ -401,7 +421,10 @@ def accept_mission(
                     f"#{evidence} was written by {said.get('sender_full_name') or speaker}, who does not hold "
                     f"m{mission_id}'s acceptance; it is {held.describe()}'s to give")
             where = (str(said.get("display_recipient") or ""), _bare(str(said.get("subject") or "")))
-            if speaker in held.delegated and where not in held.conversations:
+            holder = held.holder_for(speaker)
+            # A proxy deciding for a person decides as that person: anywhere.
+            for_person = holder is not None and holder[0] != speaker and holder[0] not in held.delegated
+            if speaker in held.delegated and not for_person and where not in held.conversations:
                 raise AcceptanceRefused(
                     f"#{evidence} is in #{where[0]} > {where[1]}, which is not m{mission_id}'s conversation, one of "
                     "its tasks', or a conversation it was requested from")
@@ -411,6 +434,7 @@ def accept_mission(
                     "follows the reviewed result")
             done.evidence, done.by_id = int(evidence), speaker
             done.by_name = str(said.get("sender_full_name") or "")
+            done.on_behalf = for_suffix(speaker, holder[0], holder[1]) if holder else ""
         done.after = shown
 
     # The record, in an order a repeat can finish: the tasks, the note that
@@ -423,7 +447,8 @@ def accept_mission(
         done.written.append(f"{task.channel}/{task.topic}: accepted")
     if not recorded:
         client.send_to_channel(root.channel, root.topic,
-                               acceptance_note(done.evidence, done.by_id, done.by_name, done.after))
+                               acceptance_note(done.evidence, done.by_id, done.by_name, done.after,
+                                               done.on_behalf))
         done.written.append(f"{root.channel}/{root.topic}: acceptance #{done.evidence}")
     client.send_to_channel(root.channel, root.topic, note(STATE_TAG, MISSION_DONE))
     done.written.append(f"{root.channel}/{root.topic}: done")

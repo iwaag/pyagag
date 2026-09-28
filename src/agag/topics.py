@@ -39,6 +39,7 @@ from .delivery import DeliveryError, deliver, redeliver
 from .execopt import ExecOptions, Selection
 from .memo import is_memo_channel
 from .continuation import CONTINUATION_GUIDE, continuation_note, split_continuation
+from .people import speaker_label
 from .post import PROGRESS, REPORT, RESPONSE_REQUEST, PostMeta, combine, compose, label as post_label, parse_post
 from .reply import (
     OWED_OUTPUT_CHARS, REPLY_ATTEMPTS, REPLY_GUIDE, failure_line, owed_reply, record_reply_outcome, resolve_reply,
@@ -201,6 +202,10 @@ def format_chatlog(messages: list[dict], self_id: int, *, drop=None) -> str:
         if own and drop is not None and drop(content):
             continue
         speaker = message.get("sender_full_name") or f"user{message.get('sender_id')}"
+        if not own:
+            # A proxy says whose authority it carries on every line it speaks
+            # (`agag.people`, failsafe p6 ex2), so no serving decides it afresh.
+            speaker = speaker_label(message.get("sender_id"), speaker)
         if own:
             speaker = f"{speaker} (you)"
         text, meaning = post_label(content, names.get, message.get("id"))

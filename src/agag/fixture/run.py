@@ -325,6 +325,7 @@ class Trial:
             posted = responder.post(self.board, probe.channel, probe.topic, self_id,
                                     f"@**{probe.speaker}** {reply}")
             servings.append({"reply": reply, "marked": bool(split.reply), "tool_calls": list(calls())})
+            responder.deliver(self.board)
             answers = [m for m in responder.posts_since(self.board, mark)
                        if m["sender_id"] != self_id and f"@**{name}**" in m["content"]]
             mark = posted

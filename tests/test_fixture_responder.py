@@ -10,7 +10,7 @@ import pytest
 from agag import chat
 from agag.fixture import PROBES, build_store, judge
 from agag.fixture.board import AUTOLAB, FRONT, NAMES
-from agag.fixture.responder import Canned, make_overlay, posts_since
+from agag.fixture.responder import Canned, deliver, make_overlay, posts_since
 from agag.fixture.run import client
 from agag.mirror.reads import FixtureRefused
 
@@ -34,6 +34,8 @@ def test_a_send_is_recorded_and_answered_on_the_overlay_only(boards):
     before = _digest(store)
     newest = client(overlay).store.newest_id()
     sent = client(overlay).send_to_channel("pj-growbox", "workplan-growbox-pump", "how long does the pump run?")
+    assert [m["id"] for m in posts_since(overlay, newest)] == [sent]  # answered once the serving is over
+    assert deliver(overlay) == [sent + 1] and deliver(overlay) == []
     after = posts_since(overlay, newest)
     assert [m["id"] for m in after] == [sent, sent + 1]
     assert after[1]["sender_id"] == AUTOLAB and after[1]["content"] == f"@**Front** Twenty seconds. Answers #{sent}."
@@ -49,12 +51,14 @@ def test_only_a_post_addressing_the_agent_takes_its_next_line(boards):
     board.send_to_channel("pj-aisvgs", "notes", "nobody is asked here")
     board.send_to_channel("pj-aisvgs", "notes", "[selfnote][rootchat] front/x #1 rel=work")
     assert [m["sender_id"] for m in posts_since(overlay, newest)] == [FRONT, FRONT]
+    assert deliver(overlay) == []
     board.send_to_channel("autolab-agstudio1", "q", "a question in autolab's own channel")
     board.send_to_channel("pj-aisvgs", "notes", "@**autolab-agstudio1** and you?")
+    deliver(overlay)
     senders = [m["sender_id"] for m in posts_since(overlay, newest)]
-    assert senders == [FRONT, FRONT, FRONT, AUTOLAB, FRONT, AUTOLAB]
+    assert senders == [FRONT, FRONT, FRONT, FRONT, AUTOLAB, AUTOLAB]
     board.send_to_channel("autolab-agstudio1", "q", "the script is spent")
-    assert posts_since(overlay, newest)[-1]["sender_id"] == FRONT
+    assert deliver(overlay) == []
 
 
 def test_other_writes_stay_refused_on_the_overlay(boards):
@@ -76,6 +80,7 @@ def test_agentchat_send_on_the_overlay_writes_the_root_note_first(boards, monkey
     out = io.StringIO()
     assert chat.main(["send", "pj-growbox", "workplan-growbox-pump", "--intent", "response_request", "--to",
                       "autolab-agstudio1", "--ask", "question", "the pump?"], out=out, err=io.StringIO()) == 0
+    deliver(overlay)
     posts = posts_since(overlay, newest)
     assert posts[0]["content"].startswith("[selfnote][rootchat] front/front-desk-fixture-pump")
     assert "to=11" in posts[1]["content"] and posts[2]["sender_id"] == AUTOLAB

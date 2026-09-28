@@ -10,9 +10,13 @@ marked with the probe's script. On an overlay, and only there:
   overlay — root note and message, as the realm would hold them — and the
   fixture store the trial started from is never opened for writing;
 - each post the served agent sends that addresses a scripted agent (names it
-  with `@**name**`, is posted in its channel, or asks it with `to=<id>`)
-  takes that agent's next scripted line, which is posted right after it by
-  that agent: a canned answer, or a question that asks for a decision;
+  with `@**name**`, is posted in its channel or under one of its topic
+  prefixes, or asks it with `to=<id>`) takes that agent's next scripted
+  line: a canned answer, or a question that asks for a decision. The line is
+  posted by that agent in the same topic **when the serving is over**
+  (`deliver`), never during it, because a real answer arrives after the
+  asking serving has ended (a first version answered at once, and the run
+  read the answer in the same serving);
 - every other write is still refused, so the board stays the same between
   runs.
 
@@ -34,7 +38,7 @@ from pathlib import Path
 
 from agag.mirror.store import Store
 
-__all__ = ["OVERLAY_META", "Canned", "is_overlay", "make_overlay", "post", "posts_since", "record_send"]
+__all__ = ["OVERLAY_META", "Canned", "deliver", "is_overlay", "make_overlay", "post", "posts_since", "record_send"]
 
 #: The store meta key an overlay carries: its script and how far it got.
 OVERLAY_META = "fixture_overlay"
@@ -100,11 +104,30 @@ def record_send(path: Path, channel: str, topic: str, content: str) -> int:
             if step is not None:
                 index, canned = step
                 asker = f"@**{store.get_meta('full_name') or self_id}**"
-                _append(store, channel, topic, int(state["agents"][canned["agent"]]),
-                        canned["text"].format(ask=ident, asker=asker))
                 state["used"].append(index)
+                state.setdefault("pending", []).append({
+                    "channel": channel, "topic": topic, "sender": int(state["agents"][canned["agent"]]),
+                    "content": canned["text"].format(ask=ident, asker=asker)})
                 store.set_meta(OVERLAY_META, json.dumps(state, ensure_ascii=False))
             return ident
+    finally:
+        store.close()
+
+
+def deliver(path: Path) -> list[int]:
+    """Post the scripted answers the last serving's sends asked for. They
+    wait until the serving is over, as a real answer does: an agent asked
+    during a serving answers after it has ended, and the answer brings the
+    asker back as a new serving (the callback)."""
+    store = Store(Path(path))
+    try:
+        with store.transaction():
+            state = json.loads(store.get_meta(OVERLAY_META) or "{}")
+            posted = [_append(store, line["channel"], line["topic"], line["sender"], line["content"])
+                      for line in state.get("pending") or []]
+            state["pending"] = []
+            store.set_meta(OVERLAY_META, json.dumps(state, ensure_ascii=False))
+            return posted
     finally:
         store.close()
 

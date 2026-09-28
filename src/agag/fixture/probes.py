@@ -16,16 +16,33 @@ asked about a request it did not open.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 
-from .board import M_CONTROL_LOOP, M_GERMINATION, M_PROTOPREY_V02
+from dataclasses import replace
+
+from .board import BOARD_VERSION, EARLIER_NAMES, M_CONTROL_LOOP, M_GERMINATION, M_PROTOPREY_V02
 from .responder import Canned
+
+#: A reply that asks the Developer which or what study they mean — the
+#: failure p1's board probes were written against. "教えてください" alone is
+#: not it: p3 found it as a closing courtesy ("進捗があれば教えてください") in
+#: correct replies (agent_guide p3 ex1).
+ASKS_WHAT_THE_STUDY_IS = (
+    r"(どの|どれ|どちら|どういう|どんな|何の|なんの)[^。？?\n]{0,15}"
+    r"(調査|研究|プロジェクト|study|project|grow ?box|もの|こと|件)[^。？?\n]{0,15}"
+    r"(教えて|でしょうか|ですか|指して)",
+    r"(何|なに)を(指して|意味して)",
+    r"(?i)\b(which|what) (study|project|grow ?box)\b[^.?\n]{0,40}\?",
+    r"(?i)what do you mean by",
+)
 
 #: The missions the probes name (board 2 renamed them: m20390, m20402, m20455 on board 1).
 GERMINATION, CONTROL_LOOP, V02 = f"m{M_GERMINATION}", f"m{M_CONTROL_LOOP}", f"m{M_PROTOPREY_V02}"
 
-__all__ = ["DRIVERS", "PROBES", "Probe", "judge"]
+__all__ = ["ASKS_WHAT_THE_STUDY_IS", "DRIVERS", "PROBES", "Probe", "for_board", "judge", "rule_digest"]
 
 #: The module that serves an agent's probes, run from that agent's checkout
 #: with its own venv: `.venv/bin/python -m <driver> <probe> --out <dir>`.
@@ -43,6 +60,9 @@ class Probe:
     text: str
     must: tuple[tuple[str, ...], ...]
     must_not: tuple[str, ...] = ()
+    #: Like `must_not`, as regular expressions over the reply: a phrase that
+    #: fails only in one use (`ASKS_WHAT_THE_STUDY_IS`).
+    must_not_patterns: tuple[str, ...] = ()
     #: Facts looked for and reported, but not part of the pass rule: what a
     #: trial wants to see measured that no guide in scope is meant to change.
     observe: tuple[tuple[str, ...], ...] = ()
@@ -84,7 +104,8 @@ PROBES = {p.name: p for p in (
         must=(("pj-aisvgs", "routine-study-aisvgs", "sage:aisvgs"),
               ("round 2", "round2", "ラウンド2", "第2", "strand 5", "strands 5", "5–7", "5-7"),
               ("round 3", "round3", "ラウンド3", "第3", "researchplan-aisvgs-round3")),
-        must_not=("見つかりません", "記録がありません", "教えてください", "no record"),
+        must_not=("見つかりません", "記録がありません", "no record"),
+        must_not_patterns=ASKS_WHAT_THE_STUDY_IS,
         observe=(("study-aisvgs-round3", "自分で", "ご自身で", "by hand", "yourself", "回さない"),),
         note=("#15673's wording. Passes when the reply finds the study and its rounds on the board and says round 3 "
               "is planned and not started (p1's pass for run-0169). Observed, not required: whether it also carries "
@@ -94,11 +115,12 @@ PROBES = {p.name: p for p in (
     Probe(
         name="growbox-thing", agent="agfront", role="desk", channel="front", topic="front-desk-fixture-growbox",
         text="あのgrow boxのやつ、いまどこまで進んでる？",
-        must=(("pj-growbox",),
+        must=(("pj-growbox", "routine-study-growbox", "sage:growbox"),
               ("germination", "発芽"),
               ("food safety", "food-safety", "食品安全", "衛生"),
               ("control loop", "control-loop", "制御", CONTROL_LOOP)),
-        must_not=("教えてください", "どのプロジェクト"),
+        must_not=("どのプロジェクト",),
+        must_not_patterns=ASKS_WHAT_THE_STUDY_IS,
         note="Passes when the reply names the study, the two accepted strands and the control-loop mission running now.",
     ),
     Probe(
@@ -191,10 +213,10 @@ PROBES = {p.name: p for p in (
                 Canned("autolab-agstudio1", "{asker} Set: lights 12 h a day (06:00–18:00) in "
                        "`main/control/schedule.toml` at `b41d0e7`; the task goes on with it. Answers #{ask}.\n\n"
                        "`ag-post intent=report re={ask}`", topics=("workplan-", "workrun-"))),
-        must=(("12 h", "12時間", "12 hours", "12h", "06:00", "b41d0e7"),),
+        must=(("12 h", "12時間", "12 時間", "12 hours", "12h", "06:00", "b41d0e7"),),
         must_not=("16時間にしました", "16 h a day was set"),
         tools_must=(("agentchat send",),),
-        sends_must=(("12 h", "12時間", "12 hours", "12h", "12-hour", "twelve"),),
+        sends_must=(("12 h", "12時間", "12 時間", "12 hours", "12h", "12-hour", "twelve"),),
         servings_min=3,
         note=("Front answers a response_request from the fixture agent. autolab's scripted first answer asks Front to "
               "choose (16 h or 12 h of light); the Developer said to take the cheaper one. Passes when a later serving "
@@ -247,6 +269,8 @@ def judge(probe: Probe, reply: str, tool_calls: list[str] | None = None, *, send
     `servings` how many there were."""
     met = [(spellings, _found(reply, spellings)) for spellings in probe.must]
     against = [s for s in probe.must_not if s.casefold() in reply.casefold()]
+    against += [f"said: {m.group(0)}" for pattern in probe.must_not_patterns
+                if (m := re.search(pattern, reply)) is not None]
     missing = [" / ".join(spellings) for spellings, hit in met if hit is None]
     calls = "\n".join(tool_calls or ())
     for spellings in probe.tools_must:
@@ -262,6 +286,36 @@ def judge(probe: Probe, reply: str, tool_calls: list[str] | None = None, *, send
     if servings < probe.servings_min:
         missing.append(f"servings: {servings} of at least {probe.servings_min}")
     observed = {" / ".join(spellings): _found(reply, spellings) for spellings in probe.observe}
-    return {"probe": probe.name, "passed": not missing and not against,
+    return {"probe": probe.name, "rule": rule_digest(probe), "passed": not missing and not against,
             "met": [hit for _, hit in met if hit is not None], "missing": missing, "against": against,
             "observed": observed, "chars": len(reply)}
+
+
+def rule_digest(probe: Probe) -> str:
+    """Twelve hex digits naming the probe's pass rule: equal digests judged
+    by the same rule (agent_guide p3 ex1: a result says what judged it)."""
+    rule = [probe.must, probe.must_not, probe.must_not_patterns, probe.tools_must, probe.tools_must_not,
+            probe.sends_to_must_not, probe.sends_must, probe.servings_min]
+    return hashlib.sha1(json.dumps(rule, ensure_ascii=False).encode()).hexdigest()[:12]
+
+
+def for_board(probe: Probe, version: int) -> Probe:
+    """The probe's rule in the names of board `version`: a mission a later
+    board renamed is spelled as that board called it (board 1's m20402 is
+    today's control-loop mission). The standard is the same rule."""
+    names = EARLIER_NAMES.get(version) if version != BOARD_VERSION else None
+    if not names:
+        return probe
+
+    def spell(text: str) -> str:
+        for now, then in names.items():
+            text = re.sub(rf"(?<![A-Za-z0-9_])m{now}(?!\d)", f"m{then}", text)
+        return text
+
+    def groups(rule):
+        return tuple(tuple(spell(s) for s in group) for group in rule)
+
+    return replace(probe, text=spell(probe.text), must=groups(probe.must),
+                   must_not=tuple(spell(s) for s in probe.must_not), tools_must=groups(probe.tools_must),
+                   tools_must_not=tuple(spell(s) for s in probe.tools_must_not),
+                   sends_to_must_not=tuple(spell(s) for s in probe.sends_to_must_not), sends_must=groups(probe.sends_must))

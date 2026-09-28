@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 
 import pytest
 
@@ -218,3 +219,72 @@ def test_the_store_carries_the_board_version(store, tmp_path):
         handle.set_meta("fixture_version", "")
     handle.close()
     assert board_version(old) == 1  # a store from before the stamp
+
+
+# --- agent_guide p3 ex1 step 2: spellings, and judging saved results again ------------
+
+
+def test_a_closing_courtesy_is_not_asking_what_the_study_is():
+    probe = PROBES["aisvgs-sufficient"]
+    found = "pj-aisvgs の round 2（strands 5–7）まで完了し、round 3 は計画のみです。"
+    assert judge(probe, found + "進捗があれば教えてください。")["passed"]
+    assert judge(probe, found + "もし追加で調べてほしい点があれば教えてください。")["passed"]
+    for asks in ("「AISVGs」がどの調査のことか教えてください。", "どのプロジェクトのことでしょうか？",
+                 "AISVGs とは何を指していますか？", "Which study do you mean?"):
+        verdict = judge(probe, found + asks)
+        assert not verdict["passed"] and verdict["against"][0].startswith("said: "), asks
+    assert judge(probe, found + "round 3 をどちらで進めるのがよろしいでしょうか。")["passed"]  # a choice, not "what"
+
+
+def test_the_study_is_named_by_any_of_its_places_and_twelve_hours_with_a_space():
+    good = "routine-study-growbox で追っています: 発芽と food safety は完了、制御ループが進行中です。"
+    assert judge(PROBES["growbox-thing"], good)["passed"]
+    assert not judge(PROBES["growbox-thing"], good.replace("routine-study-growbox", "grow box"))["passed"]
+    probe = PROBES["delegate-decision"]
+    assert judge(probe, "12 時間/日で設定されました（b41d0e7）", ["Bash: agentchat send pj-growbox x"],
+                 sends=["12 時間/日にしてください。"], servings=3)["passed"]
+
+
+def test_a_rule_reads_the_names_of_the_board_it_judges():
+    from agag.fixture.probes import for_board
+
+    old = for_board(PROBES["guard-status"], 1)
+    assert old.must[0][0] == "m20402" and old.text.startswith("m20402 ")
+    assert for_board(PROBES["guard-status"], BOARD_VERSION) is PROBES["guard-status"]
+    assert judge(old, "m20402: 14 件中 9 件")["passed"]
+
+
+def _saved(tmp_path, name, **fields):
+    directory = tmp_path / name
+    directory.mkdir()
+    (directory / "outcome.json").write_text(json.dumps(fields, ensure_ascii=False), encoding="utf-8")
+    return directory / "outcome.json"
+
+
+def test_rejudge_applies_todays_rule_to_a_saved_result(tmp_path):
+    from agag.fixture.rejudge import rejudge, rejudge_all
+
+    # p3's miss: a correct reply failed on a closing courtesy.
+    courtesy = _saved(tmp_path, "a", probe="aisvgs-sufficient", passed=False, met=["pj-aisvgs", "round 2", "round 3"],
+                      missing=[], against=["教えてください"], tool_calls=[],
+                      reply="pj-aisvgs は round 2 まで完了、round 3 は計画のみ。進捗があれば教えてください。")
+    result = rejudge(courtesy)
+    assert (result.board, result.before, result.after, result.changed) == (1, False, True, True)
+    # The first delegate-answer asked another question: its verdict names facts today's rule does not hold.
+    other = _saved(tmp_path, "b", probe="delegate-answer", passed=False, met=[], tool_calls=[], reply="",
+                   missing=["4 hours / 4時間 / 4 h / 4h / four hours", "tool call: agentchat send"])
+    assert rejudge(other).skipped.startswith("other rule: ")
+    # A board-1 status reply naming m20402 still passes, in board 1's names.
+    status = _saved(tmp_path, "c", probe="guard-status", passed=True, met=["m20402", "14"], missing=[], against=[],
+                    tool_calls=["Bash: agentchat read pj-growbox workplan-growbox-control-loop"],
+                    reply="m20402 は 14 件中 9 件まで読んでいます。")
+    assert rejudge(status).after is True
+    _saved(tmp_path, "d", probe="growbox-thing", dry_run=True, passed=False, reply="")
+    assert [r.probe for r in rejudge_all([tmp_path])] == ["aisvgs-sufficient", "delegate-answer", "guard-status"]
+
+
+def test_a_verdict_names_the_rule_that_judged_it():
+    from agag.fixture.probes import rule_digest
+
+    verdict = judge(PROBES["growbox-thing"], "")
+    assert verdict["rule"] == rule_digest(PROBES["growbox-thing"]) != rule_digest(PROBES["forge-protoprey"])

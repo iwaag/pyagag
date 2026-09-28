@@ -67,6 +67,10 @@ ACK = "Message received. Please wait for the reply."
 M_AISVGS_R1, M_AISVGS_R2 = 20301, 20355
 M_GERMINATION, M_FOOD_SAFETY, M_CONTROL_LOOP = 20420, 20460, 20510
 M_PROTOPREY_V01, M_PROTOPREY_V02 = 20550, 20600
+#: What an earlier board called the missions this one renamed, so a rule can
+#: judge a result by the names of the board it ran on (`probes.for_board`).
+EARLIER_NAMES = {1: {M_GERMINATION: 20390, M_FOOD_SAFETY: 20396, M_CONTROL_LOOP: 20402, M_PROTOPREY_V01: 20410,
+                     M_PROTOPREY_V02: 20455}}
 T0 = 1_790_300_000  # 2026-09-25, a quiet morning
 
 

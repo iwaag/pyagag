@@ -13,6 +13,7 @@ a line naming the fixture.
     python -m agag.fixture consistency <dir>  # what the board says against what it records
     python -m agag.fixture probes             # the probes and their pass rules
     python -m agag.fixture check <probe> <reply file>   # a reply against its rule
+    python -m agag.fixture rejudge <out-dir>…    # today's rules over saved outcome.json files
 
 A probe that delegates is served on an **overlay**, the trial's own copy of
 the board, where `agentchat send` is recorded and answered by the probe's

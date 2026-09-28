@@ -406,3 +406,20 @@ def test_the_recorder_s_own_reply_reporting_the_decision_is_not_new_activity():
     assert again[0] == 0, "the same decision, still covering, converges"
     realm.post("front", m.desk, "@**Developer** by the way, a new finding.\n\n`ag-post intent=report`", FRONT)
     assert look(realm, m)[0].root.disposition["covered"] is False, "anything else Front says later is new"
+
+
+def test_a_task_its_owner_started_names_its_real_requester_for_agreement():
+    realm = Realm()
+    m = Mission(realm, "self-started")
+    # autolab starts task 2 itself: only its own root note is in the topic
+    topic = f"workrun-task2-m{m.mission}"
+    realm.post(m.channel, topic, f"[selfnote][task] {m.mission}#2", AUTOLAB)
+    realm.post(m.channel, topic, f"[selfnote][rootchat] pj-x/{m.plan_topic} #{m.mission} rel=work", AUTOLAB)
+    realm.post(m.channel, topic, f"[selfnote][start] #{m.plan_answer} for {FRONT} Front", AUTOLAB)
+    realm.post(m.channel, topic, ACK, AUTOLAB)
+    realm.post(m.channel, topic, "@**Front** task 2 is built; agree to it?", AUTOLAB)
+    result, card = look(realm, m)
+    task2 = next(n for n in result.nodes() if n.identity.endswith("#2"))
+    assert "Front" in task2.requesters
+    unit = next(u for u in progress._walk(card["root"]) if u["label"].endswith("#2"))
+    assert "autolab-agstudio1's agreement" not in unit["display"]["reason"]

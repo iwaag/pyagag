@@ -222,6 +222,7 @@ def _display(node: Node, kind: str, execution: dict, recovery: dict | None, *, n
     # Whoever asked for it: a task's owner writes a root note of its own (the
     # parent hop), which names itself, never its requester.
     askers = [entry.split(" #")[0] for entry in node.requested_by]
+    askers += [name for name in getattr(node, "requesters", []) or [] if name not in askers]
     requester = next((name for name in askers if name != node.owner), askers[0] if askers else "whoever asked")
 
     if hold is not None:

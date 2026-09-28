@@ -265,6 +265,11 @@ class Node:
     #: relation, decided_by, author}` — a citation (`reference`), or an
     #: `unknown` relation with the command that resolves it.
     relations: list[dict] = field(default_factory=list)
+    #: Who the answers here are owed to, by name — its root notes' authors
+    #: and, one hop up, the requester of the conversation it was opened for
+    #: (a task its owner started itself): the parties the trace checks
+    #: receipts against (failsafe p6 ex1: the panel named the owner).
+    requesters: list[str] = field(default_factory=list)
     #: The newest substantive post here — speech that is not an ack; not a
     #: selfnote, not a system notice (failsafe p6 ex1: a disposition covers
     #: activity up to its `upto`, and bookkeeping is not activity).
@@ -1436,6 +1441,7 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
             requesters += [row for row in requested if row[0] not in known]
             built = build(child, depth + 1, seen, False, requesters, handed)
             built.requested_by = [f"{link.author_name} #{link.note_id}" for link in notes_for]
+            built.requesters = list(dict.fromkeys(name for _, name, _ in requesters))
             node.children.append(built)
         _order_tasks(node)
         node.holder = _holder(node, ending)

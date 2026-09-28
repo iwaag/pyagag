@@ -359,7 +359,7 @@ def test_agentchat_receipt_prints_and_repairs(monkeypatch, tmp_path, capsys):
 
     realm, m = closed()
     m.mission_accepted()
-    monkeypatch.setattr(chat, "client_from_environment", lambda: realm)
+    monkeypatch.setattr(chat, "client_from_environment", lambda *a, **k: realm)
     monkeypatch.setenv("AGENTCHAT_JOURNAL", journal(tmp_path))
     assert chat.main(["receipt", str(m.closeout)]) == 0
     printed = capsys.readouterr().out

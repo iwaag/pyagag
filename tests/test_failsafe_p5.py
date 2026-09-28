@@ -272,7 +272,7 @@ def test_agentchat_reserve_records_the_person_s_own_words_where_they_said_them(m
     realm = Realm()
     study = Study(realm, "growbox", "b1")
     study.ask("Run it; I approve the result myself.")
-    monkeypatch.setattr(chat, "client_from_environment", lambda: realm)
+    monkeypatch.setattr(chat, "client_from_environment", lambda *a, **k: realm)
     monkeypatch.setenv("AGENTCHAT_HOME", f"front/{study.desk_topic}")
     monkeypatch.setenv("AGENTCHAT_HOME_ANCHOR", str(study.origin))
     assert chat.main(["reserve", "--evidence", str(study.origin)]) == 0
@@ -288,7 +288,7 @@ def _send(monkeypatch, realm, home, anchor, channel, topic, text):
     from agag import chat
 
     realm.me = FRONT
-    monkeypatch.setattr(chat, "client_from_environment", lambda: realm)
+    monkeypatch.setattr(chat, "client_from_environment", lambda *a, **k: realm)
     monkeypatch.setattr(chat, "join_and_record", lambda client, channel, topic, out: False)
     monkeypatch.setattr(chat, "refuse_resolved", lambda client, channel, topic: None)
     chat._ANCHORED.clear()

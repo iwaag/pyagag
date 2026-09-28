@@ -238,6 +238,20 @@ class Store:
             self._db.execute("PRAGMA synchronous=NORMAL")
             self._db.executescript(SCHEMA)
 
+    @classmethod
+    def open_readonly(cls, path: Path) -> "Store":
+        """The same queries over a store another process writes, opened
+        read-only: no schema script, no journal-mode change, and any write
+        fails. What `agentchat` reads a listener's live mirror through
+        (`agag.mirror.reads`, `agent_guide` p2 step 5)."""
+        store = cls.__new__(cls)
+        store.path = Path(path)
+        store._lock = threading.RLock()
+        store._db = sqlite3.connect(f"file:{store.path}?mode=ro", uri=True, check_same_thread=False,
+                                    isolation_level=None)
+        store._db.row_factory = sqlite3.Row
+        return store
+
     def close(self) -> None:
         with self._lock:
             self._db.close()

@@ -178,7 +178,7 @@ def test_agentchat_accept_says_what_it_did_and_refuses_out_loud(world, monkeypat
 
     realm, mission, accepted = world
     client = Client(realm, FRONT)
-    monkeypatch.setattr(chat, "client_from_environment", lambda: client)
+    monkeypatch.setattr(chat, "client_from_environment", lambda *a, **k: client)
     assert chat.main(["accept", str(mission)]) == 1
     assert "--evidence" in capsys.readouterr().err
     assert chat.main(["accept", str(mission), "--evidence", str(accepted)]) == 0

@@ -142,12 +142,12 @@ def provisioner(path: str | None = None) -> ZulipClient:
     return ZulipClient.from_env(env)
 
 
-def _self(client: ZulipClient | None) -> ZulipClient:
+def _self(client: ZulipClient | None, *, reads: bool = False) -> ZulipClient:
     if client is not None:
         return client
     from .chat import client_from_environment
 
-    return client_from_environment()
+    return client_from_environment(reads=reads)
 
 
 def board_agents(client) -> dict[str, int]:
@@ -690,7 +690,7 @@ def run(argv: list[str], *, client=None, admin=None, out=None, err=None) -> int:
             chosen = admin
             if chosen is None and (args.provisioner_env or os.environ.get(PROVISIONER_VARIABLE)):
                 chosen = provisioner(args.provisioner_env)
-            state = inspect_project(args.slug, _self(client), admin=chosen)
+            state = inspect_project(args.slug, _self(client, reads=True), admin=chosen)
             _print_state(state, out)
             if args.json:
                 print(json.dumps(state.as_dict(), indent=2, sort_keys=True), file=out)

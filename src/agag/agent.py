@@ -317,6 +317,10 @@ def chat_environment(
     # The listener journal (`agag.listen`): what `agentchat receipt` reads for
     # evidence that a serving of this agent was given an answer (failsafe p6).
     environment["AGENTCHAT_JOURNAL"] = str(spec.local / "mirror" / "listener.sqlite")
+    # The listener's own mirror (`agag.mirror`): `agentchat`'s look-only
+    # commands read the board from it instead of Zulip (`agent_guide` p2
+    # step 5). Unset or not yet built, they read Zulip as before.
+    environment["AGENTCHAT_MIRROR"] = str(spec.local / "mirror" / "mirror.sqlite")
     if home is not None:
         environment[selfnote.HOME_VARIABLE] = str(selfnote.Conversation(*home[:2]))
         # The post this serving was started for (`explicit_reply` p1 step

@@ -116,7 +116,7 @@ def _fresh_process(monkeypatch):
 
 
 def run(monkeypatch, argv, client):
-    monkeypatch.setattr(chat, "client_from_environment", lambda: client)
+    monkeypatch.setattr(chat, "client_from_environment", lambda *a, **k: client)
     out, err = io.StringIO(), io.StringIO()
     code = chat.main(argv, out=out, err=err)
     return code, out.getvalue(), err.getvalue()
@@ -787,7 +787,7 @@ def test_a_refused_send_leaves_a_note_in_the_run_s_home(monkeypatch):
         holders = {f"{chat.RESOLVED_TOPIC_PREFIX}{TOPIC}": 7}
 
     client = Resolved(calls)
-    monkeypatch.setattr(chat, "client_from_environment", lambda environ=None: client)
+    monkeypatch.setattr(chat, "client_from_environment", lambda environ=None, **k: client)
     monkeypatch.setenv("AGENTCHAT_HOME", "front/front-x")
     monkeypatch.delenv("AGENTCHAT_HOME_ANCHOR", raising=False)
     code = chat.main(["send", CHANNEL, TOPIC, "hello"], out=io.StringIO(), err=io.StringIO())
@@ -807,7 +807,7 @@ def test_a_failed_read_records_nothing(monkeypatch):
         def topic_history(self, channel, topic, num_before=50):
             raise ZulipError("timed out")
 
-    monkeypatch.setattr(chat, "client_from_environment", lambda environ=None: Broken(calls))
+    monkeypatch.setattr(chat, "client_from_environment", lambda environ=None, **k: Broken(calls))
     monkeypatch.setenv("AGENTCHAT_HOME", "front/front-x")
     assert chat.main(["read", CHANNEL, TOPIC], out=io.StringIO(), err=io.StringIO()) == 1
     assert not [c for c in calls if c[0] == "send"]

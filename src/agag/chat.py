@@ -74,6 +74,13 @@ def _bare_topic(topic: str) -> str:
 
 
 ENV_VARIABLE = "AGENTCHAT_ZULIP_ENV"
+#: A mirror store (`<instance>/.local/mirror/mirror.sqlite`) the look-only
+#: commands read from instead of Zulip; set for every run by
+#: `agag.agent.chat_environment`, or pointed at a fixture board for a trial.
+MIRROR_VARIABLE = "AGENTCHAT_MIRROR"
+#: The commands answered from that mirror. `recheck` is not among them: its
+#: verdict is acted on at once, so it reads Zulip itself.
+MIRROR_READS = ("read", "topics", "channels", "intro", "options", "trace")
 DEFAULT_READ_COUNT = 30
 #: How far back `send` looks for a root note of ours before writing one.
 ROOTCHAT_LOOKBACK = 200
@@ -81,6 +88,8 @@ ROOTCHAT_LOOKBACK = 200
 __all__ = [
     "DEFAULT_READ_COUNT",
     "ENV_VARIABLE",
+    "MIRROR_READS",
+    "MIRROR_VARIABLE",
     "AgentChatError",
     "build_parser",
     "channel_lines",
@@ -121,8 +130,9 @@ Commands — `agentchat <command> --help` says what each one prints and means
   Look (free: nobody is served)
     intro [<agent>]                 every agent with its pitch; one agent's contract, verbatim
     channels [--prefix <prefix>]    every channel with its own description of itself
-    topics <channel>                a channel's conversations, most recent first; '✔' = resolved
-    read <channel> <topic>          one conversation with message ids; --since <id> for what is new
+    topics <channel> [--prefix p]   a channel's conversations, most recent first; '✔' = resolved
+    read <channel> <topic>…         conversations with message ids; several topics, or --latest N
+                                    [--prefix p] of a channel, in one call; --since <id> for what is new
     trace [<message id>]            where a request stands: every conversation opened for it, what is owed
     recheck <anchor> --after <ack>  whether stopped work has moved since a stop report was written
     options [<agent>]               how each agent can be asked to execute, as it published it
@@ -242,13 +252,46 @@ class AgentChatError(RuntimeError):
     """The command cannot run as asked."""
 
 
-def client_from_environment(environ=None) -> ZulipClient:
+def client_from_environment(environ=None, *, reads: bool = False) -> ZulipClient:
     """Build the client from the credentials file `AGENTCHAT_ZULIP_ENV` names.
+
+    With `reads` (a command that only looks) and a mirror store named by
+    `AGENTCHAT_MIRROR`, the reads are answered from that store and only what
+    it cannot answer goes to Zulip (`agag.mirror.reads`, `agent_guide` p2
+    step 5). A fixture store answers every command, reads or not: it has no
+    live side, so nothing a trial run does reaches the realm.
 
     The failure message names the variable, because an agent that hits this
     can only be helped by knowing what was supposed to be set for it.
     """
     environ = os.environ if environ is None else environ
+    mirror = _mirror_reads(environ, reads)
+    if mirror is not None:
+        return mirror
+    return _live_client(environ)
+
+
+def _mirror_reads(environ, reads: bool):
+    """The `MirrorReads` this command should use, or None for the live client."""
+    reference = environ.get(MIRROR_VARIABLE, "").strip()
+    if not reference:
+        return None
+    path = Path(os.path.expanduser(reference))
+    if not path.is_file():
+        return None
+    from .mirror.reads import MirrorReads
+
+    try:
+        found = MirrorReads(path, live=lambda: _live_client(environ))
+    except Exception:  # noqa: BLE001 - an unreadable store is the live client's job
+        return None
+    if found.fixture or (reads and found.usable):
+        return found
+    found.store.close()
+    return None
+
+
+def _live_client(environ) -> ZulipClient:
     reference = environ.get(ENV_VARIABLE, "").strip()
     if not reference:
         raise AgentChatError(
@@ -716,23 +759,38 @@ def build_parser() -> argparse.ArgumentParser:
 
     read = subcommands.add_parser(
         "read",
-        help="show recent messages of one channel's topic",
+        help="show recent messages of one or more of a channel's topics",
         formatter_class=_RAW,
         description=_doc(
             "Print one conversation, oldest message first, each with its "
             "sender, its message id and its UTC timestamp. The ids are how "
             "you refer to what was actually said, and what --since takes, so "
             "a long conversation can be followed one step at a time.",
+            "Several conversations in one call: name several topics of the "
+            "channel, or none with --latest N for the channel's N most "
+            "recently active ones (--prefix keeps only names that start with "
+            "it, e.g. workplan-). Each is printed under a '== #channel › "
+            "topic ==' line; --count and --since apply to each. One call is "
+            "one command: no shell loop is needed (a loop over topics was "
+            "refused by the harness in agent_guide p1's trials, runs 0170 and "
+            "0171).",
             "Reading serves nobody and costs nobody anything. The agents' "
             "bookkeeping lines are hidden unless --all.",
             "A topic somebody marked resolved is renamed '✔ <topic>'. Keep "
             "using the name you know: reading follows the topic across that "
             "rename. A resolved conversation is finished — read its result "
             "there.",
+            "  agentchat read pj-growbox workplan-growbox-r1\n"
+            "  agentchat read pj-growbox workplan-growbox-r1 workplan-growbox-r2 --count 10\n"
+            "  agentchat read pj-growbox --latest 5 --prefix workplan-",
         ),
     )
     read.add_argument("channel", help="channel name, without the leading '#'")
-    read.add_argument("topic", help="topic name")
+    read.add_argument("topic", nargs="*", help="one or more topic names (none with --latest)")
+    read.add_argument("--latest", type=int, default=0, metavar="N",
+                      help="read the channel's N most recently active topics (✔ ones included)")
+    read.add_argument("--prefix", default=None,
+                      help="with --latest: only topics whose name (without ✔) starts with this")
     read.add_argument(
         "--count", type=int, default=DEFAULT_READ_COUNT,
         help=f"how many recent messages to show (default {DEFAULT_READ_COUNT})",
@@ -915,8 +973,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--since", type=int, default=None, metavar="MESSAGE_ID",
         help=(
             "show only what is newer than this message id, instead of the "
-            "last --count messages; nothing new prints nothing and still "
-            "succeeds"
+            "last --count messages; nothing new prints one line saying so "
+            "and still succeeds"
         ),
     )
 
@@ -926,10 +984,14 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Print the channel's topic names, most recently active first. "
             "A name starting with '✔' is a conversation somebody marked "
-            "resolved."
+            "resolved. --prefix keeps the names that start with it, ✔ or "
+            "not (`--prefix workplan-` lists a project's missions). "
+            "`agentchat read <channel> --latest N` reads them."
         ),
     )
     topics.add_argument("channel", help="channel name, without the leading '#'")
+    topics.add_argument("--prefix", default=None,
+                        help="only topics whose name (without ✔) starts with this, e.g. workplan-, routinerun-")
 
     channels = subcommands.add_parser(
         "channels",
@@ -1247,6 +1309,51 @@ def unanswered_request(history, me: dict) -> str | None:
     )
 
 
+def _with_prefix(names: list[str], prefix: str | None) -> list[str]:
+    """Topic names whose bare name starts with `prefix` (all without one)."""
+    if not prefix:
+        return list(names)
+    return [n for n in names if _bare_topic(n).startswith(prefix)]
+
+
+def read_targets(client, args) -> list[str]:
+    """The topic names one `read` covers: those given, or the channel's
+    `--latest` N (optionally by `--prefix`), newest first. One call, so a
+    run never needs a shell loop for it (`agent_guide` p2 step 5)."""
+    if args.latest < 0:
+        raise AgentChatError("--latest must be at least 1")
+    if args.topic and args.latest:
+        raise AgentChatError("give topic names or --latest N, not both")
+    if args.prefix and not args.latest:
+        raise AgentChatError("--prefix goes with --latest (or use `agentchat topics <channel> --prefix …`)")
+    if args.topic:
+        return list(dict.fromkeys(args.topic))
+    if not args.latest:
+        raise AgentChatError("name a topic, several topics, or --latest N (`agentchat topics <channel>` lists them)")
+    names = _with_prefix(client.channel_topics(client.stream_id(args.channel)), args.prefix)
+    seen: dict[str, str] = {}
+    for name in names:
+        seen.setdefault(_bare_topic(name), name)  # an open twin and its ✔ name are one conversation
+    chosen = list(seen.values())[:args.latest]
+    if not chosen:
+        where = f" starting with {args.prefix}" if args.prefix else ""
+        raise AgentChatError(f"no topics{where} in #{args.channel}")
+    return chosen
+
+
+def _read_one(client, args, topic: str) -> str:
+    """One conversation as `read` prints it, or the line saying it is empty."""
+    if args.since is not None:
+        messages = _visible(messages_since(client, args.channel, topic, args.since), args.all)
+        if not messages:
+            return f"nothing newer than message {args.since} in #{args.channel} > {topic}"
+    else:
+        messages = _visible(topic_messages(client, args.channel, topic, args.count), args.all)
+        if not messages:
+            return f"no messages in #{args.channel} > {topic}"
+    return format_messages(messages)
+
+
 def _run(args, client: ZulipClient, out) -> int:
     if args.command == "send":
         text = " ".join(args.text).strip()
@@ -1270,25 +1377,13 @@ def _run(args, client: ZulipClient, out) -> int:
     if args.command == "read":
         if args.count < 1:
             raise AgentChatError("--count must be at least 1")
-        if args.since is not None:
-            messages = _visible(
-                messages_since(client, args.channel, args.topic, args.since), args.all
-            )
-            if not messages:
-                print(
-                    f"nothing newer than message {args.since} in "
-                    f"#{args.channel} > {args.topic}",
-                    file=out,
-                )
-                return 0
-        else:
-            messages = _visible(
-                topic_messages(client, args.channel, args.topic, args.count), args.all
-            )
-            if not messages:
-                print(f"no messages in #{args.channel} > {args.topic}", file=out)
-                return 0
-        print(format_messages(messages), file=out)
+        names = read_targets(client, args)
+        several = len(names) > 1 or bool(args.latest)
+        blocks = []
+        for name in names:
+            text = _read_one(client, args, name)
+            blocks.append(f"== #{args.channel} › {name} ==\n{text}" if several else text)
+        print("\n\n".join(blocks), file=out)
         return 0
     if args.command == "recheck":
         from .trace import recheck as recheck_work, recheck_lines
@@ -1538,9 +1633,10 @@ def _run(args, client: ZulipClient, out) -> int:
         print("the human is expected to speak there next; do not post into it again from this run", file=out)
         return 0
     if args.command == "topics":
-        names = client.channel_topics(client.stream_id(args.channel))
+        names = _with_prefix(client.channel_topics(client.stream_id(args.channel)), args.prefix)
         if not names:
-            print(f"no topics in #{args.channel}", file=out)
+            where = f" starting with {args.prefix}" if args.prefix else ""
+            print(f"no topics{where} in #{args.channel}", file=out)
             return 0
         print("\n".join(names), file=out)
         return 0
@@ -1589,7 +1685,7 @@ def main(argv: list[str] | None = None, out=None, err=None) -> int:
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
     client = None
     try:
-        client = client_from_environment()
+        client = client_from_environment(reads=args.command in MIRROR_READS)
         return _run(args, client, out)
     except (AgentChatError, ZulipError) as error:
         print(f"agentchat: {error}", file=err)

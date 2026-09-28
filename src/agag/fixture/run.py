@@ -55,6 +55,8 @@ from .probes import PROBES, Probe, judge
 __all__ = ["DRY_REPLY", "PROBE_ID", "Trial", "TrialError", "client", "fixture_environment", "guides_at", "newest",
            "outcome", "probe_history", "record_facts", "record_facts_all", "session_log", "tool_calls", "trial_parser"]
 
+#: The harness a `--replies` trial falls back to once its files are used.
+_REAL_HARNESS = agent_module.run_harness
 #: The probe post's id: above every id the board holds.
 PROBE_ID = 30_001
 #: A scripted conversation is served at most this many times.
@@ -215,6 +217,10 @@ def trial_parser(prog: str, description: str, agent: str) -> argparse.ArgumentPa
                         help="leave out pyagag's shared guide sections (the composition before agent_guide p2)")
     parser.add_argument("--dry-run", action="store_true",
                         help="build the serving and write its prompt to <out>/prompt.md; run no model")
+    parser.add_argument("--replies", type=Path, nargs="+", default=None, metavar="FILE",
+                        help="each serving's run answers the next file's text instead of a model (its prompt goes "
+                             "to <out>/prompt-<n>.md); after the last file the model runs — a stub run, for "
+                             "reproducing a reply exactly and seeing what the model does next")
     parser.add_argument("--records", type=Path, default=None,
                         help="where the serving's workspace and run record go (default: <out>/records); never the "
                              "checkout's .local/, where the relay counts runs as live")
@@ -234,8 +240,10 @@ class Trial:
     dry_run: bool
     records: Path
     #: The trial's own copy of the board, for a probe with a responder script
-    #: (`agag.fixture.responder`); None otherwise.
+    #: (`agag.fixture.responder`) or a claim check; None otherwise.
     overlay: Path | None = None
+    #: Fixed run outputs, one per serving (`--replies`), in place of a model.
+    replies: tuple[Path, ...] = ()
 
     @classmethod
     def start(cls, args: argparse.Namespace, repository: Path) -> "Trial":
@@ -260,11 +268,12 @@ class Trial:
                 raise SystemExit(f"trial: {error}") from None
         probe = PROBES[args.probe]
         overlay = None
-        if probe.script:
+        if probe.script or probe.claims:
             overlay = responder.make_overlay(store, out / "overlay", probe.script,
                                              {name: ident for ident, name in NAMES.items()})
         return cls(probe=probe, out=out, store=store, guides=guides, guides_rev=args.guides_rev or "",
-                   shared=not args.no_shared, dry_run=bool(args.dry_run), records=records, overlay=overlay)
+                   shared=not args.no_shared, dry_run=bool(args.dry_run), records=records, overlay=overlay,
+                   replies=tuple(Path(r).resolve() for r in (getattr(args, "replies", None) or ())))
 
     @property
     def board(self) -> Path:
@@ -282,6 +291,8 @@ class Trial:
                 stack.enter_context(_patched(topics_module, "shared_sections", lambda names: ""))
             if self.dry_run:
                 stack.enter_context(_patched(agent_module, "run_harness", self._dry_harness))
+            elif self.replies:
+                stack.enter_context(_patched(agent_module, "run_harness", self._scripted_harness))
             yield self
 
     def _dry_harness(self, agent, prompt, *, cwd, **_):
@@ -289,10 +300,23 @@ class Trial:
         print(f"prompt: {len(prompt)} chars, workspace {cwd}")
         return HarnessResult(output=DRY_REPLY, exit_code=0, meta={"dry_run": True})
 
+    def _scripted_harness(self, agent, prompt, *, cwd, **kwargs):
+        """`--replies`: the next file's text is the run's whole output; once
+        they are used up, the real harness runs (a stub first serving, then
+        the model answering what the stub left: failsafe p7's repair)."""
+        used = int(getattr(self, "_replies_used", 0))
+        self._replies_used = used + 1
+        (self.out / f"prompt-{used + 1}.md").write_text(prompt, encoding="utf-8")
+        if used >= len(self.replies):
+            return _REAL_HARNESS(agent, prompt, cwd=cwd, **kwargs)
+        text = self.replies[used].read_text(encoding="utf-8")
+        return HarnessResult(output=text, exit_code=0, meta={"scripted": str(self.replies[used])})
+
     def facts(self) -> dict:
         return {"guides": str(self.guides or "(this checkout's)"), "guides_rev": self.guides_rev,
                 "shared": self.shared, "store": str(self.store), "dry_run": self.dry_run,
-                "records_root": str(self.records), "overlay": str(self.overlay or "")}
+                "records_root": str(self.records), "overlay": str(self.overlay or ""),
+                "replies": [str(r) for r in self.replies]}
 
     def converse(self, serve, calls) -> int:
         """A scripted probe's whole conversation, served as its listener
@@ -310,23 +334,37 @@ class Trial:
         me = board.whoami()
         self_id, name = int(me["user_id"]), str(me["full_name"])
         speaker = next((ident for ident, who in NAMES.items() if who == probe.speaker), DEV)
-        asked = responder.post(self.board, probe.channel, probe.topic, speaker, probe.text)
+        if probe.text:
+            asked = responder.post(self.board, probe.channel, probe.topic, speaker, probe.text)
+        else:
+            # The probe is the conversation as it stands on the board.
+            asked = _newest(self.board)
         servings: list[dict] = []
         extra: tuple[tuple[str, str], ...] = ()
+        from agag import claims as claim_rules
+
+        check = claim_rules.ClaimCheck.from_host() if probe.claims else None
         while len(servings) < MAX_SERVINGS:
+            before = _newest(self.board)
             context = TopicContext(board, probe.channel, probe.topic, self_id, name,
                                    history=board.topic_history(probe.channel, probe.topic, 200), extra_threads=extra)
-            with self.session():
+            with self.session(), _patched(claim_rules, "NOTICE_SOURCE", self._open_claims(self_id) if check else None):
                 result = serve(context)
             split = split_reply(result.output or "")
             reply = split.reply if split.reply else (result.output or "")
             # Delivered home as the listener would: to the person who asked.
             posted = responder.post(self.board, probe.channel, probe.topic, self_id,
                                     f"@**{probe.speaker}** {reply}")
-            servings.append({"reply": reply, "marked": bool(split.reply), "tool_calls": list(calls())})
+            serving = {"reply": reply, "marked": bool(split.reply), "tool_calls": list(calls())}
+            if check is not None:
+                serving["claims"] = self._check_claims(check, self_id, before, posted, reply if split.ok else "")
+            servings.append(serving)
             responder.deliver(self.board)
             answers = [m for m in responder.posts_since(self.board, posted)
                        if m["sender_id"] != self_id and f"@**{name}**" in m["content"]]
+            if (serving.get("claims") or {}).get("note"):
+                extra = ()
+                continue  # the listener's start note serves the agent again: the notice is the trigger
             if not answers:
                 break
             extra = ((answers[-1]["display_recipient"], answers[-1]["subject"]),)
@@ -335,6 +373,9 @@ class Trial:
                  and (m["display_recipient"], m["subject"]) != (probe.channel, probe.topic)]
         every_call = [c for serving in servings for c in serving["tool_calls"]]
         verdict = judge(probe, servings[-1]["reply"], every_call, sends=sends, servings=len(servings))
+        if check is not None:
+            verdict = {**verdict, "claims": [s.get("claims") for s in servings],
+                       "claims_final": _claims_final(servings)}
         result = {**verdict, "marked": servings[-1]["marked"], **self.facts(), "servings": servings, "sends": sends,
                   "tool_calls": every_call, "reply": servings[-1]["reply"],
                   **record_facts_all(self.records)}
@@ -345,6 +386,38 @@ class Trial:
                          indent=1))
         return 0 if result["passed"] else 2
 
+    def _open_claims(self, self_id: int):
+        from agag import claims as claim_rules
+
+        probe = self.probe
+        return lambda: claim_rules.open_claims(_BoardMirror(self.board).messages(probe.channel, probe.topic), self_id)
+
+    def _check_claims(self, check, self_id: int, before: int, posted: int, reply: str) -> dict:
+        """The listener's check (`agag.claims.check_served`) on this serving,
+        over the overlay: its window is the bot's posts after `before` and
+        before the reply `posted`; a mismatch is written into the overlay."""
+        from agag import claims as claim_rules
+
+        words = claim_rules.reply_words(reply)
+        if not words:
+            return {"state": "skipped"}
+        if check.reader is None:
+            return {"state": "unchecked", "problem": check.problem}
+        try:
+            claims = check.reader.read(words)
+        except claim_rules.ReaderError as error:
+            return {"state": "unchecked", "problem": str(error)}
+        probe = self.probe
+        served = claim_rules.Served(serving=0, reply=int(posted), after=int(before), place=(probe.channel, probe.topic),
+                                    live=probe.topic, requester=next((i for i, n in NAMES.items() if n == probe.speaker), None),
+                                    requester_name=probe.speaker, owned=True)
+        lines: list[str] = []
+        outcome = claim_rules.check_served(
+            claims, served, mirror=_BoardMirror(self.board), self_id=self_id,
+            send=lambda channel, topic, text: responder.post(self.board, channel, topic, self_id, text),
+            log=lines.append)
+        return {**outcome, "log": lines}
+
     def finish(self, output: str, *, records: Path | None = None, calls: list[str] | None = None, **facts) -> int:
         """Judge `output` under the probe's rule, beside the newest run
         record in `records` and the run's tool calls; print the verdict and
@@ -354,6 +427,85 @@ class Trial:
                          tool_calls=list(calls or ()))
         print(json.dumps({k: v for k, v in result.items() if k != "reply"}, ensure_ascii=False, indent=1))
         return 0 if result["passed"] else 2
+
+
+def _newest(path: Path) -> int:
+    from agag.mirror.store import Store
+
+    store = Store.open_readonly(Path(path))
+    try:
+        return int(store.newest_id() or 0)
+    finally:
+        store.close()
+
+
+def _claims_final(servings: list[dict]) -> str:
+    """The whole conversation's claim outcome: `clean` when no serving was
+    found claiming what it did not do; else how the last mismatch ended."""
+    states = [(s.get("claims") or {}).get("state") for s in servings]
+    if "mismatch" not in states:
+        return next((x for x in states if x not in ("clean", "skipped")), "clean")
+    log = " ".join(line for s in servings for line in (s.get("claims") or {}).get("log") or [])
+    for word in ("recorded", "corrected", "escalated"):
+        if word in log:
+            return f"mismatch, then {word}"
+    return "mismatch"
+
+
+class _BoardMirror:
+    """The reads `agag.claims` makes of a listener's mirror, answered from a
+    trial's overlay store (opened per call: the overlay is written between)."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+
+    @property
+    def store(self):
+        from agag.mirror.store import Store
+
+        return _Closing(Store.open_readonly(self.path))
+
+    def message(self, message_id: int):
+        with self.store as store:
+            return store.message(int(message_id))
+
+    def notes(self, *, tag=None, channel=None, **_):
+        with self.store as store:
+            stream_id = None
+            if channel is not None:
+                found = store.channel(channel)
+                if found is None:
+                    return []
+                stream_id = found.stream_id
+            return store.notes(tag=tag, stream_id=stream_id)
+
+    def messages(self, channel: str, topic: str, across_resolve: bool = True, **_):
+        from agag.zulip import RESOLVED_TOPIC_PREFIX
+
+        with self.store as store:
+            found = store.channel(channel)
+            if found is None:
+                return []
+            bare = topic[len(RESOLVED_TOPIC_PREFIX):] if topic.startswith(RESOLVED_TOPIC_PREFIX) else topic
+            rows = {m.id: m for name in (bare, RESOLVED_TOPIC_PREFIX + bare) for m in store.messages(found.stream_id, name)}
+            return [rows[i] for i in sorted(rows)]
+
+
+class _Closing:
+    """A read-only store that closes after one `with`, and passes every
+    other attribute through (`messages_by_sender`, `newest_id`)."""
+
+    def __init__(self, store):
+        self._store = store
+
+    def __enter__(self):
+        return self._store
+
+    def __exit__(self, *exc):
+        self._store.close()
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
 
 
 @contextlib.contextmanager

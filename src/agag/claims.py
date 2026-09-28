@@ -77,6 +77,8 @@ __all__ = [
     "OllamaReader",
     "ReaderError",
     "Record",
+    "Served",
+    "check_served",
     "claim_note",
     "claims_of",
     "judge",
@@ -492,6 +494,103 @@ def notice(claims: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# --- one delivered serving, checked (the listener's and the fixture's) --------------
+
+
+@dataclass
+class Served:
+    """What the check needs about one delivered serving: its reply's id, the
+    window's start (the ack, else the mirror's newest id when it opened),
+    where the reply went (`place`, and its name now, `live`), whom it
+    answered, and whether its listener serves that conversation by itself
+    (`owned`: only then can a start note bring the repair)."""
+
+    serving: int
+    reply: int
+    after: int
+    place: tuple[str, str]
+    live: str
+    requester: int | None = None
+    requester_name: str = ""
+    owned: bool = True
+    ack: int = 0
+
+
+def check_served(claims: list[Claim], served: Served, *, mirror, self_id: int, send, is_ack=lambda content: False,
+                 log=lambda line: None) -> dict:
+    """Judge what the reply claims against the serving's window and the
+    records already made; settle the open claims this serving answered;
+    write a new mismatch (`[claim]`, and the owner's `[start]` when it is
+    `owned`). `send(channel, topic, text) -> id` posts as the agent's bot.
+    Returns the outcome: `state` clean|mismatch, what was read, found and
+    missing, the window, and the claim note's id."""
+    window = window_records(mirror, self_id, served.after, served.reply, home=served.place,
+                            exclude=(served.ack,), is_ack=is_ack)
+    missing, found = judge(claims, window, mirror=mirror, self_id=self_id, home=served.place, before=served.reply)
+    conversation = mirror.messages(served.place[0], served.live, across_resolve=True)
+    missing = _settle(served, conversation, missing, window, mirror=mirror, self_id=self_id, send=send, log=log)
+    outcome = {"state": "mismatch" if missing else "clean", "read": [c.as_dict() for c in claims], "found": found,
+               "missing": missing, "window": [r.as_dict() for r in window]}
+    if missing:
+        outcome["note"] = _write(served, missing, found, attempt=1, send=send, log=log)
+    log(f"claims of #{served.reply}: {len(claims)} read, {len(found)} on record"
+        + (f", {len(missing)} MISSING ({', '.join(m['act'] for m in missing)})" if missing else ""))
+    return outcome
+
+
+def _settle(served: Served, conversation, missing: list[dict], window, *, mirror, self_id: int, send, log) -> list[dict]:
+    """The open claims this serving was the answer to — written before it
+    began, so its prompt carried them — are settled: `recorded` when every
+    missing act now has its record, else `corrected` when this reply does
+    not claim them again, else the repeat is attempt 2 and nothing more is
+    served. Returns this serving's own mismatches that are not a repeat."""
+    rest = list(missing)
+    place, live = served.place, served.live
+    for claim in open_claims(conversation, self_id):
+        if claim["id"] >= served.after:
+            continue
+        still = []
+        for item in claim.get("missing") or []:
+            again = Claim(item.get("act", "send"), int(item.get("target") or 0), str(item.get("where") or ""),
+                          str(item.get("quote") or ""))
+            gone, _ = judge([again], window, mirror=mirror, self_id=self_id, home=place, before=served.reply + 1)
+            still += gone
+        if not still:
+            send(place[0], live, settled_note(claim["id"], "recorded", served.reply))
+            log(f"claim #{claim['id']} settled: recorded (reply #{served.reply})")
+            continue
+        if claim["state"] == "escalated":
+            continue  # told once already; only its record closes it now
+        repeated = [m for m in rest if any(m["act"] == s["act"] for s in still)]
+        if repeated:
+            rest = [m for m in rest if m not in repeated]
+            _write(served, repeated, [], attempt=2, of=claim["id"], send=send, log=log)
+            log(f"claim #{claim['id']} repeated by #{served.reply}: escalated, nothing more served")
+        else:
+            send(place[0], live, settled_note(claim["id"], "corrected", served.reply))
+            log(f"claim #{claim['id']} settled: corrected by #{served.reply}")
+    return rest
+
+
+def _write(served: Served, missing: list[dict], found: list[dict], *, attempt: int, send, log, of: int = 0) -> int:
+    from .selfnote import start_note
+
+    document = {"reply": served.reply, "serving": served.serving, "attempt": attempt,
+                "window": [served.after, served.reply], "requester": served.requester,
+                "requester_name": served.requester_name, "missing": missing, "found": found}
+    if of:
+        document["of"] = int(of)
+    note_id = int(send(served.place[0], served.live, claim_note(document)) or 0)
+    if attempt == 1 and note_id and served.owned:
+        # The notice is the trigger: the owner's own start note, whose
+        # `because` is the claim — never the decision the false reply answered.
+        send(served.place[0], served.live, start_note(note_id, int(served.requester or 0), served.requester_name))
+    elif attempt == 1:
+        log(f"claim #{note_id} is in {served.place[0]}/{served.live}, which its listener does not serve by itself: "
+            "no repair serving; the trace shows it owed")
+    return note_id
+
+
 # --- the checker --------------------------------------------------------------------
 
 
@@ -540,6 +639,12 @@ class ClaimCheck:
                    mirror_wait=float(check.get("mirror_wait") or 15))
 
 
+#: Where a serving outside a listener reads its open claims from: the
+#: fixture kit sets it for a trial (`agag.fixture.run`), a callable
+#: returning the open claims of the conversation being served.
+NOTICE_SOURCE = None
+
+
 def notice_for_current() -> str:
     """The notice for the serving bound to this thread: the open claims in
     its home, read off the running listener's mirror. Empty outside a
@@ -547,6 +652,11 @@ def notice_for_current() -> str:
     from . import serving as serving_record
     from .listen import current_mirror
 
+    if NOTICE_SOURCE is not None:
+        try:
+            return notice(NOTICE_SOURCE())
+        except Exception:  # noqa: BLE001 - a notice never fails a serving
+            return ""
     try:
         journal = serving_record.current()
         record = journal.serving() if journal is not None and hasattr(journal, "serving") else None

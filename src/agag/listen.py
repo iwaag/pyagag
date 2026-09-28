@@ -1277,84 +1277,18 @@ class Listener:
             return unchecked(str(error))
         home = (record.home_channel or record.channel, record.home_topic or record.topic)
         reply_place = (record.reply_channel or home[0], record.reply_topic or home[1])
-        after = int(record.ack_id or 0) or int(extra.get("window_from") or 0)
-        window = claim_rules.window_records(self.mirror, self.self_id, after, int(record.delivered_id),
-                                            home=reply_place, exclude=(record.ack_id,), is_ack=self.is_ack)
-        missing, found = claim_rules.judge(claims, window, mirror=self.mirror, self_id=self.self_id,
-                                           home=reply_place, before=int(record.delivered_id))
         live = self._home_live(record, Conversation(*reply_place))
-        conversation = self.mirror.messages(reply_place[0], live, across_resolve=True)
-        missing = self._settle_claims(record, conversation, missing, window, reply_place, live, after)
-        outcome = {"state": "mismatch" if missing else "clean", "tries": tries,
-                   "read": [c.as_dict() for c in claims], "found": found, "missing": missing,
-                   "window": [r.as_dict() for r in window]}
-        if missing:
-            outcome["note"] = self._write_claim(record, missing, found, after, reply_place, live, attempt=1)
-        self._claims_outcome(record, outcome)
-        self.log(f"claims of #{record.delivered_id}: {len(claims)} read, {len(found)} on record"
-                 + (f", {len(missing)} MISSING ({', '.join(m['act'] for m in missing)})" if missing else ""))
+        served = claim_rules.Served(
+            serving=int(record.id), reply=int(record.delivered_id),
+            after=int(record.ack_id or 0) or int(extra.get("window_from") or 0), ack=int(record.ack_id or 0),
+            place=reply_place, live=live, requester=record.requester_id, requester_name=record.requester_name or "",
+            owned=topic_matches(reply_place[0], live, self.topic_filter))
+        outcome = claim_rules.check_served(claims, served, mirror=self.mirror, self_id=self.self_id,
+                                           send=lambda channel, topic, text: int(
+                                               self.client.send_to_channel(channel, topic, text) or 0),
+                                           is_ack=self.is_ack, log=self.log)
+        self._claims_outcome(record, {**outcome, "tries": tries})
         return outcome["state"]
-
-    def _settle_claims(self, record: Serving, conversation, missing: list[dict], window, place, live: str,
-                       after: int) -> list[dict]:
-        """The open claims this serving was the answer to — written before
-        it began, so its prompt carried them — are settled: `recorded` when
-        every missing act now has its record, else `corrected` when this
-        reply does not claim them again, else the repeat is attempt 2 and
-        nothing more is served. Returns this serving's own mismatches that
-        are not a repeat."""
-        from . import claims as claim_rules
-
-        rest = list(missing)
-        for claim in claim_rules.open_claims(conversation, self.self_id):
-            if claim["id"] >= after:
-                continue
-            still = []
-            for item in claim.get("missing") or []:
-                again = claim_rules.Claim(item.get("act", "send"), int(item.get("target") or 0),
-                                          str(item.get("where") or ""), str(item.get("quote") or ""))
-                gone, _ = claim_rules.judge([again], window, mirror=self.mirror, self_id=self.self_id, home=place,
-                                            before=int(record.delivered_id) + 1)
-                still += gone
-            if not still:
-                self._send_note(place, live, claim_rules.settled_note(claim["id"], "recorded", int(record.delivered_id)))
-                self.log(f"claim #{claim['id']} settled: recorded (reply #{record.delivered_id})")
-                continue
-            if claim["state"] == "escalated":
-                continue  # told once already; only its record closes it now
-            repeated = [m for m in rest if any(m["act"] == s["act"] for s in still)]
-            if repeated:
-                rest = [m for m in rest if m not in repeated]
-                self._write_claim(record, repeated, [], after, place, live, attempt=2, of=claim["id"])
-                self.log(f"claim #{claim['id']} repeated by #{record.delivered_id}: escalated, nothing more served")
-            else:
-                self._send_note(place, live, claim_rules.settled_note(claim["id"], "corrected", int(record.delivered_id)))
-                self.log(f"claim #{claim['id']} settled: corrected by #{record.delivered_id}")
-        return rest
-
-    def _write_claim(self, record: Serving, missing: list[dict], found: list[dict], after: int, place, live: str,
-                     *, attempt: int, of: int = 0) -> int:
-        from . import claims as claim_rules
-        from .selfnote import start_note
-
-        document = {"reply": int(record.delivered_id), "serving": int(record.id), "attempt": attempt,
-                    "window": [int(after), int(record.delivered_id)], "requester": record.requester_id,
-                    "requester_name": record.requester_name, "missing": missing, "found": found}
-        if of:
-            document["of"] = int(of)
-        note_id = self._send_note(place, live, claim_rules.claim_note(document))
-        if attempt == 1 and note_id and topic_matches(place[0], live, self.topic_filter):
-            # The notice is the trigger: our own start note, whose `because`
-            # is the claim — never the decision the false reply answered.
-            self._send_note(place, live, start_note(note_id, int(record.requester_id or 0),
-                                                    record.requester_name or ""))
-        elif attempt == 1:
-            self.log(f"claim #{note_id} is in {place[0]}/{live}, which this listener does not serve by itself: "
-                     "no repair serving; the trace shows it owed")
-        return note_id
-
-    def _send_note(self, place, live: str, text: str) -> int:
-        return int(self.client.send_to_channel(place[0], live, text) or 0)
 
     def _claims_outcome(self, record: Serving, outcome: dict) -> None:
         current = self.queue.serving(record.id) or record

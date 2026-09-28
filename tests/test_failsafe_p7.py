@@ -402,3 +402,40 @@ def test_the_trace_shows_an_open_claim_and_escalation_is_a_candidate_for_observe
     assert [c.kind for c in stall_candidates(result, now=1000 + C.REPAIR_SECONDS)] == ["claim"]
     shown = card(result, now=1100)
     assert shown["state"] == "waiting" and "claim #6" in shown["reason"] and shown["claims"][0]["id"] == 6
+
+
+# --- the trial kit runs the same check (step 5) -------------------------------------------------
+
+
+def test_a_claim_probe_on_the_fixture_is_checked_and_served_again_with_the_notice(tmp_path, monkeypatch):
+    """`agfront.trial hold-release --replies <run-0183's output>` in small:
+    the kit keeps the run's writes on an overlay, runs the listener's check
+    (`claims.check_served`), writes the mismatch there and serves the
+    conversation again — with the notice in the prompt, as a start note
+    would — and a correction settles it."""
+    from agag import agent as agent_module
+    from agag.fixture.run import Trial, trial_parser
+
+    monkeypatch.setattr(C.ClaimCheck, "from_host", classmethod(lambda cls, environ=None: C.ClaimCheck(
+        StubReader(lambda words: [C.Claim("release", 20116, "", "Released hold #20116")]
+                   if "Released" in words else []))))
+    first, second = tmp_path / "first.txt", tmp_path / "second.txt"
+    first.write_text("<ag-reply intent=report>\nReleased hold #20116; recorded the disposition.\n</ag-reply>\n")
+    second.write_text("<ag-reply intent=report>\nMy previous reply was wrong: nothing is recorded.\n</ag-reply>\n")
+    args = trial_parser("t", "", "agfront").parse_args(["hold-release", "--out", str(tmp_path / "out"),
+                                                        "--replies", str(first), str(second)])
+    trial = Trial.start(args, tmp_path)
+    prompts: list[str] = []
+
+    def serve(context):
+        prompt = topics.prompt_with_guide([], "guide", reply=True)
+        prompts.append(prompt)
+        result = agent_module.run_harness(None, prompt, cwd=tmp_path)
+        return topics.TopicResult(output=result.output)
+
+    status = trial.converse(serve, lambda: [])
+    outcome = __import__("json").loads((tmp_path / "out" / "outcome.json").read_text())
+    assert [c["state"] for c in outcome["claims"]] == ["mismatch", "clean"]
+    assert outcome["claims_final"] == "mismatch, then corrected"
+    assert "not on record" not in prompts[0] and "Released hold #20116" in prompts[1]
+    assert status == 2, "the probe itself fails: the stub ran no tool"

@@ -58,7 +58,11 @@ def client(store: Path) -> MirrorReads:
     return MirrorReads(Path(store))
 
 
-def probe_history(probe: Probe) -> list[dict]:
+def probe_history(probe: Probe, board=None) -> list[dict]:
+    """The probe's one post; or, for a probe with no text, its conversation
+    as it stands on the board (`board`, a fixture client)."""
+    if not probe.text and board is not None:
+        return board.topic_history(probe.channel, probe.topic, 200)
     sender = OBSERVER if probe.speaker == NAMES[OBSERVER] else DEV
     return [{"id": PROBE_ID, "type": "stream", "display_recipient": probe.channel, "subject": probe.topic,
              "sender_id": sender, "sender_full_name": probe.speaker, "sender_realm_str": "",
@@ -69,7 +73,7 @@ def outcome(probe: Probe, output: str, directory: Path, **facts) -> dict:
     """The marked reply, judged, written beside the run as `outcome.json`."""
     split = split_reply(output or "")
     reply = split.reply if split.reply else (output or "")
-    verdict = judge(probe, reply)
+    verdict = judge(probe, reply, facts.get("tool_calls"))
     result = {**verdict, "marked": bool(split.reply), **facts, "reply": reply}
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)

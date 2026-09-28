@@ -1679,10 +1679,29 @@ def record_failure(client, args, error, environ=None) -> None:
         pass
 
 
+#: The commands whose last positional is free words (`why`). argparse fills a
+#: positional once, so words given after the options — the form each help's
+#: own example shows, `hold <id> --for … --evidence <post> "why"` — were
+#: refused as unrecognized (agent_guide p2 step 7, a live hold's first try).
+WHY_COMMANDS = ("hold", "release", "disposition", "relation")
+
+
+def parse(parser: argparse.ArgumentParser, argv: list[str]):
+    """`parse_args`, except that words after the options of a `WHY_COMMANDS`
+    command join its `why`."""
+    args, extra = parser.parse_known_args(argv)
+    if extra:
+        if getattr(args, "command", None) in WHY_COMMANDS and not any(e.startswith("-") for e in extra):
+            args.why = list(getattr(args, "why", None) or []) + list(extra)
+        else:
+            parser.error(f"unrecognized arguments: {' '.join(extra)}")
+    return args
+
+
 def main(argv: list[str] | None = None, out=None, err=None) -> int:
     out = sys.stdout if out is None else out
     err = sys.stderr if err is None else err
-    args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    args = parse(build_parser(), sys.argv[1:] if argv is None else argv)
     client = None
     try:
         client = client_from_environment(reads=args.command in MIRROR_READS)

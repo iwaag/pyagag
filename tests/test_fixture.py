@@ -66,9 +66,23 @@ class _Spec:
 
 
 def test_every_probe_has_a_rule_and_a_home(store):
+    board = client(store)
     for probe in PROBES.values():
-        assert probe.must and probe.channel and probe.topic
-        assert probe_history(probe)[0]["subject"] == probe.topic
+        assert (probe.must or probe.tools_must) and probe.channel and probe.topic
+        assert probe_history(probe, board)[-1]["subject"].endswith(probe.topic)
+
+
+def test_a_probe_without_text_is_served_its_conversation_from_the_board(store):
+    history = probe_history(PROBES["receipt-owed"], client(store))
+    assert len(history) > 3 and "[Observer]" in history[-1]["content"]
+
+
+def test_tool_rules_judge_acts():
+    probe = PROBES["receipt-owed"]
+    assert judge(probe, "done", ["Bash: agentchat receipt 20110", "Bash: agentchat receipt 20110 --repair --because 20111"])["passed"]
+    assert not judge(probe, "done", ["Bash: agentchat receipt 20110"])["passed"]
+    assert not judge(probe, "done", ["Bash: agentchat receipt 20110 --repair",
+                                     "Bash: agentchat send front x '[selfnote][served] a 1'"])["passed"]
 
 
 def test_judge_names_what_is_missing():

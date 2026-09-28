@@ -185,3 +185,17 @@ def test_the_store_is_opened_read_only(tmp_path):
     store = Store.open_readonly(path)
     with pytest.raises(Exception):
         store.set_meta("x", "y")
+
+
+def test_why_after_the_options_is_the_why():
+    """The form every record command's help shows: `hold <id> --for … --evidence <post> "why"`
+    (agent_guide p2 step 7: a live run's first try was refused as unrecognized arguments)."""
+    parser = chat.build_parser()
+    args = chat.parse(parser, ["hold", "15835", "--for", "decision", "--evidence", "15835", "their own call"])
+    assert args.message_id == 15835 and args.why == ["their own call"] and args.purpose == "decision"
+    args = chat.parse(parser, ["release", "15837", "--evidence", "15842", "trial", "over"])
+    assert args.hold_id == 15837 and args.why == ["trial", "over"]
+    args = chat.parse(parser, ["disposition", "15835", "withdrawn", "--evidence", "15842", "trial over"])
+    assert args.kind == "withdrawn" and args.why == ["trial over"]
+    with pytest.raises(SystemExit):
+        chat.parse(parser, ["read", "c", "t", "--nope"])

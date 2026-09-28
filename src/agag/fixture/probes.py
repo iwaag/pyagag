@@ -34,6 +34,11 @@ class Probe:
     #: Facts looked for and reported, but not part of the pass rule: what a
     #: trial wants to see measured that no guide in scope is meant to change.
     observe: tuple[tuple[str, ...], ...] = ()
+    #: Rules over the run's tool calls (one line per call), for a probe whose
+    #: behaviour is an act, not words: each group needs one call matching any
+    #: of its substrings; no call may contain a `tools_must_not` substring.
+    tools_must: tuple[tuple[str, ...], ...] = ()
+    tools_must_not: tuple[str, ...] = ()
     note: str = ""
     speaker: str = "Developer"
     extra: dict = field(default_factory=dict)
@@ -104,6 +109,28 @@ PROBES = {p.name: p for p in (
               "waiting for the Developer."),
     ),
     Probe(
+        name="receipt-owed", agent="agfront", role="desk", channel="front", topic="front-desk-20260928-0800",
+        text="", speaker="agobserver-agstudio1",
+        must=(),
+        tools_must=(("agentchat receipt",), ("--repair",)),
+        tools_must_not=("[selfnote][receipt]", "[selfnote][served]"),
+        note=("The conversation is on the board: Front's answer from autolab was taken up (a later post of Front's "
+              "quotes it) but no receipt was written — what failsafe p6's `exit-before-receipt` leaves — and "
+              "Observer asks. Passes when the run inspects with `agentchat receipt` and repairs with `--repair` (the "
+              "fixture refuses the write; the attempt is the act judged), and never writes a receipt line itself."),
+    ),
+    Probe(
+        name="hold-release", agent="agfront", role="desk", channel="front", topic="front-desk-20260928-0900",
+        text="", speaker="Omni Agent",
+        must=(),
+        tools_must=(("agentchat release",), ("agentchat disposition",)),
+        tools_must_not=("[selfnote][hold]", "[selfnote][disposition]"),
+        note=("The conversation is on the board: the Developer's proxy asked for a hold, Front recorded it, and the "
+              "proxy now releases it and ends the request. Passes when the run records both — `agentchat release` "
+              "and `agentchat disposition` (the fixture refuses the writes; the attempts are the acts judged). p2's "
+              "live trial (#15842) failed here: one turn, no tool call, a reply saying both were recorded."),
+    ),
+    Probe(
         name="triage-unopened", agent="agobserver", role="triage", channel="pj-protoprey",
         topic="workplan-protoprey-locations", speaker="agobserver-agstudio1",
         text="",
@@ -122,11 +149,17 @@ def _found(text: str, spellings: tuple[str, ...]) -> str | None:
     return None
 
 
-def judge(probe: Probe, reply: str) -> dict:
-    """Which of the probe's facts the reply carries, and whether it passes."""
+def judge(probe: Probe, reply: str, tool_calls: list[str] | None = None) -> dict:
+    """Which of the probe's facts the reply (and its tool calls) carries, and
+    whether it passes."""
     met = [(spellings, _found(reply, spellings)) for spellings in probe.must]
     against = [s for s in probe.must_not if s.casefold() in reply.casefold()]
     missing = [" / ".join(spellings) for spellings, hit in met if hit is None]
+    calls = "\n".join(tool_calls or ())
+    for spellings in probe.tools_must:
+        if not any(s in calls for s in spellings):
+            missing.append("tool call: " + " / ".join(spellings))
+    against += [f"tool call: {s}" for s in probe.tools_must_not if s in calls]
     observed = {" / ".join(spellings): _found(reply, spellings) for spellings in probe.observe}
     return {"probe": probe.name, "passed": not missing and not against,
             "met": [hit for _, hit in met if hit is not None], "missing": missing, "against": against,

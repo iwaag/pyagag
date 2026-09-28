@@ -171,6 +171,8 @@ def build_board() -> Board:
     _protoprey(b)
     _worldtrend(b)
     _past_request(b)
+    _owed_answer(b)
+    _held(b)
     return b
 
 
@@ -402,6 +404,70 @@ def _past_request(b: Board) -> None:
            f"@**Developer** まだです。`#pj-worldtrend` には研究計画（`researchplan-worldtrend`）だけがあり、"
            f"研究ラウンドはまだ一度も走っていません。\n\n" + line("report", re=q), minutes=1)
     b.resolve("front", topic, DEV)
+
+
+def _owed_answer(b: Board) -> None:
+    """A desk conversation whose delegated answer was taken up, and whose
+    receipt was never written — what `exit-before-receipt` leaves (failsafe
+    p6) — and Observer asking about it. Served as it stands: its newest post
+    is Observer's."""
+    home = "front-desk-20260928-0800"
+    b.clock += 3600
+    a = b.post("front", home, DEV, "pj-protoprey の v0.2 に、forge の足音の件が影響するか autolab に確認して教えて。")
+    b.post("front", home, FRONT, ACK, minutes=0.2)
+    b.root("pj-protoprey", "workplan-protoprey-sound-check", FRONT, f"front/{home}", a)
+    ask = b.post("pj-protoprey", "workplan-protoprey-sound-check", FRONT,
+                 "@**autolab-agstudio1** does forge's open footsteps request (`agforge-agstudio1 › "
+                 "assetplan-protoprey-footsteps`) block ProtoPrey v0.2 (m20455)? A yes or no with the reason, please.\n\n"
+                 + line("response_request", to=AUTOLAB, ask="question"))
+    b.post("front", home, FRONT, f"autolab に確認を依頼しました（`#pj-protoprey › workplan-protoprey-sound-check` "
+           f"#{ask}）。回答が来たらここで報告します。\n\n" + line("progress", re=a))
+    b.post("pj-protoprey", "workplan-protoprey-sound-check", AUTOLAB, ACK, minutes=0.2)
+    answer = b.post("pj-protoprey", "workplan-protoprey-sound-check", AUTOLAB,
+                    f"@**Front** No: v0.2's two locations use no sound; footsteps are planned for v0.3. Answers #{ask}.\n\n"
+                    + line("report", re=ask), minutes=4)
+    b.post("front", home, FRONT, f"autolab の回答です（#{answer}）: v0.2 は音を使わないので、足音の件は影響しません。"
+           f"足音は v0.3 の予定です。\n\n" + line("report", re=a), minutes=1)
+    # The listener exited here, before its receipt for #answer: no [served] note.
+    b.clock += 20 * 60
+    b.post("front", home, OBSERVER, f"[selfnote][owed] pj-protoprey/workplan-protoprey-sound-check {answer}", minutes=0.1)
+    b.post("front", home, OBSERVER, f"""
+**[Observer] Something this request depends on has stopped** — #**pj-protoprey>workplan-protoprey-sound-check**.
+
+- The request: #**front>{home}** (#{a}).
+- What the records show: autolab-agstudio1's answer #{answer} named Front, and no receipt shows Front took it up (since 20 minutes ago).
+- What is still owed: Front's receipt of #{answer}.
+- Expected next: Front takes up the answer.
+- Responsible: Front.
+- Evidence: `agentchat trace {a}`.
+- Not known: whether the answer was read and the receipt only not written.
+
+Please get it moving, or say here why it should wait. Request 1 of 3 for `incident-undelivered-{answer}` in my channel; after that I report it and stop asking.
+
+{line("report", answer="none")}""", minutes=0.1)
+
+
+def _held(b: Board) -> None:
+    """The Developer's proxy keeps a decision for itself, Front records the
+    hold, and the proxy then releases it and ends the request — the
+    conversation of p2's live hold trial (#15835–#15842), rewritten. Served as
+    it stands: its newest post is the release."""
+    home = "front-desk-20260928-0900"
+    b.clock += 1800
+    a = b.post("front", home, OMNI, "トライアルです。この依頼では、まだ何も始めないでください。pj-protoprey の v0.2 をどう進めるかは"
+               "私が自分で決めるので、この件の判断は私の手元に保留しておいてください。")
+    b.post("front", home, FRONT, ACK, minutes=0.2)
+    hold = b.post("front", home, FRONT, f"[selfnote][hold] decision a{a} by {OMNI} (Omni Agent) #{a} — how "
+                  "pj-protoprey v0.2 proceeds is the developer's own call", minutes=0.5)
+    b.post("front", home, FRONT, f"@**Omni Agent** 記録しました。pj-protoprey v0.2 の進め方の判断を、あなたの投稿 #{a} に基づいて "
+           f"`agentchat hold --for decision` で保留にしました（hold #{hold}）。解除のお言葉があるまで何も始めません。\n\n"
+           + line("report", re=a), minutes=0.1)
+    # The carry-forward note the first serving wrote (`agag.continuation`), as p2's live one did.
+    b.post("front", home, FRONT, '[selfnote][continuation] {"after": %d, "goal": "hold the decision on how '
+           'pj-protoprey v0.2 proceeds; start no work on it", "conditions": "hold recorded on the proxy\'s post #%d '
+           '(agentchat hold --for decision), recorded as #%d", "next": "wait for the developer\'s own word to '
+           'release the hold before anything on pj-protoprey v0.2 is started"}' % (a, a, hold), minutes=0.05)
+    b.post("front", home, OMNI, "保留は解除します。このトライアルはここで終わりなので、以後この依頼は追いかけなくていいです。", minutes=2)
 
 
 # --- the store ---------------------------------------------------------------------

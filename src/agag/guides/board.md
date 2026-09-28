@@ -21,4 +21,5 @@ for them.
   `--prefix routine-` the routines. `agentchat topics <channel>` lists a
   channel's conversations.
 - A topic whose name begins with `✔` is finished: read its result there,
-  and do not post a second start into it.
+  and do not post a second start into it (front_desk, 2026-09-08: a second
+  start posted into a resolved task topic was bound to nothing).

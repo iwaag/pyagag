@@ -179,9 +179,18 @@ def decision(client, history: list[dict], owner: int | None, channel: str, topic
     """Who holds the acceptance of the mission whose conversation is
     `history`: its requester and everybody up the requester's root notes to
     the request's origin — or the one person who reserved it."""
+    from .relations import load as load_relations
+    from .selfnote import effective_rootchat_note
+
     found = Decision(conversations={(channel, _bare(topic))})
+    book = load_relations(client)
     speakers = [m for m in history if is_speech(m) and m.get("sender_id") != owner]
-    notes = [m for m in history if m.get("sender_id") != owner and parse_rootchat(m.get("content"))]
+    # Only a note that makes this conversation work for its home names a
+    # requester: a citation or a comment posted here while serving another
+    # request does not (failsafe p6 ex1 — #15357 made o11711's requester
+    # the holder of m8519's acceptance, in place of the Omni Agent).
+    notes = [m for m in history if m.get("sender_id") != owner and parse_rootchat(m.get("content"))
+             and book.of(m).adopts]
     requester = int((notes or speakers or [{}])[0].get("sender_id") or 0)
     found.requester = requester
     if not requester:
@@ -195,7 +204,8 @@ def decision(client, history: list[dict], owner: int | None, channel: str, topic
     while depth < CHAIN_DEPTH:
         depth += 1
         home = effective_rootchat(messages, asker)
-        if home is None:
+        mine = effective_rootchat_note(messages, asker)
+        if home is None or mine is None or not book.of(mine).adopts:
             break
         where, messages = _read(client, home)
         found.conversations.add((where.channel, _bare(where.topic)))
@@ -204,6 +214,9 @@ def decision(client, history: list[dict], owner: int | None, channel: str, topic
         # Whoever asked there: a root note of another agent, else the first
         # person who spoke that is not the asker.
         above = effective_rootchat(messages, asker)
+        above_note = effective_rootchat_note(messages, asker)
+        if above_note is not None and not book.of(above_note).adopts:
+            above = None  # a citation from here names no one further up
         first = next((m for m in messages if is_speech(m) and int(m.get("sender_id") or 0) != asker), None)
         if above is not None and (above.channel, _bare(above.topic)) != (where.channel, _bare(where.topic)):
             continue  # the same asker, one conversation further up (a run opened from a desk)

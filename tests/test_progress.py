@@ -19,9 +19,11 @@ from pathlib import Path
 
 from agag import progress
 from agag import trace as tracing
+from legacy_relations import migrated
 from agag.zulip import RESOLVED_TOPIC_PREFIX
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "progress_p1.json").read_text("utf-8"))
+FIXTURE["messages"] = migrated(FIXTURE["messages"])
 DEVELOPER = 8
 
 
@@ -306,7 +308,7 @@ def test_a_revised_plan_moves_the_denominator_and_says_so():
                     (13301, "pj-robustp1", "workplan-failsafe-p4-t2", 11, "autolab-agstudio1", "[selfnote][doc] 13300"),
                     (13302, "work-m13123", "workrun-task2-m13123", 11, "autolab-agstudio1", "[selfnote][task] 13123#2"),
                     (13303, "work-m13123", "workrun-task2-m13123", 11, "autolab-agstudio1",
-                     "[selfnote][rootchat] pj-robustp1/workplan-failsafe-p4-t2 #13123"),
+                     "[selfnote][rootchat] pj-robustp1/workplan-failsafe-p4-t2 #13123 rel=work"),
                     (13304, "work-m13123", "workrun-task2-m13123", 11, "autolab-agstudio1", "# task 2"))
     found = progress.card(tracing.trace(Realm(13304, rows), 13116, now=t + 5), now=t + 5, viewer_id=DEVELOPER)
     meter = unit(found, "plan")["meter"]
@@ -463,6 +465,7 @@ def test_a_card_is_about_the_deepest_unit_not_a_pass_through():
 
 
 TRIAL = json.loads((Path(__file__).parent / "fixtures" / "progress_p1_trial.json").read_text("utf-8"))
+TRIAL["messages"] = migrated(TRIAL["messages"])
 
 
 def test_an_answer_owed_to_a_runs_owner_is_held_by_that_owner_not_nobody():
@@ -581,6 +584,7 @@ def test_a_mission_done_by_record_is_accepted_while_its_last_word_waits_for_deli
 
 
 TRIAL_B = json.loads((Path(__file__).parent / "fixtures" / "progress_p1_trialB.json").read_text("utf-8"))
+TRIAL_B["messages"] = migrated(TRIAL_B["messages"])
 
 
 def test_a_plan_opened_beside_the_run_still_dates_the_studys_refresh():

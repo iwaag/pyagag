@@ -32,7 +32,7 @@ class Mission:
         r.post("front", self.desk, ACK, FRONT)
         r.post("front", self.desk, f"@**{NAMES[asker]}** asked autolab.\n\n" + line("report", end=self.origin + 1),
                FRONT)
-        r.post("pj-x", self.plan_topic, f"[selfnote][rootchat] front/{self.desk} #{self.origin}", FRONT)
+        r.post("pj-x", self.plan_topic, f"[selfnote][rootchat] front/{self.desk} #{self.origin} rel=work", FRONT)
         r.post("pj-x", self.plan_topic, f"@**autolab-agstudio1** mission: build {name}.", FRONT)
         r.post("pj-x", self.plan_topic, ACK, AUTOLAB)
         self.mission = r.post("pj-x", self.plan_topic, f"[selfnote][mission] {name}", AUTOLAB)
@@ -40,12 +40,12 @@ class Mission:
         self.task_topic = f"workrun-task1-m{self.mission}"
         self.channel = f"work-m{self.mission}"
         self.task = r.post(self.channel, self.task_topic, f"[selfnote][task] {self.mission}#1", AUTOLAB)
-        r.post(self.channel, self.task_topic, f"[selfnote][rootchat] pj-x/{self.plan_topic} #{self.mission}",
+        r.post(self.channel, self.task_topic, f"[selfnote][rootchat] pj-x/{self.plan_topic} #{self.mission} rel=work",
                AUTOLAB)
         self.plan_answer = r.post("pj-x", self.plan_topic, "@**Front** planned; task 1 is queued.\n\n"
                                   + line("report", end=0), AUTOLAB)
         r.post("front", self.desk, f"[selfnote][served] pj-x/{self.plan_topic} {self.plan_answer}", FRONT)
-        r.post(self.channel, self.task_topic, f"[selfnote][rootchat] front/{self.desk} #{self.origin}", FRONT)
+        r.post(self.channel, self.task_topic, f"[selfnote][rootchat] front/{self.desk} #{self.origin} rel=work", FRONT)
         r.post(self.channel, self.task_topic, "Start task 1.", FRONT)
         r.post(self.channel, self.task_topic, ACK, AUTOLAB)
         self.shown = r.post(self.channel, self.task_topic, "@**Front** built it; commit it?", AUTOLAB)
@@ -216,7 +216,7 @@ def test_citing_another_request_during_cleanup_adopts_nothing():
     realm, m = closed()
     m.mission_accepted()
     desk = Mission(realm, "desk")  # another request, whose run cleans up
-    note = realm.post("front", m.desk, f"[selfnote][rootchat] front/{desk.desk} #{desk.origin}", FRONT)
+    note = realm.post("front", m.desk, f"[selfnote][rootchat] front/{desk.desk} #{desk.origin} rel=reference", FRONT)
     realm.post("front", m.desk, "For the record: task 1's report was taken up here.", FRONT)
     cleanup = tracing.trace(realm, desk.origin, now=realm.clock + 60)
     assert m.desk not in {n.topic for n in cleanup.nodes()}, "the cited request is not the desk's work"
@@ -230,11 +230,11 @@ def test_a_conversation_opened_for_the_work_is_still_adopted():
     realm = Realm()
     origin = realm.post("front", "front-a", "Ask archsage about it.", DEV)
     realm.post("front", "front-a", ACK, FRONT)
-    realm.post("archsage-agstudio1", "study-a", f"[selfnote][rootchat] front/front-a #{origin}", FRONT)
+    realm.post("archsage-agstudio1", "study-a", f"[selfnote][rootchat] front/front-a #{origin} rel=work", FRONT)
     realm.post("archsage-agstudio1", "study-a", "@**archsage** what is known?", FRONT)
     # …and one Front began with speech, before its note (the order some sends take).
     realm.post("archsage-agstudio1", "study-b", "@**archsage** and this?", FRONT)
-    realm.post("archsage-agstudio1", "study-b", f"[selfnote][rootchat] front/front-a #{origin}", FRONT)
+    realm.post("archsage-agstudio1", "study-b", f"[selfnote][rootchat] front/front-a #{origin} rel=work", FRONT)
     topics = {n.topic for n in tracing.trace(realm, origin, now=realm.clock + 60).nodes()}
     assert {"study-a", "study-b"} <= topics
 
@@ -454,7 +454,7 @@ def test_a_hold_covers_only_its_work_and_new_obligations_stay_visible():
     ask = realm.post("front", m.desk, "I accept m1 myself.", DEV)
     _hold(realm, m, "acceptance", m.mission, ask)
     # New work in the same request: a second plan whose answer is owed.
-    realm.post("pj-x", "workplan-second", f"[selfnote][rootchat] front/{m.desk} #{m.origin}", FRONT)
+    realm.post("pj-x", "workplan-second", f"[selfnote][rootchat] front/{m.desk} #{m.origin} rel=work", FRONT)
     realm.post("pj-x", "workplan-second", "@**autolab-agstudio1** and a second thing.", FRONT)
     realm.post("pj-x", "workplan-second", ACK, AUTOLAB)
     second = realm.post("pj-x", "workplan-second", "[selfnote][mission] second", AUTOLAB)

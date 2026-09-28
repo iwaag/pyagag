@@ -73,14 +73,14 @@ def world():
     realm.add_channel(6, "pj-x")
     realm.add_channel(7, "work-m1")
     ask = post(realm, "front", "front-c", "Add --average, two tasks.", OMNI)
-    post(realm, "pj-x", "workplan-average", f"[selfnote][rootchat] front/front-c #{ask}", FRONT)
+    post(realm, "pj-x", "workplan-average", f"[selfnote][rootchat] front/front-c #{ask} rel=work", FRONT)
     post(realm, "pj-x", "workplan-average", "@**autolab-agstudio1** Plan and start --average.", FRONT)
     mission = post(realm, "pj-x", "workplan-average", "[selfnote][mission] x", AUTOLAB)
     post(realm, "pj-x", "workplan-average", "[selfnote][state] started", AUTOLAB)
     for serial in (1, 2):
         topic = f"workrun-task{serial}-m{mission}"
         post(realm, "work-m1", topic, f"[selfnote][task] {mission}#{serial}", AUTOLAB)
-        post(realm, "work-m1", topic, f"[selfnote][rootchat] pj-x/workplan-average #{mission}", AUTOLAB)
+        post(realm, "work-m1", topic, f"[selfnote][rootchat] pj-x/workplan-average #{mission} rel=work", AUTOLAB)
         post(realm, "work-m1", topic, f"# Task {serial}", AUTOLAB)
         post(realm, "work-m1", topic, f"@**Front** task {serial} done; please accept", AUTOLAB)
     accepted = post(realm, "front", "front-c", "Task 2 is accepted. That completes this mission from my side.", OMNI)
@@ -161,7 +161,7 @@ def test_every_refusal_writes_nothing(world, case):
         evidence = min(realm.messages)
     elif case == "unfinished task":
         post(realm, "work-m1", f"workrun-task3-m{mission}", f"[selfnote][task] {mission}#3", AUTOLAB)
-        post(realm, "work-m1", f"workrun-task3-m{mission}", f"[selfnote][rootchat] pj-x/workplan-average #{mission}",
+        post(realm, "work-m1", f"workrun-task3-m{mission}", f"[selfnote][rootchat] pj-x/workplan-average #{mission} rel=work",
              AUTOLAB)
     elif case == "cancelled":
         post(realm, "pj-x", "workplan-average", "[selfnote][state] cancelled", AUTOLAB)

@@ -205,7 +205,7 @@ def test_send_anchors_the_topic_to_the_home_conversation(monkeypatch):
     assert code == 0
     posts = [call for call in calls if call[0] == "send"]
     assert posts == [
-        ("send", CHANNEL, TOPIC, "[selfnote][rootchat] front/front-title-image"),
+        ("send", CHANNEL, TOPIC, "[selfnote][rootchat] front/front-title-image rel=work"),
         ("send", CHANNEL, TOPIC, "please draw"),
     ]
 
@@ -730,7 +730,7 @@ def test_ordinary_send_still_anchors_automatically(monkeypatch):
     code, _, _ = run(monkeypatch, ["send", CHANNEL, TOPIC, "please draw"], Client(calls))
     assert code == 0
     assert [call for call in calls if call[0] == "send"] == [
-        ("send", CHANNEL, TOPIC, "[selfnote][rootchat] front/front-title-image"),
+        ("send", CHANNEL, TOPIC, "[selfnote][rootchat] front/front-title-image rel=work"),
         ("send", CHANNEL, TOPIC, "please draw"),
     ]
 

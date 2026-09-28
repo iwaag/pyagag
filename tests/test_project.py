@@ -48,7 +48,7 @@ def test_a_new_study_is_created_with_every_member_and_a_structured_setup_request
     (plan,) = realm.topic("pj-aquaculture", "researchplan-aquaculture")
     assert plan["sender_id"] == ARCHSAGE and plan["content"].startswith("# Aquaculture")
     note, request = realm.topic("pj-aquaculture", "workplan-setup-aquaculture")
-    assert note["content"] == "[selfnote][rootchat] archsage-agstudio1/study-aquaculture #900"
+    assert note["content"] == "[selfnote][rootchat] archsage-agstudio1/study-aquaculture #900 rel=work"
     block = project.parse_setup(request["content"])
     assert block["pattern"] == "study" and block["slug"] == "aquaculture" and block["knowledge"] == "main"
     assert block["document"] == f"researchplan-aquaculture #{plan['id']}" and block["about"] == "fish farming"

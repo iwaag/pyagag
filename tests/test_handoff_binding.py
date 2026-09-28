@@ -278,7 +278,7 @@ def test_a_callback_serving_is_anchored_in_home_not_in_the_topic_that_called(tmp
 def test_a_root_note_with_an_anchor_round_trips_and_is_located_by_it():
     home = Conversation("front", "front-1", 7225)
     note = rootchat_note(home)
-    assert note == "[selfnote][rootchat] front/front-1 #7225"
+    assert note == "[selfnote][rootchat] front/front-1 #7225 rel=work"
     parsed = parse_rootchat(note)
     assert parsed == Conversation("front", "front-1") and parsed.anchor == 7225
     assert parse_rootchat("[selfnote][rootchat] front/front-1") == home and parse_rootchat(

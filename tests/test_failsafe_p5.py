@@ -82,7 +82,7 @@ def test_baseline_the_fixed_refresh_topic_returns_to_the_first_request():
     realm = Realm()
     setup, later = Study(realm, "growbox", "setup"), Study(realm, "growbox", "b1")
     setup.ask("Set the growbox study up.")
-    realm.post("archsage-agstudio1", "study-growbox", f"[selfnote][rootchat] front/{setup.desk_topic} #{setup.origin}",
+    realm.post("archsage-agstudio1", "study-growbox", f"[selfnote][rootchat] front/{setup.desk_topic} #{setup.origin} rel=work",
                FRONT)
     realm.post("archsage-agstudio1", "study-growbox", "@**archsage** please set it up.", FRONT)
     later.ask()
@@ -302,7 +302,7 @@ def test_a_topic_that_returns_to_another_request_is_refused_and_a_new_one_is_not
     setup, later = Study(realm, "growbox", "setup"), Study(realm, "growbox", "b1")
     setup.ask("Set the growbox study up.")
     realm.post("archsage-agstudio1", "study-growbox",
-               f"[selfnote][rootchat] front/{setup.desk_topic} #{setup.origin}", FRONT)
+               f"[selfnote][rootchat] front/{setup.desk_topic} #{setup.origin} rel=work", FRONT)
     realm.post("archsage-agstudio1", "study-growbox", "@**archsage** please set it up.", FRONT)
     later.ask()
     later.open_run()
@@ -434,7 +434,7 @@ def test_an_unmentioned_first_request_is_queued_for_the_agent_whose_roster_serve
     realm = Realm()
     study = Study(realm, "growbox", "g3")
     study.ask()
-    realm.post("pj-growbox", "workplan-g3", f"[selfnote][rootchat] front/{study.desk_topic} #{study.origin}", FRONT)
+    realm.post("pj-growbox", "workplan-g3", f"[selfnote][rootchat] front/{study.desk_topic} #{study.origin} rel=work", FRONT)
     post = realm.post("pj-growbox", "workplan-g3", "Mission request: one task.", FRONT)
 
     class Board(Realm):

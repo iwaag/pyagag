@@ -486,7 +486,7 @@ def join_and_record(client: ZulipClient, channel: str, topic: str, out) -> bool:
 _ANCHORED: set[tuple[str, str]] = set()
 
 
-def ensure_rootchat(client: ZulipClient, channel: str, topic: str, out) -> None:
+def ensure_rootchat(client: ZulipClient, channel: str, topic: str, out, relation: str | None = None) -> None:
     """Write this run's root note into the topic, unless it is already there.
 
     `[selfnote][rootchat] <home>` says which of this agent's own
@@ -502,6 +502,16 @@ def ensure_rootchat(client: ZulipClient, channel: str, topic: str, out) -> None:
 
     A note that cannot be written is printed and not fatal. The message still
     matters more than the callback, exactly as the subscription does.
+
+    The note states what the conversation is to home (failsafe p6 ex1,
+    `agag.relations`): `relation` when the caller says (`send --relation`),
+    else from the conversation's real beginning — work for a new one, one
+    this agent began or one opened for work; reference for one that began
+    as somebody else's request (a comment there does not take its work
+    over). A beginning that could not be read is written without a word,
+    which every reader shows as unknown. When the note already exists and
+    the caller names a different relation, the correction is recorded
+    instead (`[selfnote][relation]`).
     """
     home = home_from_environment()
     if home is None or (channel, topic) in _ANCHORED:
@@ -519,7 +529,17 @@ def ensure_rootchat(client: ZulipClient, channel: str, topic: str, out) -> None:
         history = client.topic_history(channel, topic, num_before=ROOTCHAT_LOOKBACK)
         existing = effective_rootchat(history, self_id)
         if existing is None:
-            client.send_to_channel(channel, topic, rootchat_note(home))
+            kind = relation or _default_relation(client, channel, topic, history, self_id)
+            client.send_to_channel(channel, topic, rootchat_note(home, kind))
+            if kind == "reference":
+                print(f"agentchat: #{channel} > {topic} began as somebody else's request: recorded as a reference "
+                      f"from {home} — answers come back there, and its work stays its own request's. If this "
+                      f"conversation's work is now yours to deliver, add --relation work (or `agentchat relation "
+                      f"{channel} {topic} work`)", file=out)
+            elif kind is None:
+                print(f"agentchat: the beginning of #{channel} > {topic} could not be read: its relation to {home} "
+                      f"is unknown and adopts nothing; say it with `agentchat relation {channel} {topic} "
+                      f"work|reference`", file=out)
         elif not _same_request(client, existing, home, self_id):
             # failsafe p5: a root note is written once per topic and the
             # earliest wins, so a second request posting here would have its
@@ -531,10 +551,94 @@ def ensure_rootchat(client: ZulipClient, channel: str, topic: str, out) -> None:
                 "would go there. Open a topic of your own for this request (a name that does not exist yet, "
                 "e.g. with this run's or request's id), or, if this conversation now belongs to your current "
                 f"one, move it first: `agentchat anchor {channel} {topic}`")
+        elif relation is not None:
+            _correct_relation(client, channel, topic, history, self_id, relation, "stated on send", out)
     except (ZulipError, KeyError, TypeError, ValueError) as error:
         print(f"agentchat: could not anchor this topic to {home}: {error}", file=out)
         return
     _ANCHORED.add((channel, topic))
+
+
+def _default_relation(client, channel: str, topic: str, history: list[dict], self_id: int) -> str | None:
+    """What a new root note should say, from the conversation's beginning
+    (`agag.relations.beginning_relation`)."""
+    from .relations import beginning_relation
+
+    if not history:
+        return "work"
+    beginning = None
+    if hasattr(client, "topic_beginning"):
+        try:
+            beginning = list(client.topic_beginning(channel, topic, 5))
+        except ZulipError:
+            beginning = None
+    elif len(history) < ROOTCHAT_LOOKBACK:
+        beginning = history[:5]
+    return beginning_relation(beginning, self_id, history)
+
+
+def _own_note(history: list[dict], self_id: int) -> dict | None:
+    """This agent's effective root note in a conversation, as the message."""
+    from .selfnote import effective_rootchat_note
+
+    return effective_rootchat_note(history, self_id)
+
+
+def _correct_relation(client, channel: str, topic: str, history: list[dict], self_id: int, kind: str, why: str,
+                      out) -> int:
+    """Record `kind` for this agent's root note here, unless it already
+    reads so. Returns the written id (0 when nothing was written)."""
+    from . import relations
+
+    mine = _own_note(history, self_id)
+    if mine is None:
+        raise AgentChatError(f"you have no root note in #{channel} > {topic}: nothing of yours relates it to a "
+                             "conversation (a post from a serving writes one)")
+    current = relations.load(client).of(mine)
+    if current.kind == kind:
+        print(f"#{channel} > {topic} is already {current.describe()}; nothing written", file=out)
+        return 0
+    if current.decided_by == "move":
+        raise AgentChatError(f"#{channel} > {topic} was moved to you on purpose (#{mine.get('id')}): a move is work. "
+                             "Anchor it elsewhere with `agentchat anchor` instead")
+    written = int(client.send_to_channel(channel, topic, relations.correction_note(int(mine["id"]), kind, why)) or 0)
+    print(f"recorded #{channel} > {topic} as {kind} (note #{mine.get('id')}, correction #{written}); it was "
+          f"{current.kind}", file=out)
+    return written
+
+
+def relation_command(client, args, out) -> int:
+    """`agentchat relation <channel> <topic> [work|reference]`."""
+    from . import relations
+    from .selfnote import parse_rootchat, parse_rootchat_moved
+    from .zulip import topic_history_across_resolve
+
+    history = topic_history_across_resolve(client, args.channel, args.topic, 1000)
+    if args.kind is not None:
+        self_id = int(client.whoami()["user_id"])
+        why = " ".join(args.why or []).strip()
+        if args.because:
+            why = f"#{int(args.because)}" + (f" {why}" if why else "")
+        _correct_relation(client, args.channel, args.topic, history, self_id, args.kind, why, out)
+        return 0
+    book = relations.load(client)
+    notes: dict[int, dict] = {}
+    for message in history:
+        sender = int(message.get("sender_id") or 0)
+        if parse_rootchat_moved(message.get("content")) is not None:
+            notes[sender] = message
+        elif parse_rootchat(message.get("content")) is not None and sender not in notes:
+            notes[sender] = message
+    print(f"relations in #{args.channel} > {args.topic}: {len(notes)} root note(s)", file=out)
+    for message in notes.values():
+        found = book.of(message)
+        home = parse_rootchat_moved(message.get("content")) or parse_rootchat(message.get("content"))
+        print(f"  #{found.note} by {message.get('sender_full_name') or found.author}: returns answers to {home}; "
+              f"{found.describe()}", file=out)
+        if found.kind == relations.UNKNOWN:
+            print(f"      unknown adopts nothing: its author records it with `agentchat relation {args.channel} "
+                  f"{args.topic} work|reference`", file=out)
+    return 0
 
 
 def _request_origin(client: ZulipClient, conversation: Conversation, self_id: int, depth: int = 4) -> tuple[str, str]:
@@ -649,6 +753,29 @@ def build_parser() -> argparse.ArgumentParser:
                       help="the request this post answers (repeatable)")
     send.add_argument("--not-answer", dest="not_answer", action="store_true",
                       help="this post answers no request, even the only one open for you")
+    send.add_argument("--relation", choices=("work", "reference"), default=None,
+                      help="what this conversation is to the one you are serving: work you delegate or take over "
+                           "(it becomes part of your request), or a reference (a comment or citation: answers come "
+                           "back to you, its work stays its own request's). Default: work for a new conversation "
+                           "or one opened for work, reference for one that began as somebody else's request")
+
+    relation = subcommands.add_parser(
+        "relation",
+        help="show or correct what a conversation is to the conversations whose root notes are in it",
+        description=(
+            "Without a relation: list every root note in <channel> > <topic> — whose it is, the conversation it "
+            "returns answers to, and whether that makes this conversation work for it (delegation, adoption) or "
+            "only a reference (a citation or comment) — and what recorded it. With `work` or `reference`: record "
+            "that for your own root note there. A relation nothing records reads unknown and adopts nothing. "
+            "Moving the return address is `agentchat anchor`."
+        ),
+    )
+    relation.add_argument("channel")
+    relation.add_argument("topic")
+    relation.add_argument("kind", nargs="?", choices=("work", "reference"), default=None)
+    relation.add_argument("--because", type=int, default=0, metavar="MESSAGE_ID",
+                          help="the post that says why (named in the record)")
+    relation.add_argument("why", nargs="*", default=[], help="why, in a few words")
 
     read = subcommands.add_parser(
         "read",
@@ -1056,7 +1183,7 @@ def _run(args, client: ZulipClient, out) -> int:
         refuse_path_topic(client, args.channel, args.topic)
         refuse_resolved(client, args.channel, args.topic)
         joined = join_and_record(client, args.channel, args.topic, out)
-        ensure_rootchat(client, args.channel, args.topic, out)
+        ensure_rootchat(client, args.channel, args.topic, out, getattr(args, "relation", None))
         message_id = client.send_to_channel(args.channel, args.topic, text)
         print(
             f"sent message {message_id} to #{args.channel} > {args.topic}",
@@ -1065,6 +1192,8 @@ def _run(args, client: ZulipClient, out) -> int:
         if joined:
             print(f"joined #{args.channel}", file=out)
         return 0
+    if args.command == "relation":
+        return relation_command(client, args, out)
     if args.command == "read":
         if args.count < 1:
             raise AgentChatError("--count must be at least 1")

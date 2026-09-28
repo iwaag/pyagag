@@ -448,6 +448,9 @@ def _unit(node: Node, *, root: bool, now: int, health: dict[int, dict], recovery
         # already covers (`agentchat receipt` repairs it).
         "receipt": dict(node.receipt) if node.receipt else None,
         "run": _run_meter(node, execution, now),
+        # Root notes naming this conversation that make theirs no work of it
+        # (failsafe p6 ex1): citations, and relations nothing records.
+        "relations": [dict(row) for row in node.relations],
         "children": children,
     }
     report = health.get(int(node.anchor)) or {}
@@ -681,6 +684,9 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
     if settled and state in ("completed", "cancelled"):
         reason += (f"; {len(settled)} answer(s) settled without a receipt "
                    f"({', '.join('#' + str(r['answer']) for r in settled)}: bookkeeping, `agentchat receipt`)")
+    if result.unknown_relations:
+        reason += (f"; {len(result.unknown_relations)} root note(s) here say no relation and adopt nothing until "
+                   f"their author records one (`agentchat relation`)")
     latest = max((u["latest_work_at"] or 0 for u in units), default=0) or None
     if not source_live:
         reason = f"last known ({source_note or 'the source is not live'}): {reason}"
@@ -691,6 +697,7 @@ def card(result: Trace, *, now: int | None = None, health: dict[int, dict] | Non
         "latest_work_at": latest, "stale": not source_live, "problem": result.problem,
         "stages": stages, "root": root, "settled_receipts": settled,
         "holds": [h.as_dict() for h in holds],
+        "unknown_relations": list(result.unknown_relations),
         "counts": {s: sum(1 for u in units if u["display"]["state"] == s) for s in STATES},
     }
 

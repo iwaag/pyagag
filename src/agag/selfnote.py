@@ -91,6 +91,7 @@ __all__ = [
     "START_TAG",
     "Conversation",
     "effective_rootchat",
+    "effective_rootchat_note",
     "home_from_environment",
     "is_selfnote",
     "last_real_message",
@@ -108,6 +109,8 @@ __all__ = [
     "replaces_note",
     "rootchat_moved_note",
     "rootchat_note",
+    "rootchat_relation",
+    "RELATIONS",
     "served_note",
     "owed_start",
     "parse_start",
@@ -148,6 +151,15 @@ class Conversation:
         return (self.channel, self.topic)
 
 
+#: What a root note means besides its return address (failsafe p6 ex1):
+#: `work` — the conversation is work done for home (a delegation), and home
+#: is its requester; `reference` — a citation or comment: answers still come
+#: back to home, but the conversation, its work and its waits stay its own
+#: request's. A deliberate move (`rootchat-moved`) is always work. A note
+#: without the word is `unknown` unless a relation record says what it is
+#: (`agag.relations`).
+RELATIONS = ("work", "reference")
+_RELATION_SUFFIX = re.compile(r"\s+rel=(?P<relation>[a-z]+)$")
 _ANCHOR_SUFFIX = re.compile(r"^(?P<text>.*?)\s+#(?P<anchor>\d+)$", re.DOTALL)
 
 
@@ -159,6 +171,10 @@ def parse_conversation(value: str | None) -> Conversation | None:
     may not — the same rule the topic workspaces already live by.
     """
     text = (value or "").strip()
+    # A root note's relation word (`rel=work`) is not part of the name.
+    suffix = _RELATION_SUFFIX.search(text)
+    if suffix is not None and suffix.group("relation") in RELATIONS:
+        text = text[: suffix.start()].strip()
     anchor = None
     match = _ANCHOR_SUFFIX.match(text)
     if match is not None:
@@ -220,14 +236,40 @@ def parse_note(content, tag: str) -> str | None:
     return value or None
 
 
-def rootchat_note(home: Conversation) -> str:
-    """The root note for a run serving `home`."""
-    return note(ROOTCHAT_TAG, str(home))
+
+
+def rootchat_note(home: Conversation, relation: str | None = "work") -> str:
+    """The root note for a run serving `home`, saying what the conversation
+    is to it (`RELATIONS`). Writers that open a conversation for the work —
+    a task, an asset run, a setup topic — keep the default."""
+    if relation is None:
+        return note(ROOTCHAT_TAG, str(home))
+    if relation not in RELATIONS:
+        raise ValueError(f"a root note's relation is one of {', '.join(RELATIONS)}, not {relation!r}")
+    return note(ROOTCHAT_TAG, f"{home} rel={relation}")
+
+
+def _split_relation(value: str | None) -> tuple[str | None, str | None]:
+    if value is None:
+        return None, None
+    match = _RELATION_SUFFIX.search(value.strip())
+    if match is None or match.group("relation") not in RELATIONS:
+        return value, None
+    return value.strip()[: match.start()], match.group("relation")
 
 
 def parse_rootchat(content) -> Conversation | None:
     """The conversation a root note names, or None if this is not one."""
-    return parse_conversation(parse_note(content, ROOTCHAT_TAG))
+    return parse_conversation(_split_relation(parse_note(content, ROOTCHAT_TAG))[0])
+
+
+def rootchat_relation(content) -> str | None:
+    """The relation a root note states (`work`/`reference`), `work` for a
+    deliberate move, None for a note that states none (or not a root note)."""
+    if parse_rootchat_moved(content) is not None:
+        return "work"
+    value = parse_note(content, ROOTCHAT_TAG)
+    return _split_relation(value)[1] if value is not None else None
 
 
 def replaces_note(anchor_id: int) -> str:
@@ -496,6 +538,20 @@ def own_rootchat_moved(messages, self_id: int) -> Conversation | None:
         home = parse_rootchat_moved(message.get("content"))
         if home is not None:
             return home
+    return None
+
+
+def effective_rootchat_note(messages, self_id: int) -> dict | None:
+    """The message `effective_rootchat` reads: this bot's newest deliberate
+    move, else its earliest ordinary root note — so a reader can ask what
+    that note's relation is (`agag.relations`)."""
+    messages = list(messages)
+    for message in reversed(messages):
+        if message.get("sender_id") == self_id and parse_rootchat_moved(message.get("content")) is not None:
+            return message
+    for message in messages:
+        if message.get("sender_id") == self_id and parse_rootchat(message.get("content")) is not None:
+            return message
     return None
 
 

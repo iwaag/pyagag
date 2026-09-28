@@ -47,15 +47,15 @@ def world(tmp_path):
     realm.add_channel(7, "work-m1")
     ask = post(realm, "front", "front-a", "Build it.", DEV)
     post(realm, "front", "front-a", ACK, FRONT)
-    post(realm, "pj-x", "workplan-a", f"[selfnote][rootchat] front/front-a #{ask}", FRONT)
+    post(realm, "pj-x", "workplan-a", f"[selfnote][rootchat] front/front-a #{ask} rel=work", FRONT)
     post(realm, "pj-x", "workplan-a", "Mission: build it.", FRONT)
     mission = post(realm, "pj-x", "workplan-a", "[selfnote][mission] x", AUTOLAB)
     post(realm, "pj-x", "workplan-a", "[selfnote][state] started", AUTOLAB)
     task = f"workrun-task1-m{mission}"
     post(realm, "work-m1", task, f"[selfnote][task] {mission}#1", AUTOLAB)
-    post(realm, "work-m1", task, f"[selfnote][rootchat] pj-x/workplan-a #{mission}", AUTOLAB)
+    post(realm, "work-m1", task, f"[selfnote][rootchat] pj-x/workplan-a #{mission} rel=work", AUTOLAB)
     post(realm, "work-m1", task, "# Task 1", AUTOLAB)
-    post(realm, "work-m1", task, f"[selfnote][rootchat] front/front-a #{ask}", FRONT)
+    post(realm, "work-m1", task, f"[selfnote][rootchat] front/front-a #{ask} rel=work", FRONT)
     post(realm, "work-m1", task, "Start task 1.", FRONT)
     post(realm, "work-m1", task, ACK, AUTOLAB)
     answer = post(realm, "work-m1", task, "@**Front** task 1 done", AUTOLAB)
@@ -100,7 +100,7 @@ def test_a_reused_name_does_not_inherit_the_conversation_that_had_it(world):
 
 def test_a_note_without_an_anchor_is_not_given_to_a_later_holder_of_its_name(world):
     realm, mirror, ask, mission, task, _ = world
-    legacy = post(realm, "pj-x", "old-delegate", "[selfnote][rootchat] front/front-a", FRONT)
+    legacy = post(realm, "pj-x", "old-delegate", "[selfnote][rootchat] front/front-a rel=work", FRONT)
     move(realm, mirror, "front", "front-a", "front-a-renamed")
     fresh = post(realm, "front", "front-a", "Something else entirely.", DEV)
     settle(mirror, lambda: mirror.message(fresh) is not None and mirror.message(legacy) is not None)
@@ -114,9 +114,9 @@ def test_a_retired_mission_keeps_its_tasks_and_the_replacement_gets_only_its_own
     realm, mirror, ask, mission, task, _ = world
     legacy_task = "workrun-task0-legacy"
     post(realm, "work-m1", legacy_task, f"[selfnote][task] {mission}#0", AUTOLAB)
-    post(realm, "work-m1", legacy_task, "[selfnote][rootchat] pj-x/workplan-a", AUTOLAB)
+    post(realm, "work-m1", legacy_task, "[selfnote][rootchat] pj-x/workplan-a rel=work", AUTOLAB)
     move(realm, mirror, "pj-x", "workplan-a", f"✔ retired-workplan-a-m{mission}")
-    post(realm, "pj-x", "workplan-a", f"[selfnote][rootchat] front/front-a #{ask}", FRONT)
+    post(realm, "pj-x", "workplan-a", f"[selfnote][rootchat] front/front-a #{ask} rel=work", FRONT)
     post(realm, "pj-x", "workplan-a", f"[selfnote][replaces] {mission}", AUTOLAB)
     replacement = post(realm, "pj-x", "workplan-a", "[selfnote][mission] x2", AUTOLAB)
     settle(mirror, lambda: mirror.message(replacement) is not None)
@@ -191,7 +191,7 @@ def test_a_reused_home_name_inherits_no_threads_and_a_renamed_home_keeps_its_own
     from agag.zulip import remotes_for_home
 
     realm, mirror, ask, mission, task, _ = world
-    legacy = post(realm, "pj-x", "old-thread", "[selfnote][rootchat] front/front-a", FRONT)
+    legacy = post(realm, "pj-x", "old-thread", "[selfnote][rootchat] front/front-a rel=work", FRONT)
     client = NotesClient(realm, FRONT)
     move(realm, mirror, "front", "front-a", "front-a-renamed")
     fresh = post(realm, "front", "front-a", "Something else entirely.", DEV)
@@ -245,7 +245,7 @@ def test_an_answer_in_a_task_its_owner_started_is_owed_to_the_parent_s_requester
     realm, mirror, ask, mission, task, answer = world
     auto = f"workrun-task2-m{mission}"
     post(realm, "work-m1", auto, f"[selfnote][task] {mission}#2", AUTOLAB)
-    post(realm, "work-m1", auto, f"[selfnote][rootchat] pj-x/workplan-a #{mission}", AUTOLAB)
+    post(realm, "work-m1", auto, f"[selfnote][rootchat] pj-x/workplan-a #{mission} rel=work", AUTOLAB)
     post(realm, "work-m1", auto, "Task 2 starts now.", AUTOLAB)
     post(realm, "work-m1", auto, ACK, AUTOLAB)
     report = post(realm, "work-m1", auto, "@**Front** task 2 is committed.", AUTOLAB)
@@ -273,7 +273,7 @@ def test_a_task_its_owner_started_for_this_bot_is_one_of_home_s_threads(world):
     for serial, requester in ((2, (FRONT, "Front")), (3, (DEV, "Developer"))):
         topic = f"workrun-task{serial}-m{mission}"
         post(realm, "work-m1", topic, f"[selfnote][task] {mission}#{serial}", AUTOLAB)
-        post(realm, "work-m1", topic, f"[selfnote][rootchat] pj-x/workplan-a #{mission}", AUTOLAB)
+        post(realm, "work-m1", topic, f"[selfnote][rootchat] pj-x/workplan-a #{mission} rel=work", AUTOLAB)
         post(realm, "work-m1", topic, f"[selfnote][start] #{ask} for {requester[0]} {requester[1]}", AUTOLAB)
 
     class Client(NotesClient):

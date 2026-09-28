@@ -36,7 +36,7 @@ def task_world(final: str, *, extra=None):
     origin = post("front", "front-a", "Please do it.", DEV, 100)
     post("front", "front-a", ACK, FRONT, 101)
     post("work-m1", "workrun-task1-m9", "[selfnote][task] 9#1", AUTOLAB, 110)
-    post("work-m1", "workrun-task1-m9", f"[selfnote][rootchat] front/front-a #{origin}", AUTOLAB, 110)
+    post("work-m1", "workrun-task1-m9", f"[selfnote][rootchat] front/front-a #{origin} rel=work", AUTOLAB, 110)
     post("work-m1", "workrun-task1-m9", "# Task 1", AUTOLAB, 110)
     post("work-m1", "workrun-task1-m9", f"[selfnote][start] #{origin} for {FRONT} Front", AUTOLAB, 111)
     ack = post("work-m1", "workrun-task1-m9", ACK, AUTOLAB, 112)
@@ -119,7 +119,7 @@ def test_an_answer_without_the_mark_still_ends_a_serving():
 
 def test_work_delegated_elsewhere_is_held_by_the_delegate():
     def delegate(post, ack):
-        post("agforge-agstudio1", "assetplan-x", "[selfnote][rootchat] work-m1/workrun-task1-m9 #1004",
+        post("agforge-agstudio1", "assetplan-x", "[selfnote][rootchat] work-m1/workrun-task1-m9 #1004 rel=work",
              AUTOLAB, 250)
         post("agforge-agstudio1", "assetplan-x", "@**agforge-agstudio1** an icon please", AUTOLAB, 250)
         post("agforge-agstudio1", "assetplan-x", ACK, FORGE, 251)
@@ -137,10 +137,10 @@ def test_a_wait_that_goes_round_in_a_circle_is_held_by_nobody():
     post = Posts()
     origin = post("front", "front-a", "Please run it.", DEV, 100)
     post("front", "front-a", ACK, FRONT, 100)
-    post("routine-x", "routinerun-1", f"[selfnote][rootchat] front/front-a #{origin}", FRONT, 101)
+    post("routine-x", "routinerun-1", f"[selfnote][rootchat] front/front-a #{origin} rel=work", FRONT, 101)
     run_ack = post("routine-x", "routinerun-1", ACK, FRONT, 101)
     post("work-m1", "workrun-task1-m9", "[selfnote][task] 9#1", AUTOLAB, 110)
-    post("work-m1", "workrun-task1-m9", f"[selfnote][rootchat] routine-x/routinerun-1 #{run_ack}", FRONT, 110)
+    post("work-m1", "workrun-task1-m9", f"[selfnote][rootchat] routine-x/routinerun-1 #{run_ack} rel=work", FRONT, 110)
     post("work-m1", "workrun-task1-m9", "@**autolab-agstudio1** start", FRONT, 111)
     ack = post("work-m1", "workrun-task1-m9", ACK, AUTOLAB, 112)
     answer = post("work-m1", "workrun-task1-m9", f"@**Front** Done; please accept.\n\n"
@@ -206,14 +206,14 @@ def test_quiet_asks_about_the_deepest_unfinished_unit_only():
     post = Posts()
     origin = post("front", "front-a", "Please do it.", DEV, 100)
     post("front", "front-a", ACK, FRONT, 101)
-    post("pj-x", "workplan-a", f"[selfnote][rootchat] front/front-a #{origin}", FRONT, 102)
+    post("pj-x", "workplan-a", f"[selfnote][rootchat] front/front-a #{origin} rel=work", FRONT, 102)
     post("pj-x", "workplan-a", "@**autolab-agstudio1** plan it", FRONT, 102)
     ack = post("pj-x", "workplan-a", ACK, AUTOLAB, 103)
     mission = post("pj-x", "workplan-a", "[selfnote][mission] x", AUTOLAB, 104)
     planned = post("pj-x", "workplan-a", f"@**Front** planned.\n\n`ag-post intent=report end={ack}`", AUTOLAB, 105)
     post("front", "front-a", f"[selfnote][served] pj-x/workplan-a {planned}", FRONT, 105)
     post("work-m1", "workrun-task1-m9", f"[selfnote][task] {mission}#1", AUTOLAB, 106)
-    post("work-m1", "workrun-task1-m9", f"[selfnote][rootchat] pj-x/workplan-a #{mission}", AUTOLAB, 106)
+    post("work-m1", "workrun-task1-m9", f"[selfnote][rootchat] pj-x/workplan-a #{mission} rel=work", AUTOLAB, 106)
     post("work-m1", "workrun-task1-m9", f"[selfnote][start] #{origin} for {FRONT} Front", AUTOLAB, 107)
     tack = post("work-m1", "workrun-task1-m9", ACK, AUTOLAB, 108)
     post("work-m1", "workrun-task1-m9", f"@**Front** started; still running.\n\n`ag-post end={tack}`", AUTOLAB, 110)

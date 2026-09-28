@@ -73,11 +73,17 @@ requester's acceptance of that result, the mission's acceptance up to its
 shown result, a cancellation above it). Then the unit reads as its record
 does and `Node.receipt` keeps the missing receipt as bookkeeping
 (`settled`), which `agentchat receipt` repairs; a reconciled receipt
-(`[selfnote][receipt]`) covers exactly the answer it names. A root note
-written into a conversation that began as somebody else's request cites it
-and adopts nothing (`_reference`). Every reader — the panel, Observer,
-`agentchat trace` — applies this one rule; nothing is lenient for one of
-them.
+(`[selfnote][receipt]`) covers exactly the answer it names. Every reader —
+the panel, Observer, `agentchat trace` — applies this one rule; nothing is
+lenient for one of them.
+
+A root note hangs its conversation under its home only when its relation is
+**work** (failsafe p6 ex1, `agag.relations`): stated on the note, a
+deliberate move, the author's correction, or the author's legacy record. A
+`reference` (a citation, a comment) or an `unknown` relation adopts nothing;
+the home lists it (`Node.relations`), and an unknown one says how to resolve
+it. No history length decides it: p6 guessed from the first post a read
+happened to show, and at 200 posts a citation became an adoption.
 
 The state is decided from what each message *is*, not from topic names:
 identity notes (`[mission]`, `[task]`, `[asset]`, `[assetrun]`, `[change]`)
@@ -115,6 +121,7 @@ from .selfnote import (
     replaced_anchor,
 )
 from .post import PROGRESS, RESPONSE_REQUEST, is_truncated, parse_post
+from .relations import RELATION_TAG, Relation, Relations
 from .zulip import RESOLVED_TOPIC_PREFIX, ZulipError, ZulipRejected, channel_name
 
 __all__ = [
@@ -252,6 +259,11 @@ class Node:
     #: receipt is bookkeeping `agentchat receipt` can repair). Empty when the
     #: answer was received (served, or reconciled) or nothing is owed.
     receipt: dict = field(default_factory=dict)
+    #: Root notes naming this conversation that do not make their
+    #: conversation its work (failsafe p6 ex1): `{note, channel, topic,
+    #: relation, decided_by, author}` — a citation (`reference`), or an
+    #: `unknown` relation with the command that resolves it.
+    relations: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -266,6 +278,9 @@ class Trace:
     observed_at: int
     calls: int = 0
     problem: str = ""
+    #: Root notes into this tree whose relation nothing records (failsafe p6
+    #: ex1): each adopts nothing until its author says what it is.
+    unknown_relations: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -274,6 +289,7 @@ class Trace:
             "observed_at": self.observed_at,
             "calls": self.calls,
             "problem": self.problem,
+            "unknown_relations": list(self.unknown_relations),
             "root": self.root.as_dict() if self.root else None,
         }
 
@@ -1001,12 +1017,18 @@ class _Link:
     child_topic: str
     home: Conversation
     message: dict
+    relation: Relation | None = None
+
+    @property
+    def adopts(self) -> bool:
+        return self.relation is not None and self.relation.adopts
 
 
-def _links(notes: list[dict]) -> list[_Link]:
+def _links(notes: list[dict], book: Relations | None = None) -> list[_Link]:
     """The effective root notes, per author and conversation: the earliest
     ordinary note anchors, the newest deliberate move replaces it
-    (`effective_rootchat`'s rule, per author)."""
+    (`effective_rootchat`'s rule, per author) — each with its relation
+    (`agag.relations`)."""
     per_author: dict[tuple[str, str, int], tuple[Conversation, dict, bool]] = {}
     for message in notes:
         if message.get("type") not in (None, "stream"):
@@ -1028,9 +1050,10 @@ def _links(notes: list[dict]) -> list[_Link]:
             and (not previous[2] or int(message.get("id") or 0) >= int(previous[1].get("id") or 0))
         ):
             per_author[slot] = (home, message, moved is not None)
+    book = book if book is not None else Relations()
     links = [
         _Link(int(message.get("id") or 0), author, _sender(message), channel, str(message.get("subject") or ""),
-              home, message)
+              home, message, book.of(message))
         for (channel, _, author), (home, message, _) in per_author.items()
     ]
     links.sort(key=lambda link: link.note_id)
@@ -1131,25 +1154,6 @@ def _identity_id(messages: list[dict]) -> int:
     return 0
 
 
-def _reference(link: "_Link", messages: list[dict] | None) -> bool:
-    """Whether a root note was written into a conversation that began as
-    somebody else's request — its first post is speech by another sender,
-    and it carries no identity note — rather than one opened for the work
-    (whose first post is a note: `[task]`, `[mission]`, a root note) or one
-    its author began. Such a note cites the conversation: the author posted
-    there while serving its own home (cleanup, a relay), and it does not make
-    that request, or its work, the author's (failsafe p6, #15357). A
-    deliberate move (`[rootchat-moved]`, `agrun adopt`) always adopts. A
-    history that did not reach the conversation's beginning decides
-    nothing."""
-    if not messages or len(messages) >= HISTORY or parse_rootchat_moved(link.message.get("content")) is not None:
-        return False
-    first = min(messages, key=lambda m: int(m.get("id") or 0))
-    if not is_speech(first) or int(first.get("sender_id") or 0) == link.author:
-        return False
-    return not any(parse_note(m.get("content"), tag) is not None for m in messages for tag in IDENTITY_TAGS)
-
-
 def trace(client, message_id: int, *, now: int | None = None, max_depth: int = MAX_DEPTH) -> Trace:
     """The progress tree below the conversation holding `message_id`.
 
@@ -1175,10 +1179,16 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
 
     notes = reader.notes(ROOTCHAT_TAG)
     moved = reader.notes(MOVED_TAG)
+    records = reader.notes(RELATION_TAG)
     index_problem = ""
     if notes is None:
         notes, index_problem = [], "the root-note search got no answer; delegations are not listed"
-    links = _links(list(notes) + list(moved or []))
+    if records is None:
+        # Without the records a note that states no relation is unknown —
+        # never adopted on a guess (failsafe p6 ex1).
+        index_problem = "; ".join(p for p in (index_problem, "the relation-record search got no answer; "
+                                                             "notes without a stated relation read unknown") if p)
+    links = _links(list(notes) + list(moved or []), Relations(records or []))
 
     root_key = _key(channel, topic)
     #: The name each conversation is read under: where its notes are now.
@@ -1265,12 +1275,12 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
         if home is not None and _key(link.child_channel, link.child_topic) != home:
             below.setdefault(home, []).append(link)
 
-    # The tree, from the root down. A root note written into a conversation
-    # that is a request of its own, while *citing* it, adopts nothing
-    # (`_reference`, failsafe p6: Front cleaning up o11711 posted into
-    # m8519's request, and the note hung that request and its wait under
-    # o11711). Only conversations the tree reaches are read for it.
+    # The tree, from the root down. Only a work relation adopts (failsafe p6
+    # ex1): a citation — Front cleaning up o11711 posted into m8519's
+    # request, #15357 — and a relation nothing records are listed on the
+    # home they name, and hang nothing under it.
     children_of: dict[tuple[str, str], list[_Link]] = {}
+    cited: dict[tuple[str, str], list[_Link]] = {}
     depth_of: dict[tuple[str, str], int] = {root_key: 0}
     frontier = [root_key]
     while frontier:
@@ -1278,7 +1288,8 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
         for home in frontier:
             for link in below.get(home, []):
                 key = _key(link.child_channel, link.child_topic)
-                if _reference(link, read(key)):
+                if not link.adopts:
+                    cited.setdefault(home, []).append(link)
                     continue
                 children_of.setdefault(home, []).append(link)
                 # Where each anchored conversation is shown: under the **most
@@ -1297,7 +1308,7 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
     for link in links:
         key = _key(link.child_channel, link.child_topic)
         home = home_of[link.note_id]
-        if key in depth_of and home is not None and key != home and not _reference(link, read(key)):
+        if key in depth_of and home is not None and key != home and link.adopts:
             notes_of.setdefault(key, []).append(link)
     placement: dict[tuple[str, str], tuple[str, str]] = {}
     anchors_of: dict[tuple[str, str], list[_Link]] = {}
@@ -1368,6 +1379,7 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
                     messages, owner_id, homes, home_messages, key,
                     {requester: name for requester, name, _ in requested})),
             receipt=found.get("receipt") or {},
+            relations=[_relation_row(link) for link in cited.get(key, [])],
             **facts,
         )
         if depth >= max_depth:
@@ -1424,7 +1436,22 @@ def trace(client, message_id: int, *, now: int | None = None, max_depth: int = M
     result.root = build(root_key, 0, set(), True, [], [])
     result.calls = reader.calls
     result.problem = index_problem
+    result.unknown_relations = [row for node in result.nodes() for row in node.relations
+                                if row["relation"] == UNKNOWN_RELATION]
     return result
+
+
+UNKNOWN_RELATION = "unknown"
+
+
+def _relation_row(link: _Link) -> dict:
+    relation = link.relation or Relation(link.note_id, link.author, UNKNOWN_RELATION)
+    row = {"note": link.note_id, "channel": link.child_channel, "topic": link.child_topic,
+           "author": link.author_name, "relation": relation.kind, "decided_by": relation.describe()}
+    if relation.kind == UNKNOWN_RELATION:
+        row["resolve"] = (f"{link.author_name}: `agentchat relation {link.child_channel} {_bare(link.child_topic)} "
+                          f"work|reference --because <post>`")
+    return row
 
 
 def _order_tasks(node: Node) -> None:
@@ -1498,6 +1525,14 @@ def trace_lines(result: Trace) -> list[str]:
             lines.append(f"{pad}{'  ' if depth else ''}  anchored by {', '.join(node.requested_by)}")
         for failure in node.failures:
             lines.append(f"{pad}{'  ' if depth else ''}  ! operation failed: {failure}")
+        for row in node.relations:
+            if row["relation"] == UNKNOWN_RELATION:
+                lines.append(f"{pad}{'  ' if depth else ''}  ? relation unknown: {row['channel']}/{row['topic']} "
+                             f"(note #{row['note']} by {row['author']}) adopts nothing until recorded — "
+                             f"{row['resolve']}")
+            else:
+                lines.append(f"{pad}{'  ' if depth else ''}  cites {row['channel']}/{row['topic']} "
+                             f"(note #{row['note']} by {row['author']}, {row['decided_by']}): its work stays its own")
         for child in node.children:
             walk(child, depth + 1)
 

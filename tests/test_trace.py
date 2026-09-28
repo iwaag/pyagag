@@ -14,10 +14,12 @@ from pathlib import Path
 import pytest
 
 from agag import trace as tracing
+from legacy_relations import migrated
 from agag.agent import SWEEP_ACK
 from agag.zulip import RESOLVED_TOPIC_PREFIX, ZulipError
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "trace_p3.json").read_text("utf-8"))
+FIXTURE["messages"] = migrated(FIXTURE["messages"])
 
 
 def _marks_as_written_today(messages):
@@ -202,7 +204,7 @@ def test_calls_are_counted_and_bounded():
 def _conversation(owner_id=11, requester_id=15, *extra):
     base = [
         {"id": 10, "channel": "c", "topic": "t", "sender_id": requester_id, "sender_full_name": "Front",
-         "sender_realm_str": "", "timestamp": 100, "content": "[selfnote][rootchat] front/front-x #9"},
+         "sender_realm_str": "", "timestamp": 100, "content": "[selfnote][rootchat] front/front-x #9 rel=work"},
         {"id": 11, "channel": "c", "topic": "t", "sender_id": requester_id, "sender_full_name": "Front",
          "sender_realm_str": "", "timestamp": 100, "content": "please do it"},
     ]
@@ -316,7 +318,7 @@ def test_the_mirror_reader_traces_without_a_zulip_call(tmp_path):
     realm.add_channel(6, "pj-x")
     origin = realm.post("front", "front-a", "please build it", sender_id=8, sender_name="Developer")
     realm.post("front", "front-a", SWEEP_ACK, sender_id=15, sender_name="Front")
-    realm.post("pj-x", "workplan-a", "[selfnote][rootchat] front/front-a", sender_id=15, sender_name="Front")
+    realm.post("pj-x", "workplan-a", "[selfnote][rootchat] front/front-a rel=work", sender_id=15, sender_name="Front")
     realm.post("pj-x", "workplan-a", "Mission: build it", sender_id=15, sender_name="Front")
     mirror = Mirror.open(tmp_path / "zulip.env", tmp_path / "mirror", client_factory=realm.facet,
                          log=lambda line: None, start=True, resync_backoff=0.05)

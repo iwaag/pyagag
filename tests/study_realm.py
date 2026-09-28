@@ -86,6 +86,12 @@ class Realm:
             return []
         return [self._shape(r) for r in self.rows if r["channel"] == channel and r["topic"] == bare][-num_before:]
 
+    def topic_beginning(self, channel, topic, num_after=5):
+        bare = topic[len(RESOLVED_TOPIC_PREFIX):] if topic.startswith(RESOLVED_TOPIC_PREFIX) else topic
+        if self._live(channel, bare) != topic:
+            return []
+        return [self._shape(r) for r in self.rows if r["channel"] == channel and r["topic"] == bare][:num_after]
+
     def public_notes(self, tag, num_before=1000):
         marker = f"[selfnote][{tag}]"
         return [self._shape(r) for r in self.rows if r["content"].startswith(marker)][-num_before:]
@@ -130,11 +136,11 @@ class Study:
         r = self.realm
         home = f"front/{self.desk_topic} #{self.origin}"
         if self.beside:
-            r.post(self.plan_channel, self.plan_topic, f"[selfnote][rootchat] {home}", FRONT)
+            r.post(self.plan_channel, self.plan_topic, f"[selfnote][rootchat] {home} rel=work", FRONT)
             self.request = r.post(self.plan_channel, self.plan_topic,
                                   "@**autolab-agstudio1** one bounded mission, please.\n\n"
                                   + line("response_request", to=AUTOLAB, ask="confirmation"), FRONT)
-        r.post(self.run_channel, self.run_topic, f"[selfnote][rootchat] {home}", FRONT)
+        r.post(self.run_channel, self.run_topic, f"[selfnote][rootchat] {home} rel=work", FRONT)
         self.run_open = r.post(self.run_channel, self.run_topic, "Run request: the study routine, once.", FRONT)
         r.post("front", self.desk_topic, "@**Omni Agent** opened the run.\n\n" + line("report", end=self.desk_ack),
                FRONT)
@@ -144,7 +150,7 @@ class Study:
     def run_delegates(self) -> int:
         r = self.realm
         r.post(self.plan_channel, self.plan_topic,
-               f"[selfnote][rootchat] {self.run_channel}/{self.run_topic} #{self.run_open}", FRONT)
+               f"[selfnote][rootchat] {self.run_channel}/{self.run_topic} #{self.run_open} rel=work", FRONT)
         self.request = r.post(self.plan_channel, self.plan_topic,
                               "@**autolab-agstudio1** one bounded mission, please.\n\n"
                               + line("response_request", to=AUTOLAB, ask="confirmation"), FRONT)
@@ -165,7 +171,7 @@ class Study:
         self.task_channel, self.task_topic = f"work-m{self.mission}", f"workrun-task1-m{self.mission}"
         r.post(self.task_channel, self.task_topic, f"[selfnote][task] {self.mission}#1", AUTOLAB)
         r.post(self.task_channel, self.task_topic,
-               f"[selfnote][rootchat] {self.plan_channel}/{self.plan_topic} #{self.mission}", AUTOLAB)
+               f"[selfnote][rootchat] {self.plan_channel}/{self.plan_topic} #{self.mission} rel=work", AUTOLAB)
         tdoc = r.post(self.task_channel, self.task_topic, "# Task 1", AUTOLAB)
         r.post(self.task_channel, self.task_topic, f"[selfnote][doc] {tdoc}", AUTOLAB)
         self.plan_shown = r.post(self.plan_channel, self.plan_topic, "@**Front** the plan is ready.\n\n" + line(
@@ -207,7 +213,7 @@ class Study:
         home = self.desk_topic if self.beside else self.run_topic
         where = "front" if self.beside else self.run_channel
         anchor = self.origin if self.beside else self.run_open
-        r.post(self.task_channel, self.task_topic, f"[selfnote][rootchat] {where}/{home} #{anchor}", FRONT)
+        r.post(self.task_channel, self.task_topic, f"[selfnote][rootchat] {where}/{home} #{anchor} rel=work", FRONT)
         self.agreed = r.post(self.task_channel, self.task_topic, "I agree the result is complete.\n\n"
                              + line("report"), agreement_from)
         close_ack = r.post(self.task_channel, self.task_topic, ACK, AUTOLAB)

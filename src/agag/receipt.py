@@ -171,12 +171,18 @@ def _decision_for(client, history: list[dict], answer: int) -> dict | None:
     owner = int(next((m.get("sender_id") for m in history if m.get("id") == answer), 0) or 0) or None
     own, _ = decisions(history, owner)
     covering = [d for d in own if int(d["covers"]) >= answer]
+    from .relations import load as load_relations
+    from .selfnote import effective_rootchat, effective_rootchat_note
+
+    book = load_relations(client)
     seen = set()
     current = history
     for _ in range(UP):
-        parent = next((parse_rootchat(m.get("content")) for m in current
-                       if owner is not None and int(m.get("sender_id") or 0) == owner
-                       and parse_rootchat(m.get("content")) is not None), None)
+        # The conversation its owner opened it for — by the note every
+        # routing reader follows, and only when that note makes it work
+        # there: a citation hands no decision down (failsafe p6 ex1).
+        mine = effective_rootchat_note(current, owner) if owner is not None else None
+        parent = effective_rootchat(current, owner) if mine is not None and book.of(mine).adopts else None
         if parent is None:
             break
         where = locate(client, parent) or parent

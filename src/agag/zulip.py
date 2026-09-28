@@ -1022,6 +1022,25 @@ class ZulipClient:
         )
         return result.get("messages", [])
 
+    def topic_beginning(self, channel: str, topic: str, num_after: int = 5) -> list[dict]:
+        """The topic's **oldest** posts, oldest first: what a conversation
+        began as, however long it has grown since (failsafe p6 ex1 — a
+        newest-first window of 200 posts cannot say it)."""
+        result = self.call(
+            "GET", "messages",
+            {
+                "anchor": "oldest",
+                "num_before": "0",
+                "num_after": str(num_after),
+                "apply_markdown": "false",
+                "narrow": [
+                    {"operator": "channel", "operand": channel},
+                    {"operator": "topic", "operand": topic},
+                ],
+            },
+        )
+        return result.get("messages", [])
+
     def topic_since(
         self, channel: str, topic: str, after_id: int, num_after: int = 100
     ) -> list[dict]:

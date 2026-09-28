@@ -8,7 +8,9 @@ over, and that a misconfigured environment fails with a message that names
 what was missing rather than a traceback.
 """
 
+import argparse
 import io
+import re
 
 import pytest
 
@@ -506,15 +508,42 @@ def test_a_subscription_that_fails_still_lets_the_message_through(monkeypatch):
 # --- documentation ---------------------------------------------------------
 
 
-def test_help_is_a_usage_document_with_examples(capsys):
+def subcommand_help(name: str) -> str:
+    parser = chat.build_parser()
+    subparsers = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    return subparsers.choices[name].format_help()
+
+
+def test_help_is_an_index_of_every_command(capsys):
+    """agent_guide p1: the top-level help lists every command with what it
+    yields and sends the reader to the command's own help for the rest."""
     with pytest.raises(SystemExit):
         chat.build_parser().parse_args(["--help"])
     text = capsys.readouterr().out
-    assert "Examples" in text
-    for command in ("send", "read", "topics", "channels", "resolve"):
-        assert command in text
+    assert "agentchat <command> --help" in text
+    parser = chat.build_parser()
+    subparsers = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    index = chat.USAGE_DOC.split("Examples")[0]
+    for command in subparsers.choices:
+        assert re.search(rf"(?m)^ {{4}}(\S.*[/|] )?{command} ", index), command
     # Waiting is not a thing an agent does any more, so it is not offered.
     assert "wait" not in text
+
+
+def test_help_says_what_the_board_is_and_that_reading_is_free():
+    """run-0160 looked in its filesystem, was refused, and asked the developer
+    for a channel that `agentchat channels --prefix routine-` would have shown."""
+    doc = " ".join(chat.USAGE_DOC.split())
+    assert "the board" in doc and "pj-<slug>" in doc and "routine-<name>" in doc
+    assert "Reading costs nobody anything" in doc
+    assert "not in your working directory" in doc
+
+
+def test_recheck_help_names_every_verdict():
+    from agag.trace import RECHECK_NEXT
+    doc = subcommand_help("recheck")
+    for verdict in RECHECK_NEXT:
+        assert verdict.upper() in doc, verdict
 
 
 def test_help_names_no_real_agent_channel_or_topic(capsys):
@@ -738,11 +767,11 @@ def test_ordinary_send_still_anchors_automatically(monkeypatch):
 def test_the_tool_documentation_explains_when_to_correct_an_anchor():
     """A powerful command handed over with a bare synopsis is an Unexplained
     Chainsaw; `--help` is this tool's documentation."""
-    doc = chat.USAGE_DOC
-    assert "agentchat anchor" in doc
+    assert "anchor <channel> <topic>" in chat.USAGE_DOC
+    doc = " ".join(subcommand_help("anchor").split())
     assert "ordinary post never changes it" in doc
     assert "not as a habit" in doc
-    assert "nobody is served by it" in doc
+    assert "Nobody is served by it" in doc
 
 
 # --- operation failures are recorded where the request is (robust_workflow p1) ---

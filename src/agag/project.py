@@ -613,7 +613,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agproject", description=__doc__, epilog=EPILOG,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    open_ = sub.add_parser("open", help="create or continue a project or study")
+    raw = argparse.RawDescriptionHelpFormatter
+    open_ = sub.add_parser("open", help="create or continue a project or study", formatter_class=raw, description="""\
+Create pj-<slug> for a project or a study, or continue one whose setup stopped
+half way: the channel, the document posted in it, and autolab asked (in
+`workplan-setup-<slug>`) to prepare the workspace. Safe to repeat: it reports
+what exists and writes only what is missing. Nothing is started by it, and no
+human step is needed for the channel. autolab's answer names you and comes
+back to the conversation you are serving; end your run until it does.
+
+Open one on a decision somebody actually stated; a plan of yours is not one.
+A new study is established through the agent that establishes studies (its
+introduction says so), which runs this for itself.
+
+The document is written first, as a Markdown file in your working directory:
+
+  project, GOAL.md    the final goal; why this is the goal; how to proceed —
+                      the first steps in order and what each needs; what is
+                      deliberately out of scope; the conversation it came from
+  study, the plan     what to explore, why it matters for the desire, the
+                      questions to answer, the intended outputs, and the
+                      conversation it came from
+
+Once autolab has answered, the first work for a project goes to it as a
+`workplan-` topic in the new channel, citing the decision by message id.""")
     open_.add_argument("slug", help="the short name; the channel is pj-<slug> and the internal repository <slug>")
     open_.add_argument("--kind", choices=KINDS, required=True)
     open_.add_argument("--doc", required=True, help="the goal (project) or research plan (study), a Markdown file; "
@@ -621,12 +644,31 @@ def build_parser() -> argparse.ArgumentParser:
     open_.add_argument("--about", default="", help="one line saying what the study or project is about")
     open_.add_argument("--provisioner-env", default=None, help=f"admin credential (default ${PROVISIONER_VARIABLE})")
     open_.add_argument("--json", action="store_true", help="print the resulting state as JSON at the end")
-    status = sub.add_parser("status", help="what exists for pj-<slug> and what remains (read-only)")
+    status = sub.add_parser("status", help="what exists for pj-<slug> and what remains (read-only)",
+                            formatter_class=raw, description="""\
+Report where one project or study stands, read now and writing nothing: its
+kind (project or study), the channel, its document (goal or research plan,
+by message id), the setup request and autolab's answer, the internal
+repository and its revision, and what remains (with --provisioner-env, also
+whether everybody who should be in the channel is). The state is one of
+absent, channel-only, document-posted, setup-pending (asked, no answer yet),
+answered (autolab replied but no workspace is confirmed: read its answer),
+ready or archived.
+
+Use it when a project or study is named and you want to know what it is and
+how far it got, and before deciding to reuse one. Which projects and studies
+exist: `agentchat channels --prefix pj-`. What was said and done in one: read
+its channel's topics (`agentchat topics pj-<slug>`).""")
     status.add_argument("slug")
     status.add_argument("--provisioner-env", default=None,
                         help="also check the subscribers against who should be there (needs the admin credential)")
     status.add_argument("--json", action="store_true")
-    plan = sub.add_parser("plan", help="add a research plan to an existing study's channel")
+    plan = sub.add_parser("plan", help="add a research plan to an existing study's channel",
+                          formatter_class=raw, description="""\
+Post a further research plan (the same contents as a study's first plan) into
+an existing study's channel, as `researchplan-<stem>`. It posts the document
+and nothing else: no research is started. A plan you want to replace is a new
+`plan`, never an edit.""")
     plan.add_argument("slug", help="the study's slug (its channel is pj-<slug>)")
     plan.add_argument("--doc", required=True, help="the research plan, a Markdown file")
     plan.add_argument("--stem", default=None, help="topic stem; the topic becomes researchplan-<stem> (default: the slug)")

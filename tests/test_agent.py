@@ -144,12 +144,23 @@ def test_default_guide_without_prefixes_still_reads(tmp_path):
     assert "{" not in text
 
 
-def test_own_guide_wins_over_the_default(tmp_path):
-    s = spec(tmp_path)
+def test_own_vocabulary_replaces_the_default_one_under_the_fixed_half(tmp_path):
+    s = spec(tmp_path, plan_prefix="testplan-")
     path = s.guides / "entrance_front" / "guide.md"
     path.parent.mkdir(parents=True)
     path.write_text("Say hello.\n", encoding="utf-8")
-    assert entrance.entrance_guide(s) == "Say hello."
+    text = entrance.entrance_guide(s)
+    assert text.endswith("# Where this instance's work is\n\nSay hello.")
+    assert "testplan-" not in text
+    # The fixed half is the same text for every agent (agent_guide p2 step 3).
+    assert "Never `agentchat send` into\nthis channel" in text
+    assert "agent_standardize p10" in text
+
+
+def test_every_entrance_carries_the_fixed_half_once(tmp_path):
+    text = entrance.entrance_guide(spec(tmp_path, plan_prefix="testplan-"))
+    assert text.count("You are this instance's entrance.") == 1
+    assert text.count("posts your answer twice") == 1
 
 
 def context(client=None, history=None) -> TopicContext:

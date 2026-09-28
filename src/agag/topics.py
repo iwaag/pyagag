@@ -29,6 +29,7 @@ address the person it is answering.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace as _replace
+from importlib import resources
 from pathlib import Path
 
 import re
@@ -96,6 +97,9 @@ __all__ = [
     "next_generation",
     "next_record_path",
     "prompt_with_guide",
+    "SHARED_SECTIONS",
+    "shared_sections",
+    "shared_text",
     "threads_placement",
     "omitted_from",
     "requester_of",
@@ -333,8 +337,50 @@ def guide(root: Path, *parts: str) -> str:
     return text
 
 
-def prompt_with_guide(lines, guide_text: str, *, reply: bool = False, continuation: bool = False) -> str:
+#: The sections several agents share (`agag/guides/<name>.md`), in the order
+#: `prompt_with_guide` appends them whatever order a caller names them in.
+SHARED_SECTIONS = ("board", "callback", "refs")
+
+
+def shared_text(name: str) -> str:
+    """One shipped guide file (`agag/guides/<name>.md`), stripped.
+
+    Missing or empty is fatal, as for an agent's own guide: a role told it
+    gets a section and handed nothing would run without it silently.
+    """
+    try:
+        text = resources.files("agag.guides").joinpath(f"{name}.md").read_text(encoding="utf-8").strip()
+    except (OSError, ModuleNotFoundError) as error:
+        raise GuideError(f"cannot read shared guide {name!r}: {error}") from error
+    if not text:
+        raise GuideError(f"shared guide is empty: {name!r}")
+    return text
+
+
+def shared_sections(names) -> str:
+    """The shared sections a role was given, in `SHARED_SECTIONS` order.
+
+    `agent_guide` p2 step 3: text several agents repeated word for word (the
+    `agrefs` pointer in eight guides, the board and the callback in Front's
+    and archsage's) is written once here; each role's own guide keeps only
+    what is its own. An unknown name is a `GuideError`, never ignored.
+    """
+    wanted = list(dict.fromkeys(names or ()))
+    unknown = [name for name in wanted if name not in SHARED_SECTIONS]
+    if unknown:
+        raise GuideError(f"unknown shared guide section(s) {unknown}; known: {', '.join(SHARED_SECTIONS)}")
+    return "\n\n".join(shared_text(name) for name in SHARED_SECTIONS if name in wanted)
+
+
+def prompt_with_guide(lines, guide_text: str, *, reply: bool = False, continuation: bool = False,
+                      shared=()) -> str:
     """Placement lines, then the guide. The whole prompt composition rule.
+
+    `shared` names the sections several agents share (`SHARED_SECTIONS`:
+    `board`, `callback`, `refs`), appended right after the role's own guide.
+    The agent's code chooses them per role, by what the role is granted and
+    does: `board` for a role that holds `agentchat`, `callback` for one that
+    delegates, `refs` for one that holds `agrefs`.
 
     `reply=True` appends the reply mark's description (`agag.reply
     .REPLY_GUIDE`) after the guide — once, for every conversational role,
@@ -343,6 +389,9 @@ def prompt_with_guide(lines, guide_text: str, *, reply: bool = False, continuati
     and keeps its own output contract.
     """
     prompt = "\n".join(lines) + f"\n\n{guide_text}"
+    sections = shared_sections(shared)
+    if sections:
+        prompt = f"{prompt}\n\n{sections}"
     if reply:
         prompt = f"{prompt}\n\n{REPLY_GUIDE}"
         notice = reply_retry_notice()

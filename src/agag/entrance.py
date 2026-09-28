@@ -10,10 +10,14 @@ serving independently; this is that serving, once, for any `AgentSpec`:
   one `roles.front` run with `agentchat` on PATH, transcript kept
   its closing message, posted back by `serve_topic`
 
-What is per-agent is the **guide** — the vocabulary of its own topics. An
-agent with `agent/guides/entrance_front/guide.md` uses that; one without
-gets `DEFAULT_GUIDE` with its `{plan_prefix}`/`{run_prefix}` filled in, which
-is enough to answer what the channel holds and to say where a request goes.
+What is per-agent is the **vocabulary** — where its own work is and what its
+topics are called. Since `agent_guide` p2 the fixed half (answer from the
+chat, ✔ is finished, list afresh every time, close out only when asked, never
+`send` into this channel) is one shipped text, `agag/guides/entrance.md`, and
+an agent's `agent/guides/entrance_front/guide.md` holds only its vocabulary;
+one without gets `entrance_default.md` with its `{plan_prefix}`/`{run_prefix}`
+filled in, which is enough to answer what the channel holds and to say where a
+request goes.
 
 Closing a finished topic out is done **when asked**. That is the contract,
 not a shackle: the entrance answers questions and follows instructions, and
@@ -36,6 +40,7 @@ from .topics import (
     next_record_path,
     prompt_with_guide,
     serve_topic,
+    shared_text,
     topic_workspace,
 )
 from .zulip import ZulipClient, log
@@ -50,21 +55,14 @@ GUIDE_PARTS = ("entrance_front", "guide.md")
 EMPTY_REPLY = "There is nothing in this topic to answer yet."
 NO_ANSWER = "(the run ended without a closing message)"
 
-DEFAULT_GUIDE = """\
-You are this instance's entrance. Answer what the chatlog asks, reading what you need from the chat, and start no work here.
-
-- `agentchat topics <your own channel>` lists your conversations{prefix_line}
-- A name beginning with `✔` is a conversation somebody marked finished.
-- `agentchat read <your own channel> <topic>` for the detail of one of them.
-- Read only the topics the question needs, but list the channel every time: your own earlier answers here are history, not the current state.
-{request_line}
-If you are asked to close out finished work: read those topics to check they really are finished, then `agentchat resolve <your own channel> <topic>` for each. Only when asked.
-
-Your reply is posted into this topic for you. Never `agentchat send` into this channel — doing that posts your answer twice.
-"""
+#: The entrance's fixed half and the vocabulary an agent without a guide of
+#: its own gets (`agag/guides/entrance.md`, `entrance_default.md`).
+ENTRANCE_SECTION = "entrance"
+DEFAULT_VOCABULARY = "entrance_default"
 
 __all__ = [
-    "DEFAULT_GUIDE",
+    "DEFAULT_VOCABULARY",
+    "ENTRANCE_SECTION",
     "EMPTY_REPLY",
     "ENTRANCE_TIMEOUT_SECONDS",
     "EntranceError",
@@ -82,7 +80,7 @@ class EntranceError(RuntimeError):
 
 
 def default_guide(spec: AgentSpec) -> str:
-    """`DEFAULT_GUIDE` with the agent's own topic vocabulary filled in."""
+    """The default vocabulary with the agent's own topic prefixes filled in."""
     plan, run = spec.plan_prefix, spec.run_prefix
     if plan and run:
         prefix_line = f": `{plan}…` is a plan, `{run}…` is its run."
@@ -99,15 +97,18 @@ def default_guide(spec: AgentSpec) -> str:
     else:
         prefix_line = "."
         request_line = ""
-    return DEFAULT_GUIDE.format(prefix_line=prefix_line, request_line=request_line)
+    return shared_text(DEFAULT_VOCABULARY).format(prefix_line=prefix_line, request_line=request_line).strip()
 
 
 def entrance_guide(spec: AgentSpec) -> str:
-    """The agent's own guide when it has one, else the built-in default."""
+    """The fixed half, then the agent's own vocabulary when it has one, else
+    the default one."""
     path = spec.guides.joinpath(*GUIDE_PARTS)
     if path.is_file() and path.read_text(encoding="utf-8").strip():
-        return read_guide(spec.guides, *GUIDE_PARTS)
-    return default_guide(spec)
+        vocabulary = read_guide(spec.guides, *GUIDE_PARTS)
+    else:
+        vocabulary = default_guide(spec)
+    return f"{shared_text(ENTRANCE_SECTION)}\n\n{vocabulary}"
 
 
 def entrance_prompt(spec: AgentSpec, bot_name: str, conversation: str = "") -> str:

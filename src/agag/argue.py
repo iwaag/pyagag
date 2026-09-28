@@ -61,6 +61,8 @@ from .topics import (
     generation_dir,
     next_generation,
     next_record_path,
+    shared_sections,
+    shared_text,
     topic_workspace,
 )
 from .zulip import RESOLVED_TOPIC_PREFIX, ZulipClient, log as default_log
@@ -379,26 +381,8 @@ def open_argue(
 
 
 def participant_guide() -> str:
-    """The guide every participant reads, whoever it is."""
-    return (
-        "This conversation is an *argue*: a human is developing a desire — often vague "
-        "and far-reaching at first — together with every agent in this system. Its "
-        "owner facilitates; the other agents, you included, take part when they are "
-        "named. You have been named, which is a deliberate request for your "
-        "contribution and nothing else.\n\n"
-        "Read the whole conversation first. Then answer what you were asked, in "
-        "service of the human's desire: from what you know, what you can observe and "
-        "what you can do — your own capabilities, your own evidence. Say plainly what "
-        "you do not know or cannot answer; a gap named is more useful than a guess. "
-        "Where you can, name the concrete next steps you see and who or what would be "
-        "needed for them, without starting any work yourself.\n\n"
-        "Your reply is posted into the argue topic as it is. Address the people in "
-        "the conversation in plain words; do not name any agent with an `@**…**` "
-        "mention — not the facilitator who asked you either — unless you actually "
-        "need that agent's contribution, because a mention here is a request that "
-        "costs a run, and the facilitator is served by your reply anyway. Your reply "
-        "is posted for you; do not post it yourself."
-    )
+    """The guide every participant reads, whoever it is (`agag/guides/argue_participant.md`)."""
+    return shared_text("argue_participant")
 
 
 def desire_placement(desire: Desire | None, history: Iterable[dict] | None = None) -> str:
@@ -416,9 +400,11 @@ def desire_placement(desire: Desire | None, history: Iterable[dict] | None = Non
 
 def participant_prompt(
     bot_name: str, conversation: str, role_context: str, *, speaker: str | None = None,
-    desire: Desire | None = None, history: Iterable[dict] | None = None,
+    desire: Desire | None = None, history: Iterable[dict] | None = None, shared=("refs",),
 ) -> str:
-    """Placement, the conversation, the common guide, then the role's own context."""
+    """Placement, the conversation, the common guide, the role's own context,
+    then the shared sections (`agag.topics.SHARED_SECTIONS`; by default the
+    references pointer every participant's `role.md` used to copy)."""
     who = chatlog_placement(bot_name)
     if speaker:
         who += f" You are taking part as the logical participant {speaker!r}; that is the name others use for you here."
@@ -426,6 +412,9 @@ def participant_prompt(
     context = (role_context or "").strip()
     if context:
         lines += ["", "About you, in this conversation:", "", context]
+    sections = shared_sections(shared)
+    if sections:
+        lines += ["", sections]
     # The reply mark, described once (`agag.reply`): a participant's
     # analysis-before-the-answer is its own; only the mark is posted.
     lines += ["", REPLY_GUIDE]
@@ -442,6 +431,7 @@ def participate(
     *,
     spec,
     role_context: str | Callable[[Invitation], str],
+    shared=("refs",),
     role: str = ROLE,
     speaker: str | None = None,
     selectors: Iterable[str | None] | None = None,
@@ -466,7 +456,10 @@ def participate(
     default `run_role` for an agent whose logical speakers need their own
     working directory or tools (archsage's sages), and `role_context` may
     be a function of the invitation for the same reason: each logical
-    speaker is told who it is. The served mark is
+    speaker is told who it is. `shared` names the shared guide sections the
+    run gets after its context (`agag.topics.SHARED_SECTIONS`; by default the
+    references pointer), or is a function of the invitation for a speaker
+    whose tools differ (a sage holds no `agrefs`). The served mark is
     written after everything found has been answered, so a crash midway
     leaves the rest owed rather than silently spent.
 
@@ -525,6 +518,7 @@ def participate(
         prompt = participant_prompt(
             bot_name, conversation_context(rendered), context,
             speaker=label, desire=desire, history=history,
+            shared=shared(invitation) if callable(shared) else shared,
         )
         meta = {"argue": (anchor(history).message_id if anchor(history) else None),
                 "invitation": invitation.message_id, "speaker": label or bot_name}

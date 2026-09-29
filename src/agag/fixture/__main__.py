@@ -1,4 +1,4 @@
-"""`python -m agag.fixture build|consistency|probes|check|rejudge|doors|reader` — see `agag.fixture`."""
+"""`python -m agag.fixture build|consistency|probes|check|rejudge|doors|batch|classify|table|reader` — see `agag.fixture`."""
 
 from __future__ import annotations
 
@@ -29,6 +29,22 @@ def main(argv: list[str] | None = None) -> int:
     doors = sub.add_parser("doors", help="saved scripted trials' sends put through today's responder doors "
                                          "(which runs a door change would have treated differently)")
     doors.add_argument("directories", type=Path, nargs="+", help="trial --out directories, or trees of them")
+    batch = sub.add_parser("batch", help="probes × arms × runs from a plan, interleaved, resumable, behind a budget "
+                                         "gate (agent_guide p3 ex2)")
+    batch.add_argument("plan", type=Path, help="the batch plan (TOML; see agag.fixture.batch)")
+    batch.add_argument("--out", type=Path, required=True, help="<out>/<arm>/<probe>-<n>/ per job")
+    batch.add_argument("--jobs", type=int, default=2, help="jobs at a time (default 2)")
+    batch.add_argument("--probe", action="append", help="only these probes (repeatable)")
+    batch.add_argument("--dry-run", action="store_true", help="pass --dry-run to every driver; no budget read")
+    batch.add_argument("--list", action="store_true", help="print the job order and what is done, run nothing")
+    classify = sub.add_parser("classify", help="one line per run: verdict, delegation class, fd-wr, filesystem "
+                                               "reach, as9")
+    classify.add_argument("out", type=Path)
+    classify.add_argument("--probe", action="append", help="only these probes (repeatable)")
+    table = sub.add_parser("table", help="pass counts per probe and arm with Wilson 95 %% intervals, and the "
+                                         "process measures")
+    table.add_argument("out", type=Path)
+    table.add_argument("--json", type=Path, help="write the table here")
     reader = sub.add_parser("reader", help="the claims reader on fixed cases: right readings and seconds per reading")
     reader.add_argument("--runs", type=int, default=4, help="readings per case (default 4)")
     reader.add_argument("--model", default="", help="another model than the host's claims.toml names")
@@ -41,6 +57,12 @@ def main(argv: list[str] | None = None) -> int:
         return _rejudge(args)
     if args.command == "doors":
         return _doors(args)
+    if args.command == "batch":
+        return _batch(args)
+    if args.command == "classify":
+        return _classify(args)
+    if args.command == "table":
+        return _table(args)
     if args.command == "build":
         print(build_store(args.directory))
         print(f"board version {BOARD_VERSION}")
@@ -116,6 +138,66 @@ def _doors(args) -> int:
         for s in sends:
             print(f"    #{s['id']} {s['channel']} › {s['topic']}: then {s['then']}, now {s['now']}")
     print(f"{changed} run(s) a door change treats differently")
+    return 0
+
+
+def _batch(args) -> int:
+    from .batch import load_plan, run_batch
+
+    plan = load_plan(args.plan)
+    if args.list:
+        for job in plan.jobs():
+            done = (args.out / job.arm / f"{job.probe}-{job.n}" / "outcome.json").is_file()
+            if not args.probe or job.probe in args.probe:
+                print(f"{'done ' if done else '     '}{job.name}")
+        return 0
+    tally = run_batch(plan, args.out, jobs=args.jobs, dry_run=args.dry_run,
+                      only=set(args.probe) if args.probe else None)
+    return 1 if tally["failed"] else 0
+
+
+def _classify(args) -> int:
+    from .tally import load_runs
+
+    runs, cut = load_runs(args.out)
+    for r in sorted(runs, key=lambda r: (r.probe, r.arm, r.n)):
+        if args.probe and r.probe not in args.probe:
+            continue
+        marks = [m for m in (r.cls, "as9" if r.as9 else "", f"fd-wr {r.fdwr}" if r.fdwr else "",
+                             "search" + ("/first" if r.search_first else "") + ("/outside" if r.search_outside else "")
+                             if r.search else "") if m]
+        print(f"{r.arm}/{r.probe}-{r.n}  {'PASS' if r.passed else 'fail'}  s{r.servings} t{r.turns} ${r.cost:.2f}  "
+              + "  ".join(marks))
+        for send in r.sends:
+            print(f"      send → {send}")
+    for path in cut:
+        print(f"CUT {path}")
+    return 0
+
+
+def _table(args) -> int:
+    from .tally import load_runs, table
+
+    runs, cut = load_runs(args.out)
+    found = table(runs)
+    print(f"{'probe':<22} {'arm':<8} pass   interval      turns   cost  failed")
+    for row in found["rates"]:
+        print(f"{row['probe']:<22} {row['arm']:<8} {row['passed']:>2}/{row['runs']:<3} [{row['low']:4.0%}, "
+              f"{row['high']:4.0%}]  {row['turns'][0]:>2}–{row['turns'][1]:<3} ${row['cost']:6.2f}  "
+              f"{','.join(map(str, row['failed']))}")
+    print()
+    for arm, measure in found["process"].items():
+        print(f"{arm:<8} " + "  ".join(f"{name} {m['runs']}/{m['of']} [{m['low']:.0%}, {m['high']:.0%}]"
+                                       for name, m in measure.items()))
+    print()
+    for key, row in found["delegation"].items():
+        print(f"{key:<28} " + "  ".join(f"{cls}={len(ns)} ({','.join(map(str, ns))})"
+                                        for cls, ns in sorted(row["classes"].items()))
+              + (f"  as9={row['as9']}" if row["as9"] else ""))
+    print(f"\n{found['runs']} runs, ${found['cost']:.2f}; {len(cut)} cut (not judged)")
+    if args.json:
+        found["cut"] = [str(p) for p in cut]
+        args.json.write_text(json.dumps(found, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return 0
 
 

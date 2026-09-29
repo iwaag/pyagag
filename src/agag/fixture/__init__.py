@@ -15,6 +15,8 @@ a line naming the fixture.
     python -m agag.fixture check <probe> <reply file>   # a reply against its rule
     python -m agag.fixture rejudge <out-dir>…    # today's rules over saved outcome.json files
     python -m agag.fixture doors <out-dir>…      # saved sends through today's responder doors
+    python -m agag.fixture batch <plan.toml> --out <dir> [--jobs 2]   # a gated, resumable batch
+    python -m agag.fixture classify|table <dir>  # what a batch's runs did; rates with intervals
 
 A probe that delegates is served on an **overlay**, the trial's own copy of
 the board, where `agentchat send` is recorded and answered by the probe's

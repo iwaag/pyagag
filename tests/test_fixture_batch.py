@@ -176,7 +176,14 @@ def test_the_tally_classifies_by_calls(tmp_path):
     fdwr = "Bash: agentchat send pj-growbox workplan-growbox-germination-days --intent report \"また続き\""
     r = save(servings=[{"tool_calls": ["Bash: find / -iname x.md 2>/dev/null", "Bash: agentchat read front x", fdwr]}])
     assert r.fdwr == ["pj-growbox › workplan-growbox-germination-days"]
-    assert r.search and r.search_first and r.search_outside and r.cls == "wrong door"
+    assert r.search and r.search_first and r.search_outside and r.cls == "wrong door" and not r.unasked
+    status = tmp_path / "now" / "guard-status-1"
+    status.mkdir(parents=True)
+    (status / "outcome.json").write_text(json.dumps({"passed": False, "reply": "", "tool_calls": [
+        "Bash: agentchat send work-m20510 workrun-task1-m20510 \"Checking in\""]}), encoding="utf-8")
+    assert classify(status / "outcome.json", set()).unasked
+    r = save(reply="結果が出て、選択肢を尋ねられた場合は電気代を抑える方で答えます。")
+    assert r.as9
     body = "Bash: agentchat send autolab-agstudio1 q --re 5 \"the workplan-growbox-germination-days topic\""
     assert send_target(body) == ("autolab-agstudio1", "q")
     assert wilson(12, 12)[0] > 0.75 and wilson(0, 12)[1] < 0.25

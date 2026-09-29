@@ -22,6 +22,9 @@ Per run:
   run (before p1 10/24, p1 1/24, now 0/24; this reproduces those counts);
   `first` is the subset before the first `agentchat` call, `outside` a
   search whose path leaves the run's own directory (`/…`, `..`, `~`).
+- **unasked send**: a send in a probe that asks for no delegation — on board
+  2 that is a "checking in" post into the running task (p3 ex2: before p1
+  6 of 18 growbox-thing/guard-status runs, p1 and now none).
 - **as9 miss** (delegation probes): nothing sent, and the reply says it will
   answer when the agent asks or reports (p3 ex1 fix delegate-decision 4:
   "選ぶよう求めてきた場合は … 答えます").
@@ -48,8 +51,8 @@ PROPOSES = re.compile(r"(よければ|よろしければ|よろしいですか|�
                       r"進めてよい|しますか[？?]|shall I|should I|want me to)")
 #: A reply that leaves the asking to the other agent: "if autolab asks me
 #: to choose, I will answer" (as9 on running work).
-WAITS_TO_BE_ASKED = re.compile(r"(求めてきた場合|求めてきたら|求められたら|聞かれたら|尋ねられたら|聞いてきたら|"
-                               r"報告してきたら|報告があれば|問い合わせがあれば|確認が来たら|"
+WAITS_TO_BE_ASKED = re.compile(r"((?:聞か|尋ねら|求めら)れた(?:ら|場合)|(?:求めて|聞いて|示して|言って|報告して)きた(?:ら|場合)|"
+                               r"報告があれば|問い合わせがあれば|確認が来たら|"
                                r"if (?:autolab|it) asks|when (?:autolab|it) (?:asks|reports))", re.IGNORECASE)
 SEARCH = re.compile(r"\bfind\s|\btree\b|\bgrep\s+-[a-zA-Z]*r|\bls\s+-[a-zA-Z]*R")
 _VALUED = {"--intent", "--to", "--ask", "--re", "--relation", "--unit", "--evidence"}
@@ -111,6 +114,7 @@ class Run:
     search_first: bool = False
     search_outside: bool = False
     as9: bool = False
+    unasked: bool = False
     sends: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -145,6 +149,7 @@ def classify(path: Path, resolved: set[str] | None = None) -> Run:
             run.search_first |= i < first
             run.search_outside |= _leaves(rest, run.path.resolve())
     reply = saved.get("reply") or ""
+    run.unasked = bool(sends) and probe not in DELEGATION
     if probe in DELEGATION:
         doors = saved.get("doors")
         if doors is not None:
@@ -207,7 +212,8 @@ def table(runs: list[Run]) -> dict:
     for arm in arms:
         rs = [r for r in runs if r.arm == arm]
         measure = {}
-        for name, hit in (("fdwr", lambda r: bool(r.fdwr)), ("search", lambda r: bool(r.search)),
+        for name, hit in (("fdwr", lambda r: bool(r.fdwr)), ("unasked", lambda r: r.unasked),
+                          ("search", lambda r: bool(r.search)),
                           ("search_first", lambda r: r.search_first), ("search_outside", lambda r: r.search_outside)):
             hits = [r for r in rs if hit(r)]
             lo, hi = wilson(len(hits), len(rs))

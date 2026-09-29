@@ -404,6 +404,7 @@ class Trial:
             verdict = {**verdict, "claims": [s.get("claims") for s in servings],
                        "claims_final": _claims_final(servings)}
         result = {**verdict, "marked": servings[-1]["marked"], **self.facts(), "servings": servings, "sends": sends,
+                  "doors": responder.door_log(self.board),
                   "tool_calls": every_call, "reply": servings[-1]["reply"],
                   **record_facts_all(self.records)}
         (self.out / "outcome.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")

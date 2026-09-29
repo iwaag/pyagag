@@ -1,4 +1,4 @@
-"""`python -m agag.fixture build|consistency|probes|check|rejudge|reader` — see `agag.fixture`."""
+"""`python -m agag.fixture build|consistency|probes|check|rejudge|doors|reader` — see `agag.fixture`."""
 
 from __future__ import annotations
 
@@ -26,6 +26,9 @@ def main(argv: list[str] | None = None) -> int:
     rejudge = sub.add_parser("rejudge", help="today's rules over saved outcome.json files (no model runs)")
     rejudge.add_argument("directories", type=Path, nargs="+", help="trial --out directories, or trees of them")
     rejudge.add_argument("--json", type=Path, help="write every result here")
+    doors = sub.add_parser("doors", help="saved scripted trials' sends put through today's responder doors "
+                                         "(which runs a door change would have treated differently)")
+    doors.add_argument("directories", type=Path, nargs="+", help="trial --out directories, or trees of them")
     reader = sub.add_parser("reader", help="the claims reader on fixed cases: right readings and seconds per reading")
     reader.add_argument("--runs", type=int, default=4, help="readings per case (default 4)")
     reader.add_argument("--model", default="", help="another model than the host's claims.toml names")
@@ -36,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
         return _reader(args)
     if args.command == "rejudge":
         return _rejudge(args)
+    if args.command == "doors":
+        return _doors(args)
     if args.command == "build":
         print(build_store(args.directory))
         print(f"board version {BOARD_VERSION}")
@@ -90,6 +95,27 @@ def _rejudge(args) -> int:
     if args.json:
         args.json.write_text(json.dumps([r.as_dict() for r in results], ensure_ascii=False, indent=1) + "\n",
                              encoding="utf-8")
+    return 0
+
+
+def _doors(args) -> int:
+    from .responder import replay
+
+    changed = 0
+    for path in sorted({p for d in args.directories for p in ([d / "outcome.json"] if (d / "outcome.json").is_file()
+                                                               else Path(d).rglob("outcome.json"))}):
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        probe = PROBES.get(saved.get("probe", ""))
+        if probe is None or not probe.script or not (path.parent / "overlay" / "mirror.sqlite").is_file():
+            continue
+        sends = replay(path.parent, probe.script)
+        differs = any(s["changed"] for s in sends)
+        changed += differs
+        print(f"{'CHANGED' if differs else 'same   '} {path.parent}  [{probe.name}, "
+              f"{'pass' if saved.get('passed') else 'fail'}]")
+        for s in sends:
+            print(f"    #{s['id']} {s['channel']} › {s['topic']}: then {s['then']}, now {s['now']}")
+    print(f"{changed} run(s) a door change treats differently")
     return 0
 
 

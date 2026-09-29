@@ -190,14 +190,13 @@ PROBES = {p.name: p for p in (
         text=f"growbox の発芽の調査（{GERMINATION}）、終わるまでにどれくらいかかって、途中で詰まったところはあったのか、autolab に聞いて教えて。",
         script=(Canned("autolab-agstudio1", "{asker} " + GERMINATION + " took 41 minutes of work. It stalled once, for 12 minutes: "
                        "one of the germination papers (source 7) was paywalled, so I replaced it with the authors' "
-                       "open preprint. Answers #{ask}.\n\n`ag-post intent=report re={ask}`",
-                       topics=("workplan-", "workrun-")),),
+                       "open preprint. Answers #{ask}.\n\n`ag-post intent=report re={ask}`"),),
         must=(("41",), ("paywall", "有料", "ペイウォール", "preprint", "プレプリント")),
         tools_must=(("agentchat send",),),
         servings_min=2,
         note=("Front delegates: how the germination mission went is autolab's own experience, on no post of the board (the board has "
               "only its start and its done line). The fixture's responder answers the first post Front sends to "
-              "autolab (a mention, autolab's channel, or a workplan-/workrun- topic) with a canned report; the "
+              "autolab through a door its live listener serves (autolab's channel, or the mission's own workplan-/workrun- topics; responder.AUTOLAB_DOORS) with a canned report; the "
               "conversation is then served again as the listener serves a callback. Passes when the callback "
               "serving reports the 41 minutes and the paywalled source. (A first version asked about the running "
               "control loop; Front read it as a status poll of running work and asked nobody, as board.md's as9 "
@@ -209,10 +208,10 @@ PROBES = {p.name: p for p in (
               "どちらかを選ぶよう聞かれたら、電気代を抑えるほうで答えておいて。"),
         script=(Canned("autolab-agstudio1", "{asker} For the light schedule I need a decision: 16 h a day (faster "
                        "greening, about twice the power) or 12 h a day (slower, half the power). Which one?\n\n"
-                       "`ag-post intent=response_request to=15 ask=decision`", topics=("workplan-", "workrun-")),
+                       "`ag-post intent=response_request to=15 ask=decision`"),
                 Canned("autolab-agstudio1", "{asker} Set: lights 12 h a day (06:00–18:00) in "
                        "`main/control/schedule.toml` at `b41d0e7`; the task goes on with it. Answers #{ask}.\n\n"
-                       "`ag-post intent=report re={ask}`", topics=("workplan-", "workrun-"))),
+                       "`ag-post intent=report re={ask}`")),
         must=(("12 h", "12時間", "12 時間", "12 hours", "12h", "06:00", "b41d0e7"),),
         must_not=("16時間にしました", "16 h a day was set"),
         tools_must=(("agentchat send",),),

@@ -950,3 +950,49 @@ def test_the_record_on_disk_carries_the_execution_option(tmp_path):
     assert record["exec_inherited_from"] == "pj-x/workplan-y"
     # … beside what ran.
     assert (record["profile"], record["harness"]) == ("agy", "agy")
+
+
+# ---- explicit sessions (agent_session p1) ----------------------------------------
+
+
+def test_session_new_and_resume_are_explicit_ids(tmp_path):
+    a = agent(tmp_path / "claude", "claude_code")
+    new = build_argv(a, stream=True, session=harness.Session("new", "11111111-2222-3333-4444-555555555555"))
+    assert new[new.index("--session-id") + 1] == "11111111-2222-3333-4444-555555555555"
+    assert "--resume" not in new and "--continue" not in new
+    resumed = build_argv(a, stream=True, session=harness.Session("resume", "11111111-2222-3333-4444-555555555555"))
+    assert resumed[resumed.index("--resume") + 1] == "11111111-2222-3333-4444-555555555555"
+    assert "--session-id" not in resumed
+
+
+def test_session_refused_where_the_harness_keeps_none(tmp_path):
+    for name in ("codex", "agy", "gemini_cli", "agcode", "fake"):
+        with pytest.raises(ValueError):
+            build_argv(agent(tmp_path / "x", name), session=harness.Session("resume", "abc"))
+
+
+def test_session_selection_only_through_the_argument(tmp_path):
+    a = agent(tmp_path / "claude", "claude_code")
+    for flag in ("--resume", "--continue", "-c", "--session-id"):
+        with pytest.raises(ValueError):
+            build_argv(a, extra_args=[flag])
+    with pytest.raises(ValueError):
+        harness.Session("latest", "x")
+
+
+def test_session_stored_reads_the_claude_store(tmp_path, monkeypatch):
+    store = tmp_path / "cfg"
+    (store / "projects" / "-some-cwd").mkdir(parents=True)
+    (store / "projects" / "-some-cwd" / "abc-1.jsonl").write_text("{}\n")
+    a = agent(tmp_path / "claude", "claude_code", environment={"CLAUDE_CONFIG_DIR": str(store)})
+    assert harness.session_stored(a, "abc-1") is True
+    assert harness.session_stored(a, "abc-2") is False
+    assert harness.session_stored(a, "../x") is False
+    assert harness.session_stored(agent(tmp_path / "c", "codex"), "abc-1") is None
+
+
+def test_stream_session_id_from_init_only():
+    init = json.dumps({"type": "system", "subtype": "init", "session_id": "s-1", "model": "m"})
+    assert harness.stream_session_id(init) == "s-1"
+    assert harness.stream_session_id(json.dumps({"type": "result", "session_id": "s-1"})) is None
+    assert harness.stream_session_id("not json init") is None

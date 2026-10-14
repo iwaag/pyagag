@@ -20,6 +20,36 @@ DEFAULT_OUTPUT_TAIL_CHARS = 2000
 #: The harnesses with a stream-json mode, and so a live-progress seam.
 STREAMING_HARNESSES = ("claude_code", "agcode", "gemini_cli", "agy", "codex")
 
+#: How a harness keeps conversations a later process can continue
+#: (agent_session p1). `explicit`: a session is created under a
+#: caller-chosen id and resumed by exactly that id, never "the latest".
+#: Verified for claude_code 2.1.283 (`--session-id` / `--resume`); codex runs
+#: `--ephemeral`, and agy, gemini_cli and agcode are not verified, so they
+#: are absent: a caller asking them for a session gets a ValueError, never a
+#: silently fresh run.
+SESSION_HARNESSES = {"claude_code": "explicit"}
+
+
+@dataclass(frozen=True)
+class Session:
+    """One harness conversation for one invocation: `new` creates it under
+    `id`, `resume` continues it. claude_code: `--session-id` refuses an id
+    already in use ("Session ID … is already in use", exit 1, no model
+    call), and `--resume` of an id it does not have exits 1 with
+    `error_during_execution` and "No conversation found with session ID"
+    before any tool runs. The id is not scoped to a directory (a resume
+    launched elsewhere finds it), so the caller owns which process may use
+    which id; the CLI itself does not refuse a second concurrent writer."""
+
+    mode: str  # "new" | "resume"
+    id: str
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("new", "resume"):
+            raise ValueError(f"session mode must be new or resume, not {self.mode!r}")
+        if not self.id:
+            raise ValueError("a session names its id")
+
 
 @dataclass
 class HarnessResult:
@@ -49,19 +79,27 @@ def build_argv(
     stream: bool = False,
     cwd: Path | None = None,
     timeout: float | None = None,
+    session: Session | None = None,
 ) -> list[str]:
     """The argv for one run. `cwd` and `timeout` are what run_harness already
     knows; `agy` reads both (its workspace and print deadline are flags, not
     inherited state), `codex` reads `cwd` (`-C`), the other harnesses ignore
-    them."""
+    them. `session` (agent_session p1) creates or resumes an explicit
+    conversation; a harness not in SESSION_HARNESSES refuses it."""
     extra_args = list(extra_args or [])
     if "--model" in extra_args or "-m" in extra_args:
         raise ValueError("model selection belongs to the resolved profile")
+    if session is not None and agent.harness not in SESSION_HARNESSES:
+        raise ValueError(f"harness {agent.harness} keeps no conversation this seam can resume")
+    if {"--resume", "-r", "--session-id", "--continue", "-c"} & set(extra_args):
+        raise ValueError("session selection belongs to the session argument")
     if agent.harness == "claude_code":
         # claude_code refuses `-p --output-format stream-json` without
         # --verbose, so the two flags travel together.
         output = ["stream-json", "--verbose"] if stream else ["json"]
         argv = [agent.command, "-p", "--output-format", *output, "--model", agent.native_model]
+        if session is not None:
+            argv += ["--session-id" if session.mode == "new" else "--resume", session.id]
         for directory in add_dirs or []:
             argv += ["--add-dir", directory]
         if allowed_tools:
@@ -160,6 +198,43 @@ def build_argv(
     if agent.harness == "fake":
         return [agent.command, *extra_args]
     raise ValueError(f"unsupported harness: {agent.harness}")
+
+
+def session_stored(agent: ResolvedAgent, session_id: str) -> bool | None:
+    """Whether this host's harness store holds the conversation `session_id`
+    (agent_session p1): True, False, or None when the harness keeps none this
+    seam knows. claude_code files one JSONL transcript per session under
+    `<config dir>/projects/<cwd slug>/<id>.jsonl`; the config directory is
+    `CLAUDE_CONFIG_DIR` (from the profile's environment or this process),
+    else `~/.claude`. A transcript appears once the CLI has read its prompt:
+    a process killed before that leaves none, and then resuming fails with
+    "No conversation found"."""
+    if agent.harness != "claude_code":
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", session_id):
+        return False
+    base = agent.environment.get("CLAUDE_CONFIG_DIR") or os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
+    projects = Path(base) / "projects"
+    if not projects.is_dir():
+        return False
+    return any(projects.glob(f"*/{session_id}.jsonl"))
+
+
+def stream_session_id(line: str) -> str | None:
+    """The session id a stream-json line announces, if it is the harness's
+    init event (claude_code: `{"type": "system", "subtype": "init",
+    "session_id": …}`, the first line of every invocation, new or resumed)."""
+    line = line.strip()
+    if not line.startswith("{") or '"init"' not in line:
+        return None
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "init":
+        sid = event.get("session_id")
+        return sid if isinstance(sid, str) and sid else None
+    return None
 
 
 #: agy's own print deadline sits this far under run_harness's timeout, so the
@@ -715,6 +790,7 @@ def run_harness(
     transcript_path: Path | None = None,
     output_tail_chars: int = DEFAULT_OUTPUT_TAIL_CHARS,
     live=None,
+    session: Session | None = None,
 ) -> HarnessResult:
     """Launch, extract, and normalize one harness process without fallback.
 
@@ -761,6 +837,7 @@ def run_harness(
             stream=stream,
             cwd=cwd,
             timeout=timeout,
+            session=session,
         )
     except ValueError as error:
         return HarnessResult(str(error), -1, {**meta, "outcome": "failed", "failure": str(error)})

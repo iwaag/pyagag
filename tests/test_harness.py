@@ -753,6 +753,7 @@ def test_codex_argv_shape_sandbox_and_effort(tmp_path):
     argv = build_argv(resolved, add_dirs=["/extra"], allowed_tools="Read,Glob", cwd=Path("/w"), timeout=1200)
     assert argv == [
         str(tmp_path / "codex"), "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--color", "never",
+        "-c", "features.shell_snapshot=false",
         "-C", "/w", "-m", "gpt-5.4-mini", "-c", 'model_reasoning_effort="low"',
         "-s", "danger-full-access", "--add-dir", "/extra", "-",
     ]
@@ -769,7 +770,7 @@ def test_codex_argv_shape_sandbox_and_effort(tmp_path):
     assert both[both.index("-s") + 1] == "danger-full-access"
     # No cwd, no effort: neither flag is invented.
     bare = build_argv(codex_agent(tmp_path / "codex", effort=None))
-    assert "-C" not in bare and "-c" not in bare and bare[-1] == "-"
+    assert "-C" not in bare and not any(a.startswith("model_reasoning_effort") for a in bare) and bare[-1] == "-"
     with pytest.raises(ValueError):
         build_argv(resolved, extra_args=["-m", "other"])
 

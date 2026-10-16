@@ -180,9 +180,14 @@ def build_argv(
         # a config value, taken from the model's declared options
         # (`[models."openai/<name>"] effort = "low"`); the `-c` value is
         # parsed as TOML, hence the inner quotes. The `allowed_tools` grant
-        # has no Codex spelling and is not passed.
+        # has no Codex spelling and is not passed. `features.shell_snapshot
+        # =false`: the snapshot replays the person's interactive shell
+        # (~/.zshrc) over the environment the caller set, so a PATH entry
+        # there won over the executor's `wfe` and the first WFE run on codex
+        # recorded nothing (project_migration p6 ex2, 2026-10-17).
         argv = [
             agent.command, "exec", "--json", "--skip-git-repo-check", "--ephemeral", "--color", "never",
+            "-c", "features.shell_snapshot=false",
         ]
         if cwd is not None:
             argv += ["-C", str(cwd)]
